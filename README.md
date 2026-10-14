@@ -88,10 +88,11 @@ cargo test --workspace
 cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.36
 ```
 
-CI builds the x86_64 and aarch64 binaries natively on GitHub's `ubuntu-24.04` and
-`ubuntu-24.04-arm` runners and attaches `bobview-x86_64-linux.tar.gz` and
+CI builds the x86_64 and aarch64 binaries on GitHub's `ubuntu-24.04` and
+`ubuntu-24.04-arm` runners with `cargo zigbuild` and attaches `bobview-x86_64-linux.tar.gz` and
 `bobview-aarch64-linux.tar.gz` to a GitHub Release for every `v*` tag. They
-need glibc 2.39 or newer (Ubuntu 24.04+, Debian 13+).
+are linked against glibc 2.28, so they run on RHEL 8+, Ubuntu 20.04+ and
+Debian 10+.
 
 ## Licences
 
