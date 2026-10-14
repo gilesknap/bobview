@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 NOTICE_PREFIXES = ("LICENSE", "LICENCE", "COPYING", "COPYRIGHT", "NOTICE", "UNLICENSE", "THIRD_PARTY")
 EMBEDDED_FONTS = [
     ("Liberation Sans 2.1.5 (embedded in bobview)", ROOT / "crates/bobview/fonts/LICENSE"),
+    ("Noto Sans Math, symbol subset (embedded in bobview)", ROOT / "crates/bobview/fonts/LICENSE-NotoSansMath"),
 ]
 
 meta = json.loads(

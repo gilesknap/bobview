@@ -82,8 +82,21 @@ pub fn install_fonts(ctx: &egui::Context) {
         "liberation-italic",
         include_bytes!("../fonts/LiberationSans-Italic.ttf"),
     );
+    // Symbols that neither Liberation nor egui's fonts have, such as the
+    // '⧉' pvi puts on buttons that open a display (Phoebus finds them
+    // through system font fallback).
+    let symbols = add(
+        "noto-math-symbols",
+        include_bytes!("../fonts/NotoSansMath-Symbols.ttf"),
+    );
 
-    let fallback = fonts.families[&FontFamily::Proportional].clone();
+    let mut fallback = fonts.families[&FontFamily::Proportional].clone();
+    fallback.push(symbols.clone());
+    fonts
+        .families
+        .entry(FontFamily::Monospace)
+        .or_default()
+        .push(symbols);
     let with = |first: String| {
         std::iter::once(first)
             .chain(fallback.iter().cloned())
