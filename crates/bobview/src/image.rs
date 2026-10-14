@@ -15,8 +15,9 @@ use crate::widgets::{bg, fg, fill, outline, placeholder, text_in};
 const MAX_SIDE: usize = 2048;
 
 pub struct ImageCache {
-    /// Identifies the frame on the texture (unique id plus data pointer).
-    key: (i64, usize),
+    /// Identifies what is on the texture: frame unique id, data pointer and
+    /// the display settings, so a rule changing the colour map redraws it.
+    key: (i64, usize, String),
     texture: TextureHandle,
     /// The data range the colours were scaled to.
     range: (f64, f64),
@@ -74,15 +75,18 @@ fn image_of(w: &Widget, s: &PvState) -> Option<Arc<Image>> {
     let shaped = |data: ImageData| {
         let width = w.i64("data_width").unwrap_or(100).max(1) as usize;
         let height = w.i64("data_height").unwrap_or(100).max(1) as usize;
-        (data.len() >= width * height).then(|| {
-            Arc::new(Image {
-                width,
-                height,
-                rgb: false,
-                data,
-                unique_id: 0,
+        width
+            .checked_mul(height)
+            .is_some_and(|n| data.len() >= n)
+            .then(|| {
+                Arc::new(Image {
+                    width,
+                    height,
+                    rgb: false,
+                    data,
+                    unique_id: 0,
+                })
             })
-        })
     };
     match &s.value {
         Value::Image(img) => Some(img.clone()),
@@ -261,8 +265,9 @@ pub fn draw(ui: &mut egui::Ui, node: &mut Node, state: Option<&PvState>, rect: R
             w.f64("maximum").unwrap_or(255.0),
         )
     });
-    let key = (img.unique_id, data_key(&img));
-    if node.image.as_ref().map(|c| c.key) != Some(key) {
+    let settings = format!("{:?}{unsigned}{fixed:?}", w.get("color_map"));
+    let key = (img.unique_id, data_key(&img), settings);
+    if node.image.as_ref().map(|c| &c.key) != Some(&key) {
         let (pixels, range) = colorize(&img, unsigned, fixed, &lut);
         match node.image.as_mut() {
             Some(cache) => {

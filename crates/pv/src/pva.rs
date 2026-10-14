@@ -236,8 +236,10 @@ fn image(st: &PvStructure) -> Option<Image> {
         [w] => (*w, 1, false),
         _ => return None,
     };
-    let needed = width * height * if rgb { 3 } else { 1 };
-    if width == 0 || height == 0 || data.len() < needed {
+    let needed = width
+        .checked_mul(height)
+        .and_then(|n| n.checked_mul(if rgb { 3 } else { 1 }));
+    if width == 0 || height == 0 || needed.is_none_or(|n| data.len() < n) {
         log::debug!(
             "image dimensions {dims:?} do not match {} samples",
             data.len()
