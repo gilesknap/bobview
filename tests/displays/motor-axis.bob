@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- One motor record axis; embedded by motors.bob with macros P and M -->
+<display version="2.0.0">
+  <name>Motor $(M)</name>
+  <width>400</width>
+  <height>170</height>
+  <macros>
+    <P>BL01T-MO-SIMC-01:</P>
+    <M>M1</M>
+  </macros>
+  <widget type="group" version="3.0.0">
+    <name>$(P)$(M)</name>
+    <width>400</width>
+    <height>170</height>
+    <widget type="textupdate" version="2.0.0">
+      <name>Desc</name>
+      <pv_name>$(P)$(M).DESC</pv_name>
+      <width>180</width>
+      <transparent>true</transparent>
+      <font>
+        <font name="Default Bold" family="Liberation Sans" style="BOLD" size="14.0"></font>
+      </font>
+    </widget>
+    <widget type="label" version="2.0.0">
+      <name>LMoving</name>
+      <text>Moving</text>
+      <x>200</x>
+      <width>60</width>
+    </widget>
+    <widget type="led" version="2.0.0">
+      <name>Moving</name>
+      <pv_name>$(P)$(M).MOVN</pv_name>
+      <x>255</x>
+      <on_color>
+        <color name="Attention" red="255" green="160" blue="0"></color>
+      </on_color>
+    </widget>
+    <widget type="label" version="2.0.0">
+      <name>LDone</name>
+      <text>Done</text>
+      <x>285</x>
+      <width>40</width>
+    </widget>
+    <widget type="led" version="2.0.0">
+      <name>Done</name>
+      <pv_name>$(P)$(M).DMOV</pv_name>
+      <x>330</x>
+    </widget>
+    <widget type="label" version="2.0.0">
+      <name>LSet</name>
+      <text>Setpoint</text>
+      <y>30</y>
+      <width>80</width>
+    </widget>
+    <widget type="textentry" version="3.0.0">
+      <name>Set</name>
+      <pv_name>$(P)$(M)</pv_name>
+      <x>80</x>
+      <y>30</y>
+      <width>130</width>
+      <horizontal_alignment>2</horizontal_alignment>
+    </widget>
+    <widget type="label" version="2.0.0">
+      <name>LRbv</name>
+      <text>Readback</text>
+      <y>58</y>
+      <width>80</width>
+    </widget>
+    <widget type="textupdate" version="2.0.0">
+      <name>Rbv</name>
+      <pv_name>$(P)$(M).RBV</pv_name>
+      <x>80</x>
+      <y>58</y>
+      <width>130</width>
+      <horizontal_alignment>2</horizontal_alignment>
+      <font>
+        <font name="Default Bold" family="Liberation Sans" style="BOLD" size="14.0"></font>
+      </font>
+    </widget>
+    <widget type="action_button" version="3.0.0">
+      <name>Stop</name>
+      <pv_name>$(P)$(M).STOP</pv_name>
+      <actions>
+        <action type="write_pv">
+          <pv_name>$(pv_name)</pv_name>
+          <value>1</value>
+          <description>STOP</description>
+        </action>
+      </actions>
+      <x>230</x>
+      <y>30</y>
+      <width>130</width>
+      <height>48</height>
+      <background_color>
+        <color name="STOP" red="255" green="0" blue="0"></color>
+      </background_color>
+      <foreground_color>
+        <color name="Background" red="255" green="255" blue="255"></color>
+      </foreground_color>
+      <font>
+        <font name="Header 3" family="Liberation Sans" style="BOLD" size="16.0"></font>
+      </font>
+    </widget>
+    <widget type="action_button" version="3.0.0">
+      <name>TWR</name>
+      <pv_name>$(P)$(M).TWR</pv_name>
+      <actions>
+        <action type="write_pv">
+          <pv_name>$(pv_name)</pv_name>
+          <value>1</value>
+          <description>&lt; Tweak</description>
+        </action>
+      </actions>
+      <y>90</y>
+      <width>80</width>
+    </widget>
+    <widget type="textentry" version="3.0.0">
+      <name>TWV</name>
+      <pv_name>$(P)$(M).TWV</pv_name>
+      <x>85</x>
+      <y>95</y>
+      <width>110</width>
+      <horizontal_alignment>1</horizontal_alignment>
+    </widget>
+    <widget type="action_button" version="3.0.0">
+      <name>TWF</name>
+      <pv_name>$(P)$(M).TWF</pv_name>
+      <actions>
+        <action type="write_pv">
+          <pv_name>$(pv_name)</pv_name>
+          <value>1</value>
+          <description>Tweak &gt;</description>
+        </action>
+      </actions>
+      <x>200</x>
+      <y>90</y>
+      <width>80</width>
+    </widget>
+    <widget type="progressbar" version="2.0.0">
+      <name>Pos</name>
+      <pv_name>$(P)$(M).RBV</pv_name>
+      <x>290</x>
+      <y>95</y>
+      <width>70</width>
+      <height>20</height>
+    </widget>
+  </widget>
+</display>

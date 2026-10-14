@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Stand-in for the PVI-generated engineering screen that demo.bob links to -->
+<display version="2.0.0">
+  <name>bl01t-mo-sim-01</name>
+  <width>420</width>
+  <height>400</height>
+  <widget type="embedded" version="2.0.0">
+    <name>Content</name>
+    <file>../../motors.bob</file>
+    <macros>
+      <P>BL01T-MO-SIMC-01:</P>
+    </macros>
+    <width>420</width>
+    <height>400</height>
+  </widget>
+</display>

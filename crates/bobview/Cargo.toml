@@ -7,4 +7,7 @@ license.workspace = true
 [dependencies]
 eframe = { version = "0.36.2", default-features = false, features = ["glow", "wayland", "x11", "default_fonts"] }
 egui = "0.36.2"
+log = "0.4.34"
+bob = { path = "../bob" }
 pv = { path = "../pv" }
+png = "0.18.1"
