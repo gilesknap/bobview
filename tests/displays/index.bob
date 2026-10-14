@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- bobview test displays: start here -->
+<display version="2.0.0">
+  <name>bobview test displays</name>
+  <width>420</width>
+  <height>330</height>
+  <widget type="label" version="2.0.0">
+    <name>Title</name>
+    <text>bobview test displays</text>
+    <width>420</width>
+    <height>30</height>
+    <font>
+      <font name="Header 1" family="Liberation Sans" style="BOLD" size="22.0"></font>
+    </font>
+    <horizontal_alignment>1</horizontal_alignment>
+  </widget>
+  <widget type="label" version="2.0.0">
+    <name>Hint</name>
+    <text>Screens for the epics-containers example-services BL01T IOCs. Run bobview-testioc on this machine, or point EPICS_CA_ADDR_LIST at the real IOCs.</text>
+    <x>10</x>
+    <y>34</y>
+    <width>400</width>
+    <height>40</height>
+    <font>
+      <font name="Comment" family="Liberation Sans" style="ITALIC" size="12.0"></font>
+    </font>
+  </widget>
+  <widget type="action_button" version="3.0.0">
+    <name>Overview</name>
+    <actions>
+      <action type="open_display">
+        <file>demo.bob</file>
+        <target>replace</target>
+        <description>Example IOCs overview (demo.bob)</description>
+      </action>
+    </actions>
+    <x>10</x>
+    <y>84</y>
+    <width>260</width>
+  </widget>
+  <widget type="action_button" version="3.0.0">
+    <name>EaTest</name>
+    <actions>
+      <action type="open_display">
+        <file>ea-test.bob</file>
+        <target>replace</target>
+        <description>bl01t-ea-test-01: A + B = SUM</description>
+      </action>
+    </actions>
+    <x>10</x>
+    <y>124</y>
+    <width>260</width>
+  </widget>
+  <widget type="action_button" version="3.0.0">
+    <name>Motors</name>
+    <actions>
+      <action type="open_display">
+        <file>motors.bob</file>
+        <target>replace</target>
+        <description>bl01t-mo-sim-01: motors</description>
+      </action>
+    </actions>
+    <x>10</x>
+    <y>164</y>
+    <width>260</width>
+  </widget>
+  <widget type="action_button" version="3.0.0">
+    <name>Camera</name>
+    <actions>
+      <action type="open_display">
+        <file>camera.bob</file>
+        <target>replace</target>
+        <description>bl01t-di-cam-01: camera</description>
+      </action>
+    </actions>
+    <x>10</x>
+    <y>204</y>
+    <width>260</width>
+  </widget>
+  <widget type="action_button" version="3.0.0">
+    <name>Gallery</name>
+    <actions>
+      <action type="open_display">
+        <file>widgets.bob</file>
+        <target>replace</target>
+        <description>Widget gallery (no IOC needed)</description>
+      </action>
+    </actions>
+    <x>10</x>
+    <y>244</y>
+    <width>260</width>
+  </widget>
+  <widget type="textupdate" version="2.0.0">
+    <name>Sum</name>
+    <pv_name>bl01t:SUM</pv_name>
+    <x>290</x>
+    <y>129</y>
+    <width>120</width>
+    <precision>2</precision>
+    <horizontal_alignment>1</horizontal_alignment>
+  </widget>
+  <widget type="textupdate" version="2.0.0">
+    <name>M1</name>
+    <pv_name>BL01T-MO-SIMC-01:M1.RBV</pv_name>
+    <x>290</x>
+    <y>169</y>
+    <width>120</width>
+    <horizontal_alignment>1</horizontal_alignment>
+  </widget>
+  <widget type="textupdate" version="2.0.0">
+    <name>Frames</name>
+    <pv_name>BL01T-DI-CAM-01:DET:ArrayCounter_RBV</pv_name>
+    <x>290</x>
+    <y>209</y>
+    <width>120</width>
+    <horizontal_alignment>1</horizontal_alignment>
+  </widget>
+  <widget type="label" version="2.0.0">
+    <name>Clock</name>
+    <text>sim://sine →</text>
+    <x>10</x>
+    <y>292</y>
+    <width>100</width>
+  </widget>
+  <widget type="progressbar" version="2.0.0">
+    <name>Sine</name>
+    <pv_name>sim://sine(0, 100, 0.1)</pv_name>
+    <x>110</x>
+    <y>290</y>
+    <width>300</width>
+    <height>24</height>
+  </widget>
+</display>

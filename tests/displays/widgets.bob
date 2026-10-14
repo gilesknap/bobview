@@ -1,0 +1,342 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Widget gallery: loc:// and sim:// PVs only, no IOC needed -->
+<display version="2.0.0">
+  <name>Widget gallery</name>
+  <width>620</width>
+  <height>560</height>
+  <widget type="label" version="2.0.0">
+    <name>Title</name>
+    <text>Widget gallery (loc:// and sim:// PVs)</text>
+    <width>620</width>
+    <height>30</height>
+    <font>
+      <font name="Header 2" family="Liberation Sans" style="BOLD" size="18.0"></font>
+    </font>
+    <horizontal_alignment>1</horizontal_alignment>
+  </widget>
+  <widget type="group" version="3.0.0">
+    <name>Monitors</name>
+    <y>36</y>
+    <width>300</width>
+    <height>250</height>
+    <widget type="label" version="2.0.0">
+      <name>L1</name>
+      <text>sine</text>
+      <width>70</width>
+    </widget>
+    <widget type="textupdate" version="2.0.0">
+      <name>Sine</name>
+      <pv_name>sim://sine(-10, 10, 0.1)</pv_name>
+      <x>70</x>
+      <width>80</width>
+      <precision>2</precision>
+      <horizontal_alignment>2</horizontal_alignment>
+    </widget>
+    <widget type="progressbar" version="2.0.0">
+      <name>Bar</name>
+      <pv_name>sim://sine(-10, 10, 0.1)</pv_name>
+      <x>160</x>
+      <width>110</width>
+    </widget>
+    <widget type="label" version="2.0.0">
+      <name>L2</name>
+      <text>ramp</text>
+      <y>30</y>
+      <width>70</width>
+    </widget>
+    <widget type="textupdate" version="2.0.0">
+      <name>Ramp</name>
+      <pv_name>sim://ramp(0, 255, 1, 0.1)</pv_name>
+      <x>70</x>
+      <y>30</y>
+      <width>80</width>
+      <precision>0</precision>
+      <horizontal_alignment>2</horizontal_alignment>
+    </widget>
+    <widget type="byte_monitor" version="2.0.0">
+      <name>Bits</name>
+      <pv_name>sim://ramp(0, 255, 1, 0.1)</pv_name>
+      <x>160</x>
+      <y>30</y>
+      <width>110</width>
+    </widget>
+    <widget type="label" version="2.0.0">
+      <name>L3</name>
+      <text>flipflop</text>
+      <y>60</y>
+      <width>70</width>
+    </widget>
+    <widget type="led" version="2.0.0">
+      <name>Flip</name>
+      <pv_name>sim://flipflop(0.5)</pv_name>
+      <x>70</x>
+      <y>60</y>
+    </widget>
+    <widget type="led" version="2.0.0">
+      <name>FlipSquare</name>
+      <pv_name>sim://flipflop(1)</pv_name>
+      <x>100</x>
+      <y>60</y>
+      <square>true</square>
+      <off_color>
+        <color red="80" green="80" blue="80"></color>
+      </off_color>
+      <on_color>
+        <color name="MAJOR" red="255" green="0" blue="0"></color>
+      </on_color>
+    </widget>
+    <widget type="label" version="2.0.0">
+      <name>L4</name>
+      <text>tank / thermometer / noise</text>
+      <y>90</y>
+      <width>270</width>
+    </widget>
+    <widget type="tank" version="2.0.0">
+      <name>Tank</name>
+      <pv_name>sim://sine(0, 100, 0.2)</pv_name>
+      <y>115</y>
+      <width>60</width>
+      <height>100</height>
+    </widget>
+    <widget type="thermometer" version="2.0.0">
+      <name>Thermo</name>
+      <pv_name>sim://ramp(0, 100, 5, 0.2)</pv_name>
+      <x>80</x>
+      <y>115</y>
+      <width>30</width>
+      <height>100</height>
+    </widget>
+    <widget type="textupdate" version="2.0.0">
+      <name>Noise</name>
+      <pv_name>sim://noise(0, 1, 0.5)</pv_name>
+      <x>130</x>
+      <y>115</y>
+      <width>140</width>
+      <precision>4</precision>
+      <rules>
+        <rule name="hi" prop_id="foreground_color" out_exp="false">
+          <exp bool_exp="pv0 &gt; 0.5">
+            <value>
+              <color name="MAJOR" red="255" green="0" blue="0"></color>
+            </value>
+          </exp>
+          <pv_name>sim://noise(0, 1, 0.5)</pv_name>
+        </rule>
+      </rules>
+    </widget>
+    <widget type="label" version="2.0.0">
+      <name>L5</name>
+      <text>red when above 0.5</text>
+      <x>130</x>
+      <y>140</y>
+      <width>140</width>
+      <font>
+        <font name="Comment" family="Liberation Sans" style="ITALIC" size="12.0"></font>
+      </font>
+    </widget>
+  </widget>
+  <widget type="group" version="3.0.0">
+    <name>Controls (loc://)</name>
+    <x>310</x>
+    <y>36</y>
+    <width>310</width>
+    <height>250</height>
+    <widget type="textentry" version="3.0.0">
+      <name>Entry</name>
+      <pv_name>loc://value(3.14)</pv_name>
+      <width>120</width>
+    </widget>
+    <widget type="textupdate" version="2.0.0">
+      <name>Echo</name>
+      <pv_name>loc://value(3.14)</pv_name>
+      <x>130</x>
+      <width>140</width>
+    </widget>
+    <widget type="scaledslider" version="3.0.0">
+      <name>Slider</name>
+      <pv_name>loc://value(3.14)</pv_name>
+      <y>26</y>
+      <width>270</width>
+      <height>30</height>
+      <limits_from_pv>false</limits_from_pv>
+      <minimum>0.0</minimum>
+      <maximum>10.0</maximum>
+    </widget>
+    <widget type="choice" version="2.0.0">
+      <name>Choice</name>
+      <pv_name>loc://mode&lt;VEnum&gt;(0, "Off", "Slow", "Fast")</pv_name>
+      <y>62</y>
+      <width>270</width>
+      <height>28</height>
+    </widget>
+    <widget type="combo" version="2.0.0">
+      <name>Combo</name>
+      <pv_name>loc://mode&lt;VEnum&gt;(0, "Off", "Slow", "Fast")</pv_name>
+      <y>96</y>
+      <width>130</width>
+      <height>26</height>
+    </widget>
+    <widget type="textupdate" version="2.0.0">
+      <name>ModeText</name>
+      <pv_name>loc://mode&lt;VEnum&gt;(0, "Off", "Slow", "Fast")</pv_name>
+      <x>140</x>
+      <y>99</y>
+      <width>130</width>
+    </widget>
+    <widget type="bool_button" version="2.0.0">
+      <name>Bool</name>
+      <pv_name>loc://enable&lt;VLong&gt;(0)</pv_name>
+      <y>130</y>
+      <width>130</width>
+    </widget>
+    <widget type="checkbox" version="2.0.0">
+      <name>Check</name>
+      <pv_name>loc://enable&lt;VLong&gt;(0)</pv_name>
+      <label>Enable (same PV)</label>
+      <x>140</x>
+      <y>135</y>
+      <width>140</width>
+    </widget>
+    <widget type="label" version="2.0.0">
+      <name>Shown</name>
+      <text>Shown while enabled</text>
+      <y>175</y>
+      <width>270</width>
+      <transparent>false</transparent>
+      <background_color>
+        <color name="Attention" red="255" green="160" blue="0"></color>
+      </background_color>
+      <horizontal_alignment>1</horizontal_alignment>
+      <rules>
+        <rule name="vis" prop_id="visible" out_exp="false">
+          <exp bool_exp="pv0 == 0">
+            <value>false</value>
+          </exp>
+          <pv_name>loc://enable&lt;VLong&gt;(0)</pv_name>
+        </rule>
+      </rules>
+    </widget>
+    <widget type="radio" version="2.0.0">
+      <name>Radio</name>
+      <pv_name>loc://mode&lt;VEnum&gt;(0, "Off", "Slow", "Fast")</pv_name>
+      <y>200</y>
+      <width>270</width>
+      <height>22</height>
+    </widget>
+  </widget>
+  <widget type="group" version="3.0.0">
+    <name>Graphics</name>
+    <y>296</y>
+    <width>300</width>
+    <height>250</height>
+    <style>1</style>
+    <widget type="rectangle" version="2.0.0">
+      <name>Rect</name>
+      <width>80</width>
+      <height>60</height>
+      <line_width>2</line_width>
+      <corner_width>10</corner_width>
+      <corner_height>10</corner_height>
+    </widget>
+    <widget type="ellipse" version="2.0.0">
+      <name>Ellipse</name>
+      <x>100</x>
+      <width>80</width>
+      <height>60</height>
+      <background_color>
+        <color red="255" green="200" blue="0"></color>
+      </background_color>
+    </widget>
+    <widget type="polyline" version="2.0.0">
+      <name>Line</name>
+      <x>200</x>
+      <width>80</width>
+      <height>60</height>
+      <points>
+        <point x="0.0" y="60.0"></point>
+        <point x="25.0" y="0.0"></point>
+        <point x="50.0" y="45.0"></point>
+        <point x="80.0" y="10.0"></point>
+      </points>
+      <line_width>2</line_width>
+    </widget>
+    <widget type="polygon" version="2.0.0">
+      <name>Poly</name>
+      <y>80</y>
+      <width>80</width>
+      <height>70</height>
+      <points>
+        <point x="40.0" y="0.0"></point>
+        <point x="80.0" y="70.0"></point>
+        <point x="0.0" y="70.0"></point>
+      </points>
+      <line_width>2</line_width>
+    </widget>
+    <widget type="label" version="2.0.0">
+      <name>Wrapped</name>
+      <text>Labels wrap words and align: this one is centred both ways.</text>
+      <x>100</x>
+      <y>80</y>
+      <width>180</width>
+      <height>70</height>
+      <transparent>false</transparent>
+      <background_color>
+        <color red="220" green="235" blue="255"></color>
+      </background_color>
+      <horizontal_alignment>1</horizontal_alignment>
+      <vertical_alignment>1</vertical_alignment>
+    </widget>
+    <widget type="label" version="2.0.0">
+      <name>Right</name>
+      <text>right aligned</text>
+      <y>170</y>
+      <width>280</width>
+      <horizontal_alignment>2</horizontal_alignment>
+    </widget>
+  </widget>
+  <widget type="tabs" version="2.0.0">
+    <name>Tabs</name>
+    <x>310</x>
+    <y>296</y>
+    <width>310</width>
+    <height>250</height>
+    <tabs>
+      <tab>
+        <name>First</name>
+        <children>
+          <widget type="label" version="2.0.0">
+            <name>T1</name>
+            <text>Tab one content</text>
+            <x>10</x>
+            <y>10</y>
+            <width>200</width>
+          </widget>
+          <widget type="textupdate" version="2.0.0">
+            <name>T1v</name>
+            <pv_name>loc://value(3.14)</pv_name>
+            <x>10</x>
+            <y>40</y>
+          </widget>
+        </children>
+      </tab>
+      <tab>
+        <name>Second</name>
+        <children>
+          <widget type="label" version="2.0.0">
+            <name>T2</name>
+            <text>Tab two content</text>
+            <x>10</x>
+            <y>10</y>
+            <width>200</width>
+          </widget>
+          <widget type="led" version="2.0.0">
+            <name>T2led</name>
+            <pv_name>sim://flipflop(0.5)</pv_name>
+            <x>10</x>
+            <y>40</y>
+          </widget>
+        </children>
+      </tab>
+    </tabs>
+  </widget>
+</display>

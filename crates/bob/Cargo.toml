@@ -1,7 +1,9 @@
 [package]
+description = "Parser for Phoebus Display Builder .bob files"
 name = "bob"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
+roxmltree = "0.21.1"

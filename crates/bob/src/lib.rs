@@ -1,14 +1,290 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+//! Parser for Phoebus Display Builder `.bob` files.
+//!
+//! A display is kept close to the XML: each [`Widget`] holds its property
+//! elements as they were written, and typed accessors read them with the
+//! Phoebus defaults. Macros are expanded later, by whoever renders the
+//! display, because their values depend on where a widget sits.
+
+mod element;
+mod macros;
+mod model;
+
+use std::path::{Path, PathBuf};
+
+pub use element::Element;
+pub use macros::{Macros, expand};
+pub use model::{Action, Color, Font, FontStyle, Rule, RuleExpr, named_color};
+
+/// A parsed `.bob` display.
+#[derive(Clone, Debug)]
+pub struct Display {
+    pub name: String,
+    pub width: f64,
+    pub height: f64,
+    pub background: Color,
+    pub macros: Macros,
+    pub widgets: Vec<Widget>,
+    /// The file it was read from, used to resolve relative paths.
+    pub path: Option<PathBuf>,
+}
+
+/// One widget: its type, property elements and child widgets.
+#[derive(Clone, Debug)]
+pub struct Widget {
+    pub kind: String,
+    pub props: Element,
+    pub children: Vec<Widget>,
+}
+
+#[derive(Debug)]
+pub enum Error {
+    Io(PathBuf, std::io::Error),
+    Xml(roxmltree::Error),
+    NotADisplay(String),
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::Io(p, e) => write!(f, "cannot read {}: {e}", p.display()),
+            Error::Xml(e) => write!(f, "invalid XML: {e}"),
+            Error::NotADisplay(root) => write!(f, "expected a <display>, found <{root}>"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+impl Display {
+    pub fn load(path: &Path) -> Result<Self, Error> {
+        let text = std::fs::read_to_string(path).map_err(|e| Error::Io(path.into(), e))?;
+        let mut display = Self::parse(&text)?;
+        display.path = Some(path.to_path_buf());
+        Ok(display)
+    }
+
+    pub fn parse(xml: &str) -> Result<Self, Error> {
+        let doc = roxmltree::Document::parse(xml).map_err(Error::Xml)?;
+        let root = Element::from_node(doc.root_element());
+        if root.name != "display" {
+            return Err(Error::NotADisplay(root.name));
+        }
+        let (props, widgets) = split_widgets(root);
+        let as_widget = Widget {
+            kind: "display".into(),
+            props,
+            children: Vec::new(),
+        };
+        Ok(Self {
+            name: as_widget.text("name").unwrap_or("").to_string(),
+            width: as_widget.f64("width").unwrap_or(800.0),
+            height: as_widget.f64("height").unwrap_or(600.0),
+            background: as_widget
+                .color("background_color")
+                .unwrap_or(named_color("Background")),
+            macros: as_widget.macros(),
+            widgets,
+            path: None,
+        })
+    }
+
+    /// Resolve a file named by this display (e.g. in an action) against its directory.
+    pub fn resolve(&self, file: &str) -> PathBuf {
+        let file = Path::new(file);
+        match self.path.as_ref().and_then(|p| p.parent()) {
+            Some(dir) if file.is_relative() => dir.join(file),
+            _ => file.to_path_buf(),
+        }
+    }
+
+    /// Every widget, depth first.
+    pub fn all_widgets(&self) -> Vec<&Widget> {
+        fn walk<'a>(ws: &'a [Widget], out: &mut Vec<&'a Widget>) {
+            for w in ws {
+                out.push(w);
+                walk(&w.children, out);
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.widgets, &mut out);
+        out
+    }
+}
+
+/// Separate `<widget>` children from the property elements of `el`.
+fn split_widgets(mut el: Element) -> (Element, Vec<Widget>) {
+    let mut widgets = Vec::new();
+    let mut props = Vec::new();
+    for child in el.children.drain(..) {
+        if child.name == "widget" {
+            widgets.push(Widget::from_element(child));
+        } else {
+            props.push(child);
+        }
+    }
+    el.children = props;
+    (el, widgets)
+}
+
+impl Widget {
+    pub fn from_element(el: Element) -> Self {
+        let kind = el.attr("type").unwrap_or("unknown").to_string();
+        let (props, children) = split_widgets(el);
+        Self {
+            kind,
+            props,
+            children,
+        }
+    }
+
+    /// The property element called `name`.
+    pub fn get(&self, name: &str) -> Option<&Element> {
+        self.props.child(name)
+    }
+
+    /// The text of a simple property.
+    pub fn text(&self, name: &str) -> Option<&str> {
+        self.get(name).map(|e| e.text.as_str())
+    }
+
+    pub fn f64(&self, name: &str) -> Option<f64> {
+        self.text(name).and_then(|t| t.trim().parse().ok())
+    }
+
+    pub fn i64(&self, name: &str) -> Option<i64> {
+        self.f64(name).map(|v| v as i64)
+    }
+
+    pub fn bool(&self, name: &str) -> Option<bool> {
+        self.text(name).map(|t| t.trim() == "true")
+    }
+
+    pub fn color(&self, name: &str) -> Option<Color> {
+        self.get(name)?.child("color").map(Color::from_element)
+    }
+
+    pub fn font(&self, name: &str) -> Option<Font> {
+        self.get(name)?.child("font").map(Font::from_element)
+    }
+
+    pub fn name(&self) -> &str {
+        self.text("name").unwrap_or("")
+    }
+
+    /// The widget's own `<macros>`.
+    pub fn macros(&self) -> Macros {
+        self.get("macros")
+            .map(Macros::from_element)
+            .unwrap_or_default()
+    }
+
+    /// `<items><item>…</item></items>`, as used by combo and choice widgets.
+    pub fn items(&self) -> Vec<String> {
+        self.list("items", "item")
+    }
+
+    /// Texts of `<outer><inner>…</inner>…</outer>`.
+    pub fn list(&self, outer: &str, inner: &str) -> Vec<String> {
+        self.get(outer)
+            .map(|e| {
+                e.children
+                    .iter()
+                    .filter(|c| c.name == inner)
+                    .map(|c| c.text.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Points of a polyline or polygon, relative to the widget.
+    pub fn points(&self) -> Vec<(f64, f64)> {
+        let Some(points) = self.get("points") else {
+            return Vec::new();
+        };
+        points
+            .children
+            .iter()
+            .filter(|p| p.name == "point")
+            .filter_map(|p| Some((p.attr("x")?.parse().ok()?, p.attr("y")?.parse().ok()?)))
+            .collect()
+    }
+
+    pub fn actions(&self) -> Vec<Action> {
+        self.get("actions")
+            .map(|a| {
+                a.children
+                    .iter()
+                    .filter(|c| c.name == "action")
+                    .map(Action::from_element)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn rules(&self) -> Vec<Rule> {
+        self.get("rules")
+            .map(|r| {
+                r.children
+                    .iter()
+                    .filter(|c| c.name == "rule")
+                    .map(Rule::from_element)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn has_scripts(&self) -> bool {
+        self.get("scripts").is_some_and(|s| !s.children.is_empty())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    const SAMPLE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<display version="2.0.0">
+  <name>Test</name>
+  <width>400</width>
+  <macros><P>BL01T</P></macros>
+  <widget type="group" version="3.0.0">
+    <name>G</name>
+    <macros><R>:DET:</R></macros>
+    <x>10</x>
+    <widget type="textupdate" version="2.0.0">
+      <name>TU</name>
+      <pv_name>$(P)$(R)Acquire_RBV</pv_name>
+      <foreground_color><color name="Text" red="1" green="2" blue="3"></color></foreground_color>
+      <font><font name="Default Bold" family="Liberation Sans" style="BOLD" size="14.0"></font></font>
+    </widget>
+  </widget>
+  <widget type="polyline" version="2.0.0">
+    <points><point x="0.0" y="1.0"></point><point x="5.0" y="6.0"></point></points>
+  </widget>
+</display>"#;
+
     #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+    fn parses_tree_and_properties() {
+        let d = Display::parse(SAMPLE).unwrap();
+        assert_eq!(d.name, "Test");
+        assert_eq!(d.width, 400.0);
+        assert_eq!(d.height, 600.0);
+        assert_eq!(d.macros.get("P"), Some("BL01T"));
+        let g = &d.widgets[0];
+        assert_eq!(g.kind, "group");
+        assert_eq!(g.f64("x"), Some(10.0));
+        assert_eq!(g.macros().get("R"), Some(":DET:"));
+        let tu = &g.children[0];
+        assert_eq!(tu.text("pv_name"), Some("$(P)$(R)Acquire_RBV"));
+        assert_eq!(tu.color("foreground_color").unwrap().rgba(), [1, 2, 3, 255]);
+        let f = tu.font("font").unwrap();
+        assert_eq!((f.size, f.style), (14.0, FontStyle::Bold));
+        assert_eq!(d.widgets[1].points(), vec![(0.0, 1.0), (5.0, 6.0)]);
+        assert_eq!(d.all_widgets().len(), 3);
+    }
+
+    #[test]
+    fn rejects_other_roots() {
+        assert!(matches!(Display::parse("<x/>"), Err(Error::NotADisplay(_))));
     }
 }

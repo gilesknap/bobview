@@ -246,13 +246,19 @@ dependencies = [
 [[package]]
 name = "bob"
 version = "0.1.0"
+dependencies = [
+ "roxmltree",
+]
 
 [[package]]
 name = "bobview"
 version = "0.1.0"
 dependencies = [
+ "bob",
  "eframe",
  "egui",
+ "log",
+ "png",
  "pv",
 ]
 
@@ -2261,6 +2267,15 @@ name = "renderdoc-sys"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
+
+[[package]]
+name = "roxmltree"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "rustc-hash"

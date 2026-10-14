@@ -1,0 +1,226 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- bl01t-di-cam-01: simulated area detector -->
+<display version="2.0.0">
+  <name>bl01t-di-cam-01</name>
+  <width>420</width>
+  <height>340</height>
+  <macros>
+    <P>BL01T-DI-CAM-01</P>
+    <R>:DET:</R>
+  </macros>
+  <widget type="label" version="2.0.0">
+    <name>Title</name>
+    <text>bl01t-di-cam-01: simulated detector</text>
+    <width>420</width>
+    <height>30</height>
+    <font>
+      <font name="Header 2" family="Liberation Sans" style="BOLD" size="18.0"></font>
+    </font>
+    <horizontal_alignment>1</horizontal_alignment>
+  </widget>
+  <widget type="action_button" version="3.0.0">
+    <name>Start</name>
+    <actions>
+      <action type="write_pv">
+        <pv_name>$(P)$(R)Acquire</pv_name>
+        <value>1</value>
+        <description>Start</description>
+      </action>
+    </actions>
+    <x>10</x>
+    <y>40</y>
+    <width>120</width>
+    <background_color>
+      <color name="OK" red="0" green="255" blue="0"></color>
+    </background_color>
+  </widget>
+  <widget type="action_button" version="3.0.0">
+    <name>Stop</name>
+    <actions>
+      <action type="write_pv">
+        <pv_name>$(P)$(R)Acquire</pv_name>
+        <value>0</value>
+        <description>Stop</description>
+      </action>
+    </actions>
+    <x>140</x>
+    <y>40</y>
+    <width>120</width>
+    <background_color>
+      <color name="STOP" red="255" green="0" blue="0"></color>
+    </background_color>
+  </widget>
+  <widget type="multi_state_led" version="2.0.0">
+    <name>State</name>
+    <pv_name>$(P)$(R)DetectorState_RBV</pv_name>
+    <x>280</x>
+    <y>40</y>
+    <width>130</width>
+    <height>30</height>
+    <square>true</square>
+    <states>
+      <state>
+        <value>0</value>
+        <label>Idle</label>
+        <color>
+          <color name="Off" red="60" green="100" blue="60"></color>
+        </color>
+      </state>
+      <state>
+        <value>1</value>
+        <label>Acquire</label>
+        <color>
+          <color name="On" red="0" green="255" blue="0"></color>
+        </color>
+      </state>
+      <state>
+        <value>6</value>
+        <label>Aborted</label>
+        <color>
+          <color name="MINOR" red="255" green="128" blue="0"></color>
+        </color>
+      </state>
+    </states>
+    <fallback_label>Other</fallback_label>
+  </widget>
+  <widget type="label" version="2.0.0">
+    <name>LMode</name>
+    <text>Image mode</text>
+    <x>10</x>
+    <y>90</y>
+    <width>130</width>
+  </widget>
+  <widget type="combo" version="2.0.0">
+    <name>Mode</name>
+    <pv_name>$(P)$(R)ImageMode</pv_name>
+    <x>140</x>
+    <y>86</y>
+    <width>130</width>
+    <height>28</height>
+  </widget>
+  <widget type="textupdate" version="2.0.0">
+    <name>ModeRbv</name>
+    <pv_name>$(P)$(R)ImageMode_RBV</pv_name>
+    <x>280</x>
+    <y>90</y>
+    <width>130</width>
+  </widget>
+  <widget type="label" version="2.0.0">
+    <name>LTime</name>
+    <text>Acquire time</text>
+    <x>10</x>
+    <y>125</y>
+    <width>130</width>
+  </widget>
+  <widget type="textentry" version="3.0.0">
+    <name>Time</name>
+    <pv_name>$(P)$(R)AcquireTime</pv_name>
+    <x>140</x>
+    <y>125</y>
+    <width>130</width>
+  </widget>
+  <widget type="textupdate" version="2.0.0">
+    <name>TimeRbv</name>
+    <pv_name>$(P)$(R)AcquireTime_RBV</pv_name>
+    <x>280</x>
+    <y>125</y>
+    <width>130</width>
+  </widget>
+  <widget type="label" version="2.0.0">
+    <name>LNum</name>
+    <text>Num images</text>
+    <x>10</x>
+    <y>155</y>
+    <width>130</width>
+  </widget>
+  <widget type="spinner" version="2.0.0">
+    <name>Num</name>
+    <pv_name>$(P)$(R)NumImages</pv_name>
+    <x>140</x>
+    <y>155</y>
+    <width>130</width>
+    <limits_from_pv>false</limits_from_pv>
+    <minimum>1.0</minimum>
+    <maximum>1000.0</maximum>
+  </widget>
+  <widget type="textupdate" version="2.0.0">
+    <name>NumRbv</name>
+    <pv_name>$(P)$(R)NumImagesCounter_RBV</pv_name>
+    <x>280</x>
+    <y>155</y>
+    <width>130</width>
+  </widget>
+  <widget type="label" version="2.0.0">
+    <name>LFrames</name>
+    <text>Frames</text>
+    <x>10</x>
+    <y>195</y>
+    <width>130</width>
+    <font>
+      <font name="Default Bold" family="Liberation Sans" style="BOLD" size="14.0"></font>
+    </font>
+  </widget>
+  <widget type="textupdate" version="2.0.0">
+    <name>Frames</name>
+    <pv_name>$(P)$(R)ArrayCounter_RBV</pv_name>
+    <x>140</x>
+    <y>190</y>
+    <width>270</width>
+    <height>30</height>
+    <font>
+      <font name="Header 2" family="Liberation Sans" style="BOLD" size="18.0"></font>
+    </font>
+    <horizontal_alignment>1</horizontal_alignment>
+  </widget>
+  <widget type="label" version="2.0.0">
+    <name>LStatus</name>
+    <text>Status</text>
+    <x>10</x>
+    <y>235</y>
+    <width>130</width>
+  </widget>
+  <widget type="textupdate" version="2.0.0">
+    <name>Status</name>
+    <pv_name>$(P)$(R)StatusMessage_RBV</pv_name>
+    <x>140</x>
+    <y>235</y>
+    <width>270</width>
+  </widget>
+  <widget type="label" version="2.0.0">
+    <name>LCb</name>
+    <text>Array callbacks</text>
+    <x>10</x>
+    <y>270</y>
+    <width>130</width>
+  </widget>
+  <widget type="bool_button" version="2.0.0">
+    <name>Callbacks</name>
+    <pv_name>$(P)$(R)ArrayCallbacks</pv_name>
+    <x>140</x>
+    <y>265</y>
+    <width>130</width>
+    <off_label>Disabled</off_label>
+    <on_label>Enabled</on_label>
+  </widget>
+  <widget type="led" version="2.0.0">
+    <name>CbRbv</name>
+    <pv_name>$(P)$(R)ArrayCallbacks_RBV</pv_name>
+    <x>280</x>
+    <y>270</y>
+  </widget>
+  <widget type="textupdate" version="2.0.0">
+    <name>Dims</name>
+    <pv_name>$(P):ARR:Dimensions_RBV</pv_name>
+    <x>140</x>
+    <y>305</y>
+    <width>130</width>
+    <tooltip>array plugin dimensions</tooltip>
+  </widget>
+  <widget type="label" version="2.0.0">
+    <name>LDims</name>
+    <text>Dimensions</text>
+    <x>10</x>
+    <y>305</y>
+    <width>130</width>
+  </widget>
+</display>

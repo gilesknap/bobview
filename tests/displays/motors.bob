@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- bl01t-mo-sim-01: two axes, each an embedded motor-axis.bob -->
+<display version="2.0.0">
+  <name>bl01t-mo-sim-01</name>
+  <width>420</width>
+  <height>400</height>
+  <widget type="label" version="2.0.0">
+    <name>Title</name>
+    <text>bl01t-mo-sim-01: simulated motors</text>
+    <width>420</width>
+    <height>30</height>
+    <font>
+      <font name="Header 2" family="Liberation Sans" style="BOLD" size="18.0"></font>
+    </font>
+    <horizontal_alignment>1</horizontal_alignment>
+  </widget>
+  <widget type="embedded" version="2.0.0">
+    <name>Axis1</name>
+    <file>motor-axis.bob</file>
+    <macros>
+      <P>BL01T-MO-SIMC-01:</P>
+      <M>M1</M>
+    </macros>
+    <x>10</x>
+    <y>36</y>
+    <width>400</width>
+    <height>170</height>
+    <transparent>true</transparent>
+  </widget>
+  <widget type="embedded" version="2.0.0">
+    <name>Axis2</name>
+    <file>motor-axis.bob</file>
+    <macros>
+      <P>BL01T-MO-SIMC-01:</P>
+      <M>M2</M>
+    </macros>
+    <x>10</x>
+    <y>216</y>
+    <width>400</width>
+    <height>170</height>
+    <transparent>true</transparent>
+  </widget>
+</display>

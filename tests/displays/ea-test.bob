@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- bl01t-ea-test-01: bl01t:SUM = bl01t:A + bl01t:B -->
+<display version="2.0.0">
+  <name>bl01t-ea-test-01</name>
+  <width>440</width>
+  <height>300</height>
+  <macros>
+    <P>bl01t</P>
+  </macros>
+  <widget type="label" version="2.0.0">
+    <name>Title</name>
+    <text>bl01t-ea-test-01: SUM = A + B</text>
+    <width>440</width>
+    <height>30</height>
+    <font>
+      <font name="Header 2" family="Liberation Sans" style="BOLD" size="18.0"></font>
+    </font>
+    <horizontal_alignment>1</horizontal_alignment>
+  </widget>
+  <widget type="group" version="3.0.0">
+    <name>Inputs</name>
+    <y>40</y>
+    <width>440</width>
+    <height>150</height>
+    <widget type="label" version="2.0.0">
+      <name>LA</name>
+      <text>A</text>
+      <width>30</width>
+    </widget>
+    <widget type="textentry" version="3.0.0">
+      <name>A</name>
+      <pv_name>$(P):A</pv_name>
+      <x>30</x>
+      <width>110</width>
+      <horizontal_alignment>2</horizontal_alignment>
+    </widget>
+    <widget type="scaledslider" version="3.0.0">
+      <name>SA</name>
+      <pv_name>$(P):A</pv_name>
+      <x>150</x>
+      <y>-6</y>
+      <width>250</width>
+      <height>32</height>
+    </widget>
+    <widget type="label" version="2.0.0">
+      <name>LB</name>
+      <text>B</text>
+      <y>40</y>
+      <width>30</width>
+    </widget>
+    <widget type="textentry" version="3.0.0">
+      <name>B</name>
+      <pv_name>$(P):B</pv_name>
+      <x>30</x>
+      <y>40</y>
+      <width>110</width>
+      <horizontal_alignment>2</horizontal_alignment>
+    </widget>
+    <widget type="scaledslider" version="3.0.0">
+      <name>SB</name>
+      <pv_name>$(P):B</pv_name>
+      <x>150</x>
+      <y>34</y>
+      <width>250</width>
+      <height>32</height>
+    </widget>
+    <widget type="action_button" version="3.0.0">
+      <name>Zero</name>
+      <actions>
+        <action type="write_pv">
+          <pv_name>$(P):A</pv_name>
+          <value>0</value>
+          <description>A = 0</description>
+        </action>
+        <action type="write_pv">
+          <pv_name>$(P):B</pv_name>
+          <value>0</value>
+          <description>B = 0</description>
+        </action>
+      </actions>
+      <text>Zero…</text>
+      <x>30</x>
+      <y>80</y>
+      <width>110</width>
+    </widget>
+    <widget type="action_button" version="3.0.0">
+      <name>Example</name>
+      <actions>
+        <action type="write_pv">
+          <pv_name>$(P):A</pv_name>
+          <value>2.54</value>
+          <description>A = 2.54</description>
+        </action>
+      </actions>
+      <x>150</x>
+      <y>80</y>
+      <width>110</width>
+    </widget>
+  </widget>
+  <widget type="label" version="2.0.0">
+    <name>LSum</name>
+    <text>SUM</text>
+    <x>18</x>
+    <y>206</y>
+    <width>40</width>
+    <font>
+      <font name="Default Bold" family="Liberation Sans" style="BOLD" size="14.0"></font>
+    </font>
+  </widget>
+  <widget type="textupdate" version="2.0.0">
+    <name>Sum</name>
+    <pv_name>$(P):SUM</pv_name>
+    <x>60</x>
+    <y>200</y>
+    <width>110</width>
+    <height>30</height>
+    <font>
+      <font name="Header 3" family="Liberation Sans" style="BOLD" size="16.0"></font>
+    </font>
+    <precision>3</precision>
+    <horizontal_alignment>2</horizontal_alignment>
+    <rules>
+      <rule name="High" prop_id="background_color" out_exp="false">
+        <exp bool_exp="pv0 &gt; 10">
+          <value>
+            <color name="MAJOR" red="255" green="0" blue="0"></color>
+          </value>
+        </exp>
+        <exp bool_exp="pv0 &lt; 0">
+          <value>
+            <color name="Attention" red="255" green="160" blue="0"></color>
+          </value>
+        </exp>
+        <pv_name>$(P):SUM</pv_name>
+      </rule>
+    </rules>
+  </widget>
+  <widget type="progressbar" version="2.0.0">
+    <name>SumBar</name>
+    <pv_name>$(P):SUM</pv_name>
+    <x>180</x>
+    <y>200</y>
+    <width>240</width>
+    <height>30</height>
+    <limits_from_pv>false</limits_from_pv>
+    <minimum>-20.0</minimum>
+    <maximum>20.0</maximum>
+  </widget>
+  <widget type="label" version="2.0.0">
+    <name>Note</name>
+    <text>SUM turns red above 10 and orange below 0 (a rule).</text>
+    <x>18</x>
+    <y>244</y>
+    <width>400</width>
+    <font>
+      <font name="Comment" family="Liberation Sans" style="ITALIC" size="12.0"></font>
+    </font>
+  </widget>
+</display>
