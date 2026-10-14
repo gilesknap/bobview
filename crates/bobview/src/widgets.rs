@@ -122,6 +122,7 @@ fn draw_node(ui: &mut Ui, node: &mut Node, cx: &mut Cx, id: Id) {
         "choice" | "radio" => Some(choice(ui, node, state.as_ref(), rect, cx, id)),
         "combo" => Some(combo(ui, node, state.as_ref(), rect, cx, id)),
         "checkbox" => Some(checkbox(ui, node, state.as_ref(), rect, cx, id)),
+        "slide_button" => Some(slide_button(ui, node, state.as_ref(), rect, cx, id)),
         "rectangle" | "ellipse" | "arc" => {
             shape(&painter, &node.w, rect, z);
             None
@@ -172,27 +173,79 @@ fn draw_node(ui: &mut Ui, node: &mut Node, cx: &mut Cx, id: Id) {
         alarm_border(&painter, &node.w, state, rect, z);
     }
 
-    // Hover shows the PV name and value. Right-click (long-press on a touch
-    // screen) opens a menu to copy them or show the PV's details.
-    if !node.pv_name.is_empty() && cx.clip.contains_rect(rect) {
-        let resp = response.unwrap_or_else(|| ui.interact(rect, id.with("hover"), Sense::click()));
-        let text = match &state {
-            Some(s) if s.connected => format!(
-                "{}\n{} {:?}",
-                node.pv_name,
-                s.format(None, true),
-                s.severity
-            ),
-            Some(s) => format!(
-                "{}\n{}",
-                node.pv_name,
-                s.error.as_deref().unwrap_or("disconnected")
-            ),
-            None => node.pv_name.clone(),
-        };
-        resp.context_menu(|ui| crate::pvmenu::menu(ui, node, state.as_ref(), cx.requests));
-        resp.on_hover_text(text);
+    // A control that is disabled or whose PV is read-only is greyed out and
+    // shows a "not allowed" cursor; its writes are refused in `write`.
+    let disabled = response.is_some() && is_disabled(&node.w, state.as_ref());
+    if disabled {
+        painter.rect_filled(rect, CornerRadius::ZERO, Color32::from_white_alpha(110));
     }
+
+    // Hover shows the tooltip: the widget's own, or the PV name and value.
+    // Right-click (long-press on a touch screen) opens a menu to copy them or
+    // show the PV's details.
+    if !cx.clip.contains_rect(rect) {
+        return;
+    }
+    if !node.pv_name.is_empty() {
+        let resp = response.unwrap_or_else(|| ui.interact(rect, id.with("hover"), Sense::click()));
+        let resp = if disabled {
+            resp.on_hover_cursor(egui::CursorIcon::NotAllowed)
+        } else {
+            resp
+        };
+        // The context menu has its own popup id, so it does not fight a
+        // combo or action button's own menu (which uses the default id).
+        egui::Popup::context_menu(&resp)
+            .id(id.with("context-menu"))
+            .show(|ui| crate::pvmenu::menu(ui, node, state.as_ref(), cx.requests));
+        let text = tooltip(node, state.as_ref());
+        if !text.is_empty() {
+            resp.on_hover_text(text);
+        }
+    } else if node.w.get("tooltip").is_some() && !is_container(&node.w.kind) {
+        let text = tooltip(node, None);
+        if !text.is_empty() {
+            let resp =
+                response.unwrap_or_else(|| ui.interact(rect, id.with("hover"), Sense::hover()));
+            resp.on_hover_text(text);
+        }
+    }
+}
+
+/// Widgets that hold others; their tooltips would cover their children's.
+fn is_container(kind: &str) -> bool {
+    matches!(kind, "group" | "tabs" | "embedded" | "navtabs")
+}
+
+/// The hover text: the widget's `tooltip` with `$(pv_name)` and `$(pv_value)`
+/// filled in, or, without one, the PV name and value as Phoebus's default
+/// `$(pv_name)\n$(pv_value)` shows them (with the alarm severity).
+fn tooltip(node: &Node, s: Option<&PvState>) -> String {
+    let value = match s {
+        Some(s) if s.connected => s.format(None, true),
+        Some(s) => s.error.clone().unwrap_or_else(|| "disconnected".into()),
+        None => String::new(),
+    };
+    match node.w.text("tooltip") {
+        Some(t) => tooltip_text(t, &node.pv_name, &value, &|t| node.expand(t)),
+        None => match s {
+            Some(s) if s.connected => format!("{}\n{value} {:?}", node.pv_name, s.severity),
+            Some(_) => format!("{}\n{value}", node.pv_name),
+            None => node.pv_name.clone(),
+        },
+    }
+}
+
+fn tooltip_text(
+    template: &str,
+    pv_name: &str,
+    value: &str,
+    expand: &dyn Fn(&str) -> String,
+) -> String {
+    let t = template
+        .replace("$(pv_name)", pv_name)
+        .replace("$(pv_value)", value);
+    expand(&t).trim().to_string()
 }
 
 // --- helpers -----------------------------------------------------------------
@@ -334,9 +387,44 @@ fn is_on(w: &Widget, s: &PvState) -> bool {
     if bit < 0 { v != 0 } else { (v >> bit) & 1 == 1 }
 }
 
+/// `value` with the widget's `bit` set to `on`, or 0/1 when `bit` is -1 (the
+/// whole value), as Phoebus's checkbox, bool and slide buttons write it.
+fn with_bit(bit: i64, value: i64, on: bool) -> i64 {
+    if !(0..63).contains(&bit) {
+        on as i64
+    } else if on {
+        value | (1 << bit)
+    } else {
+        value & !(1 << bit)
+    }
+}
+
+/// The value that toggles the widget's bit (or the whole value).
+fn toggled(w: &Widget, s: Option<&PvState>) -> i64 {
+    let bit = w.i64("bit").unwrap_or(-1);
+    let on = s.is_some_and(|s| s.connected && is_on(w, s));
+    let v = s.and_then(|s| s.value.as_i64()).unwrap_or(0);
+    with_bit(bit, v, !on)
+}
+
+/// Phoebus disables a control whose `enabled` property is false or whose PV
+/// is connected without write access.
+fn is_disabled(w: &Widget, s: Option<&PvState>) -> bool {
+    w.bool("enabled") == Some(false) || s.is_some_and(|s| s.connected && !s.writable)
+}
+
+/// Whether a control may write its PV: enabled, connected and writable.
+fn can_write(w: &Widget, s: Option<&PvState>) -> bool {
+    !is_disabled(w, s) && s.is_some_and(|s| s.connected)
+}
+
 fn write(node: &Node, value: impl Into<String>) {
     if let Some(pv) = &node.pv {
-        pv.write(value);
+        if can_write(&node.w, Some(&pv.state())) {
+            pv.write(value);
+        } else {
+            log::debug!("{}: not writing, the control is disabled", node.pv_name);
+        }
     }
 }
 
@@ -670,13 +758,12 @@ fn text_entry(
     id: Id,
 ) -> Response {
     let w = node.w.clone();
-    let connected = state.is_some_and(|s| s.connected);
     let shown = match state {
         Some(s) if s.connected => format_value(&w, s),
         _ => format!("<{}>", node.pv_name),
     };
     let align = alignment(&w, 1);
-    let enabled = connected && w.bool("enabled") != Some(false);
+    let enabled = can_write(&w, state);
     if cx.keypad {
         let resp = ui.interact(rect.intersect(cx.clip), id, Sense::click());
         let painter = ui.painter().with_clip_rect(cx.clip);
@@ -767,9 +854,11 @@ fn action_button(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut Cx, id: Id) 
         true,
     );
 
-    if actions.len() == 1 && resp.clicked() {
+    // A disabled button, or one whose PV is read-only, runs no actions.
+    let allowed = !is_disabled(&node.w, node.state().as_ref());
+    if allowed && actions.len() == 1 && resp.clicked() {
         run_action(node, &actions[0], cx);
-    } else if actions.len() > 1 {
+    } else if allowed && actions.len() > 1 {
         egui::Popup::menu(&resp).show(|ui| {
             for a in &actions {
                 if ui.button(node.expand(a.description())).clicked() {
@@ -857,21 +946,52 @@ fn bool_button(
         Align2::CENTER_CENTER,
         false,
     );
-    // mode 0 toggles; 1 and 2 push (2 inverted)
+    // Mode 0 toggles; 1 and 2 push (2 inverted): the pressed value is written
+    // when the button goes down and the released one when it comes up.
+    let bit = w.i64("bit").unwrap_or(-1);
     match w.i64("mode").unwrap_or(0) {
-        0 if resp.clicked() => write(node, if on { "0" } else { "1" }),
+        0 if resp.clicked() => write(node, toggled(&w, s).to_string()),
         m @ (1 | 2) => {
-            let (press, release) = if m == 1 { ("1", "0") } else { ("0", "1") };
-            if resp.drag_started() || (resp.clicked() && !resp.dragged()) {
-                write(node, press);
+            let v = s.and_then(|s| s.value.as_i64()).unwrap_or(0);
+            let value = |pressed: bool| with_bit(bit, v, pressed == (m == 1)).to_string();
+            let down = resp.is_pointer_button_down_on();
+            let was_down = ui.data(|d| d.get_temp::<bool>(id).unwrap_or(false));
+            if down != was_down {
+                ui.data_mut(|d| d.insert_temp(id, down));
             }
-            if resp.drag_stopped() || resp.clicked() {
-                write(node, release);
+            match push_edge(was_down, down, resp.clicked()) {
+                Push::Press => write(node, value(true)),
+                Push::Release => write(node, value(false)),
+                Push::Both => {
+                    write(node, value(true));
+                    write(node, value(false));
+                }
+                Push::None => {}
             }
         }
         _ => {}
     }
     resp
+}
+
+#[derive(Debug, PartialEq)]
+enum Push {
+    None,
+    Press,
+    Release,
+    /// Pressed and released within one frame.
+    Both,
+}
+
+/// What a push button writes, from whether it was down last frame, is down
+/// now, and was clicked this frame.
+fn push_edge(was_down: bool, down: bool, clicked: bool) -> Push {
+    match (was_down, down) {
+        (false, true) => Push::Press,
+        (true, false) => Push::Release,
+        (false, false) if clicked => Push::Both,
+        _ => Push::None,
+    }
 }
 
 /// The choices for a choice/radio/combo widget and the index of the current one.
@@ -902,7 +1022,7 @@ fn choice(
     let (items, current) = choices(&w, s);
     let horizontal = w.bool("horizontal").unwrap_or(true);
     let n = items.len().max(1);
-    let resp = ui.interact(rect.intersect(cx.clip), id, Sense::hover());
+    let mut resp = ui.interact(rect.intersect(cx.clip), id, Sense::hover());
     let painter = ui.painter().with_clip_rect(cx.clip);
     let selected = w
         .color("selected_color")
@@ -971,6 +1091,8 @@ fn choice(
         if r.clicked() {
             write(node, item.clone());
         }
+        // The cells take the clicks, so the PV menu needs their right-clicks.
+        resp = resp.union(r);
     }
     resp
 }
@@ -984,10 +1106,11 @@ fn combo(
     id: Id,
 ) -> Response {
     let w = node.w.clone();
-    let (items, current) = choices(&w, s);
-    let text = match (current.and_then(|i| items.get(i)), s) {
-        (Some(t), _) => t.clone(),
-        (None, Some(s)) if s.connected => s.format(None, false),
+    let (items, _) = choices(&w, s);
+    // Like Phoebus, show the PV's value whatever the items are; the items
+    // only fill the dropdown.
+    let text = match s {
+        Some(s) if s.connected => s.format(None, false),
         _ => format!("<{}>", node.pv_name),
     };
     let resp = ui.interact(rect.intersect(cx.clip), id, Sense::click());
@@ -1019,12 +1142,12 @@ fn combo(
         fg(&w),
         Stroke::NONE,
     ));
+    if !can_write(&w, s) {
+        return resp;
+    }
     egui::Popup::menu(&resp).show(|ui| {
         for item in &items {
-            if ui
-                .selectable_label(Some(item) == current.and_then(|i| items.get(i)), item)
-                .clicked()
-            {
+            if ui.selectable_label(*item == text, item).clicked() {
                 write(node, item.clone());
             }
         }
@@ -1078,16 +1201,84 @@ fn checkbox(
         false,
     );
     if resp.clicked() {
-        let bit = w.i64("bit").unwrap_or(-1);
-        let v = s.and_then(|s| s.value.as_i64()).unwrap_or(0);
-        let new = if bit < 0 {
-            (!on) as i64
-        } else {
-            v ^ (1 << bit)
-        };
-        write(node, new.to_string());
+        write(node, toggled(&w, s).to_string());
     }
     resp
+}
+
+/// Phoebus's slide button: an on/off switch whose thumb slides right when
+/// on, followed by the optional label. A click toggles the PV or its bit.
+fn slide_button(
+    ui: &mut Ui,
+    node: &mut Node,
+    s: Option<&PvState>,
+    rect: Rect,
+    cx: &mut Cx,
+    id: Id,
+) -> Response {
+    let w = node.w.clone();
+    let z = cx.view.zoom;
+    let on = s.is_some_and(|s| s.connected && is_on(&w, s));
+    let resp = ui.interact(rect.intersect(cx.clip), id, Sense::click());
+    let painter = ui.painter().with_clip_rect(cx.clip);
+    let track = switch_rect(rect, z);
+    let (key, default) = if on {
+        ("on_color", Color32::from_rgb(60, 255, 60))
+    } else {
+        ("off_color", Color32::from_rgb(60, 100, 60))
+    };
+    let track_color = w.color(key).map(|c| color(&c)).unwrap_or(default);
+    let radius = track.height() / 2.0;
+    painter.rect(
+        track,
+        CornerRadius::same(radius.min(255.0) as u8),
+        track_color,
+        Stroke::new(1.0, Color32::from_gray(150)),
+        StrokeKind::Inside,
+    );
+    let knob = radius - (1.5 * z).max(1.0);
+    let x = if on {
+        track.right() - radius
+    } else {
+        track.left() + radius
+    };
+    painter.circle(
+        Pos2::new(x, track.center().y),
+        knob,
+        Color32::WHITE,
+        Stroke::new(1.0, Color32::from_gray(120)),
+    );
+    let label = node.prop("label");
+    if !label.is_empty() {
+        let tr = Rect::from_min_max(Pos2::new(track.right() + 4.0 * z, rect.top()), rect.max);
+        text_in(
+            &painter,
+            tr,
+            &label,
+            font(&w, z),
+            fg(&w),
+            Align2::LEFT_CENTER,
+            false,
+        );
+    }
+    if resp.clicked() {
+        write(node, toggled(&w, s).to_string());
+    }
+    resp
+}
+
+/// The track of a slide button: twice as wide as it is high, at the left of
+/// the widget and centred vertically, shrunk to fit a narrow widget.
+fn switch_rect(rect: Rect, z: f32) -> Rect {
+    let h = (rect.height() - 2.0 * z)
+        .min(16.0 * z)
+        .min(rect.width() / 1.75)
+        .max(1.0);
+    let w = (h * 1.75).min(rect.width());
+    Rect::from_min_size(
+        Pos2::new(rect.left(), rect.center().y - h / 2.0),
+        Vec2::new(w, h),
+    )
 }
 
 fn slider(
@@ -1372,5 +1563,90 @@ fn alarm_border(painter: &egui::Painter, w: &Widget, s: &PvState, rect: Rect, z:
                 3.0 * z,
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn widget(props: &str) -> Widget {
+        let xml = format!(r#"<display><widget type="slide_button">{props}</widget></display>"#);
+        bob::Display::parse(&xml).unwrap().widgets.remove(0)
+    }
+
+    fn state(value: i64, writable: bool) -> PvState {
+        PvState {
+            connected: true,
+            value: Value::Long(value),
+            writable,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn toggles_the_whole_value_or_one_bit() {
+        let whole = widget("");
+        assert_eq!(toggled(&whole, Some(&state(0, true))), 1);
+        assert_eq!(toggled(&whole, Some(&state(5, true))), 0);
+        let bit1 = widget("<bit>1</bit>");
+        assert_eq!(toggled(&bit1, Some(&state(1, true))), 3);
+        assert_eq!(toggled(&bit1, Some(&state(3, true))), 1);
+        let bit3 = widget("<bit>3</bit>");
+        assert_eq!(toggled(&bit3, Some(&state(1, true))), 9);
+    }
+
+    #[test]
+    fn push_values_set_and_clear_the_bit() {
+        assert_eq!(with_bit(-1, 6, true), 1);
+        assert_eq!(with_bit(-1, 6, false), 0);
+        assert_eq!(with_bit(2, 1, true), 5);
+        assert_eq!(with_bit(2, 5, false), 1);
+    }
+
+    #[test]
+    fn push_writes_on_press_and_release() {
+        assert_eq!(push_edge(false, true, false), Push::Press);
+        assert_eq!(push_edge(true, true, false), Push::None);
+        assert_eq!(push_edge(true, false, true), Push::Release);
+        assert_eq!(push_edge(false, false, true), Push::Both);
+        assert_eq!(push_edge(false, false, false), Push::None);
+    }
+
+    #[test]
+    fn disabled_or_read_only_controls_do_not_write() {
+        let w = widget("");
+        assert!(can_write(&w, Some(&state(0, true))));
+        assert!(!can_write(&w, Some(&state(0, false))));
+        assert!(is_disabled(&w, Some(&state(0, false))));
+        assert!(!can_write(&w, None));
+        let disconnected = PvState::default();
+        assert!(!can_write(&w, Some(&disconnected)));
+        assert!(!is_disabled(&w, Some(&disconnected)));
+        let off = widget("<enabled>false</enabled>");
+        assert!(is_disabled(&off, None));
+        assert!(!can_write(&off, Some(&state(0, true))));
+    }
+
+    #[test]
+    fn tooltip_fills_in_pv_name_and_value() {
+        let expand = |t: &str| t.replace("$(P)", "BL01T:");
+        assert_eq!(
+            tooltip_text("$(pv_name)\n$(pv_value)", "X:Y", "1.5 mm", &expand),
+            "X:Y\n1.5 mm"
+        );
+        assert_eq!(
+            tooltip_text("$(P)M1.STOP = 1", "", "", &expand),
+            "BL01T:M1.STOP = 1"
+        );
+    }
+
+    #[test]
+    fn switch_fits_a_small_widget() {
+        let r = switch_rect(Rect::from_min_size(Pos2::ZERO, Vec2::splat(20.0)), 1.0);
+        assert!(r.width() <= 20.0 && r.height() > 8.0);
+        assert!(r.width() > r.height());
+        let r = switch_rect(Rect::from_min_size(Pos2::ZERO, Vec2::new(200.0, 30.0)), 1.0);
+        assert_eq!((r.width(), r.height()), (28.0, 16.0));
     }
 }

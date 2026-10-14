@@ -395,7 +395,7 @@ impl BobApp {
             return;
         };
         let mut done = None;
-        let title = pad.pv.name().to_string();
+        let title = plain_name(pad.pv.name());
         let state = pad.pv.state();
         egui::Window::new(title)
             .collapsible(false)
@@ -458,5 +458,33 @@ impl BobApp {
             Some(None) => self.keypad = None,
             None => {}
         }
+    }
+}
+
+/// A PV's name as a user would type it: no `ca://` prefix, and no type or
+/// initial value for a local PV (`loc://x`, not `loc://x<VDouble>(1.5)`).
+fn plain_name(name: &pv::PvName) -> String {
+    match name.scheme {
+        pv::Scheme::Ca => name.base().to_string(),
+        _ => {
+            let full = name.to_string();
+            let prefix = &full[..full.len() - name.pv.len()];
+            format!("{prefix}{}", name.base())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plain_name;
+    use pv::PvName;
+
+    #[test]
+    fn keypad_title_is_the_plain_name() {
+        let t = |n: &str| plain_name(&PvName::parse(n));
+        assert_eq!(t("loc://t1<VDouble>(1.5)"), "loc://t1");
+        assert_eq!(t("ca://BL01T:X"), "BL01T:X");
+        assert_eq!(t("BL01T:X"), "BL01T:X");
+        assert_eq!(t("pva://BL01T:Y"), "pva://BL01T:Y");
     }
 }
