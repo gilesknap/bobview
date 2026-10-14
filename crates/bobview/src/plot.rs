@@ -10,7 +10,7 @@ use pv::{Pv, PvManager, PvState, Value};
 use crate::axis::{self, Scale};
 use crate::screen::Node;
 use crate::style::{self, color, named};
-use crate::widgets::{alarm_border, fill};
+use crate::widgets::{alarm_border, fill, plain_pv_name};
 
 /// The PVs of one trace, in `<traces>` order.
 pub struct TracePvs {
@@ -52,13 +52,24 @@ fn trace_prop(w: &Widget, path: &str) -> Option<String> {
     t.child_text(prop).map(str::to_string)
 }
 
-/// Expand macros in `text`, including `$(traces[N].prop)`.
+/// Expand macros in `text`, including `$(traces[N].prop)`; a trace's PV
+/// (`$(traces[0].y_pv)`, the default trace name) is its plain name, without a
+/// local PV's type and initial value.
 fn expand(node: &Node, text: &str) -> String {
     bob::expand(text, &|name| {
         node.macros
             .get(name)
             .map(str::to_string)
-            .or_else(|| trace_prop(&node.w, name).map(|raw| node.expand(&raw)))
+            .or_else(|| {
+                trace_prop(&node.w, name).map(|raw| {
+                    let value = node.expand(&raw);
+                    if name.ends_with("_pv") {
+                        plain_pv_name(&value)
+                    } else {
+                        value
+                    }
+                })
+            })
             .or_else(|| {
                 node.w
                     .text(name)
@@ -745,7 +756,7 @@ mod tests {
         let y = n.traces[0].y.as_ref().unwrap();
         assert!(y.name().to_string().starts_with("loc://A:ts"));
         let t = traces(&n, 1.0);
-        assert_eq!(t[0].name, "loc://A:ts<VDoubleArray>(1, 2, 3)");
+        assert_eq!(t[0].name, "loc://A:ts");
         assert_eq!(t[0].points, vec![(0.0, 1.0), (1.0, 2.0), (2.0, 3.0)]);
     }
 
