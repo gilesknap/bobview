@@ -268,24 +268,31 @@ fn alignment(w: &Widget, v_default: i64) -> Align2 {
 
 /// Button-like 3D box.
 fn button_box(painter: &egui::Painter, rect: Rect, fill_color: Color32, pressed: bool, z: f32) {
-    let r = CornerRadius::same((2.0 * z).min(255.0) as u8);
-    painter.rect_filled(rect, r, fill_color);
-    let (light, dark) = (
-        Color32::from_white_alpha(160),
-        Color32::from_black_alpha(90),
-    );
-    let (tl, br) = if pressed {
-        (dark, light)
-    } else {
-        (light, dark)
-    };
+    // Like a JavaFX Button: rounded, with a grey outline on all four sides so
+    // it reads as a button on any background, a light top half for the
+    // gradient, and a darker fill while pressed.
+    let r = CornerRadius::same((3.0 * z).min(255.0) as u8);
     let w = (1.0 * z).max(1.0);
-    painter.line_segment([rect.left_bottom(), rect.left_top()], Stroke::new(w, tl));
-    painter.line_segment([rect.left_top(), rect.right_top()], Stroke::new(w, tl));
-    painter.line_segment([rect.right_top(), rect.right_bottom()], Stroke::new(w, br));
-    painter.line_segment(
-        [rect.right_bottom(), rect.left_bottom()],
-        Stroke::new(w, br),
+    let fill_color = if pressed {
+        fill_color.lerp_to_gamma(Color32::BLACK, 0.12)
+    } else {
+        fill_color
+    };
+    painter.rect_filled(rect, r, fill_color);
+    if !pressed {
+        let top = Rect::from_min_max(rect.min, Pos2::new(rect.right(), rect.center().y)).shrink(w);
+        let tr = CornerRadius {
+            sw: 0,
+            se: 0,
+            ..CornerRadius::same(r.nw.saturating_sub(1))
+        };
+        painter.rect_filled(top, tr, Color32::from_white_alpha(40));
+    }
+    painter.rect_stroke(
+        rect,
+        r,
+        Stroke::new(w, Color32::from_gray(150)),
+        StrokeKind::Inside,
     );
 }
 
