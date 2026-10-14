@@ -26,8 +26,8 @@ pub enum Request {
         pv: pv::Pv,
         text: String,
     },
-    /// Show details of a widget's PV (long press on a touch screen).
-    Info(String),
+    /// Show the details of a widget's PV, from its context menu.
+    Details(crate::pvmenu::Details),
 }
 
 /// Per-frame drawing context.
@@ -172,9 +172,10 @@ fn draw_node(ui: &mut Ui, node: &mut Node, cx: &mut Cx, id: Id) {
         alarm_border(&painter, &node.w, state, rect, z);
     }
 
-    // Hover (or long-press on a touch screen) shows the PV name and value.
+    // Hover shows the PV name and value. Right-click (long-press on a touch
+    // screen) opens a menu to copy them or show the PV's details.
     if !node.pv_name.is_empty() && cx.clip.contains_rect(rect) {
-        let resp = response.unwrap_or_else(|| ui.interact(rect, id.with("hover"), Sense::hover()));
+        let resp = response.unwrap_or_else(|| ui.interact(rect, id.with("hover"), Sense::click()));
         let text = match &state {
             Some(s) if s.connected => format!(
                 "{}\n{} {:?}",
@@ -189,9 +190,7 @@ fn draw_node(ui: &mut Ui, node: &mut Node, cx: &mut Cx, id: Id) {
             ),
             None => node.pv_name.clone(),
         };
-        if resp.long_touched() {
-            cx.requests.push(Request::Info(text.clone()));
-        }
+        resp.context_menu(|ui| crate::pvmenu::menu(ui, node, state.as_ref(), cx.requests));
         resp.on_hover_text(text);
     }
 }
@@ -903,7 +902,9 @@ fn choice(
     let (items, current) = choices(&w, s);
     let horizontal = w.bool("horizontal").unwrap_or(true);
     let n = items.len().max(1);
-    let resp = ui.interact(rect.intersect(cx.clip), id, Sense::hover());
+    // Click sensing (here and merged from each choice below) lets the PV
+    // context menu open from anywhere on the widget.
+    let mut resp = ui.interact(rect.intersect(cx.clip), id, Sense::click());
     let painter = ui.painter().with_clip_rect(cx.clip);
     let selected = w
         .color("selected_color")
@@ -972,6 +973,7 @@ fn choice(
         if r.clicked() {
             write(node, item.clone());
         }
+        resp = resp.union(r);
     }
     resp
 }

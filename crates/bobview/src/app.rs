@@ -7,6 +7,7 @@ use bob::Macros;
 use eframe::egui::{self, Color32, Id, Vec2};
 use pv::PvManager;
 
+use crate::pvmenu;
 use crate::screen::{Node, Screen};
 use crate::style::{self, View};
 use crate::widgets::{self, Cx, Request};
@@ -32,7 +33,7 @@ pub struct BobApp {
     /// Use the on-screen keypad for text entries (switched on by the first touch).
     keypad_mode: bool,
     keypad: Option<Keypad>,
-    info: Option<String>,
+    details: Option<pvmenu::Details>,
 }
 
 struct Keypad {
@@ -65,7 +66,7 @@ impl BobApp {
             show_open: start.is_none(),
             keypad_mode: false,
             keypad: None,
-            info: None,
+            details: None,
             open_path: start
                 .as_ref()
                 .map(|l| l.path.display().to_string())
@@ -363,7 +364,7 @@ impl BobApp {
                     self.open(Location { path, macros });
                 }
                 Request::Keypad { pv, text } => self.keypad = Some(Keypad { pv, text }),
-                Request::Info(text) => self.info = Some(text),
+                Request::Details(details) => self.details = Some(details),
                 Request::Webpage(url) => {
                     if let Err(e) = std::process::Command::new("xdg-open").arg(&url).spawn() {
                         log::warn!("cannot open {url}: {e}");
@@ -372,20 +373,20 @@ impl BobApp {
             }
         }
         self.keypad_window(ui);
-        self.info_window(ui);
+        self.details_window(ui);
     }
 
-    fn info_window(&mut self, ui: &mut egui::Ui) {
-        let mut open = self.info.is_some();
-        if let Some(text) = &self.info {
-            egui::Window::new("PV")
+    fn details_window(&mut self, ui: &mut egui::Ui) {
+        let mut open = self.details.is_some();
+        if let Some(details) = &self.details {
+            egui::Window::new("PV details")
                 .open(&mut open)
                 .collapsible(false)
                 .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-                .show(ui.ctx(), |ui| ui.label(text));
+                .show(ui.ctx(), |ui| pvmenu::details_ui(ui, details));
         }
         if !open {
-            self.info = None;
+            self.details = None;
         }
     }
 

@@ -3,6 +3,7 @@
 mod app;
 mod colormaps;
 mod image;
+mod pvmenu;
 mod rules;
 mod screen;
 mod snapshot;
@@ -26,6 +27,7 @@ options:
   --size WxH             snapshot size (default 1280x800)
   --wait SECONDS         time for PVs to connect before a snapshot (default 2)
   --click X,Y            click here before the snapshot (repeatable)
+  --right-click X,Y      right-click here before the snapshot (repeatable)
   -h, --help             show this help
   -V, --version          show the version
 
@@ -52,11 +54,16 @@ fn main() -> eframe::Result {
             "-z" | "--zoom" => zoom = args.next().and_then(|z| z.parse().ok()),
             "-f" | "--fullscreen" => fullscreen = true,
             "-k" | "--keypad" => keypad = true,
-            "--click" => {
+            "--click" | "--right-click" => {
+                let button = if arg == "--click" {
+                    egui::PointerButton::Primary
+                } else {
+                    egui::PointerButton::Secondary
+                };
                 if let Some((x, y)) = args.next().as_deref().and_then(|s| s.split_once(','))
                     && let (Ok(x), Ok(y)) = (x.trim().parse(), y.trim().parse())
                 {
-                    clicks.push(egui::pos2(x, y));
+                    clicks.push((egui::pos2(x, y), button));
                 }
             }
             "--snapshot" => snapshot = args.next().map(PathBuf::from),
