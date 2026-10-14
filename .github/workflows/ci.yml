@@ -41,54 +41,84 @@ jobs:
           name: snapshots
           path: snapshots
 
-  build-arm64:
-    runs-on: ubuntu-24.04-arm
+  build:
+    # release builds for each arch on a native runner, packaged as
+    # bobview-<arch>-linux. cargo-zigbuild links against glibc 2.28 so the
+    # binaries also run on older distributions (e.g. RHEL 8), not just the
+    # runner's Ubuntu 24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            os: ubuntu-24.04
+          - arch: aarch64
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    env:
+      TARGET: ${{ matrix.arch }}-unknown-linux-gnu
+      GLIBC: "2.28"
+      TARGET_DIR: target/${{ matrix.arch }}-unknown-linux-gnu/release
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TARGET }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --workspace
-      - name: Smoke test the aarch64 binaries
+      - uses: mlugg/setup-zig@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - run: cargo zigbuild --release --workspace --target ${TARGET}.${GLIBC}
+      - name: Check the glibc requirement
+        run: |
+          for b in bobview bobview-probe bobview-testioc; do
+            need=$(objdump -T ${TARGET_DIR}/$b | grep -oE "GLIBC_[0-9.]+" | sort -Vu | tail -1)
+            echo "$b needs $need"
+            [ "$(printf "%s\n" "$need" "GLIBC_${GLIBC}" | sort -V | tail -1)" = "GLIBC_${GLIBC}" ]
+          done
+      - name: Smoke test the ${{ matrix.arch }} binaries
         env:
           EPICS_CA_ADDR_LIST: 127.0.0.1
           EPICS_CA_AUTO_ADDR_LIST: "NO"
         run: |
-          target/release/bobview --version
-          target/release/bobview-testioc &
-          target/release/bobview-probe --seconds 3 bl01t:SUM BL01T-MO-SIMC-01:M1.RBV | tee probe.txt
+          ${TARGET_DIR}/bobview --version
+          ${TARGET_DIR}/bobview-testioc &
+          ${TARGET_DIR}/bobview-probe --seconds 3 bl01t:SUM BL01T-MO-SIMC-01:M1.RBV | tee probe.txt
           grep -q "bl01t:SUM .*5" probe.txt
           EPICS_PVA_ADDR_LIST=127.0.0.1 EPICS_PVA_AUTO_ADDR_LIST=NO \
-            target/release/bobview-probe --seconds 3 pva://bl01t:SUM pva://BL01T-DI-CAM-01:PVA:OUTPUT | tee pva.txt
+            ${TARGET_DIR}/bobview-probe --seconds 3 pva://bl01t:SUM pva://BL01T-DI-CAM-01:PVA:OUTPUT | tee pva.txt
           grep -q "OUTPUT .*1024x1024 image" pva.txt
           mkdir -p snapshots
-          target/release/bobview --snapshot snapshots/index-arm64.png --size 800x600 --wait 5 tests/displays/index.bob
+          ${TARGET_DIR}/bobview --snapshot snapshots/index-${{ matrix.arch }}.png --size 800x600 --wait 5 tests/displays/index.bob
           EPICS_PVA_ADDR_LIST=127.0.0.1 EPICS_PVA_AUTO_ADDR_LIST=NO \
-            target/release/bobview --snapshot snapshots/demo-arm64.png --size 1300x780 --wait 5 tests/displays/demo.bob
+            ${TARGET_DIR}/bobview --snapshot snapshots/demo-${{ matrix.arch }}.png --size 1300x780 --wait 5 tests/displays/demo.bob
           kill %1
       - uses: actions/upload-artifact@v4
         with:
-          name: snapshots-arm64
+          name: snapshots-${{ matrix.arch }}
           path: snapshots
       - name: Package
-        run: ./scripts/package.sh bobview-aarch64-linux
+        run: ./scripts/package.sh bobview-${{ matrix.arch }}-linux
       - uses: actions/upload-artifact@v4
         with:
-          name: bobview-aarch64-linux
-          path: bobview-aarch64-linux.tar.gz
+          name: bobview-${{ matrix.arch }}-linux
+          path: bobview-${{ matrix.arch }}-linux.tar.gz
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [check, build-arm64]
+    needs: [check, build]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: bobview-aarch64-linux
+          pattern: bobview-*-linux
+          merge-multiple: true
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" bobview-aarch64-linux.tar.gz \
+          gh release create "${GITHUB_REF_NAME}" bobview-*-linux.tar.gz \
             --repo "${GITHUB_REPOSITORY}" --title "${GITHUB_REF_NAME}" --generate-notes

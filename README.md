@@ -8,9 +8,10 @@ images, and is small enough to run on a phone, in the Android 16 Linux Terminal 
 Scripts (Jython/JavaScript), display editing, alarm and archiver services are
 out of scope.
 
-## Install on the phone
+## Install
 
-In the Android Linux Terminal:
+On the phone (Android Linux Terminal) or an x86_64 Linux desktop; `install.sh`
+picks the aarch64 or x86_64 release build to match the machine:
 
 ```bash
 sudo apt install libxkbcommon0 libwayland-client0 libegl1 libgl1-mesa-dri
@@ -87,9 +88,11 @@ cargo test --workspace
 cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.36
 ```
 
-CI builds the aarch64 binaries natively on GitHub's `ubuntu-24.04-arm`
-runners and attaches `bobview-aarch64-linux.tar.gz` to a GitHub Release for
-every `v*` tag.
+CI builds the x86_64 and aarch64 binaries on GitHub's `ubuntu-24.04` and
+`ubuntu-24.04-arm` runners with `cargo zigbuild` and attaches `bobview-x86_64-linux.tar.gz` and
+`bobview-aarch64-linux.tar.gz` to a GitHub Release for every `v*` tag. They
+are linked against glibc 2.28, so they run on RHEL 8+, Ubuntu 20.04+ and
+Debian 10+.
 
 ## Licences
 
