@@ -254,14 +254,14 @@ dependencies = [
 
 [[package]]
 name = "bob"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "roxmltree",
 ]
 
 [[package]]
 name = "bobview"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bob",
  "eframe",
@@ -2224,7 +2224,7 @@ checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
 name = "pv"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "epics-base-rs",
  "epics-ca-rs",
@@ -2719,7 +2719,7 @@ dependencies = [
 
 [[package]]
 name = "testioc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "asyn-rs",
  "epics-base-rs",
