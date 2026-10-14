@@ -128,7 +128,9 @@ impl BobApp {
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
+        // One row whatever the width, so a window sized to the display shows it
+        // near 100%; the display name is elided when there is no room.
+        ui.horizontal(|ui| {
             ui.spacing_mut().button_padding = Vec2::new(10.0, 6.0);
             if ui
                 .add_enabled(!self.back.is_empty(), egui::Button::new("◀"))
@@ -182,7 +184,8 @@ impl BobApp {
                 self.show_open = !self.show_open;
             }
             if let Some(s) = &self.screen {
-                ui.strong(&s.display.name);
+                ui.add(egui::Label::new(egui::RichText::new(&s.display.name).strong()).truncate())
+                    .on_hover_text(&s.display.name);
             }
         });
     }
