@@ -371,24 +371,31 @@ pub(crate) fn button_box(
     pressed: bool,
     z: f32,
 ) {
-    let r = CornerRadius::same((2.0 * z).min(255.0) as u8);
-    painter.rect_filled(rect, r, fill_color);
-    let (light, dark) = (
-        Color32::from_white_alpha(160),
-        Color32::from_black_alpha(90),
-    );
-    let (tl, br) = if pressed {
-        (dark, light)
-    } else {
-        (light, dark)
-    };
+    // Like a JavaFX Button: rounded, with a grey outline on all four sides so
+    // it reads as a button on any background, a light top half for the
+    // gradient, and a darker fill while pressed.
+    let r = CornerRadius::same((3.0 * z).min(255.0) as u8);
     let w = (1.0 * z).max(1.0);
-    painter.line_segment([rect.left_bottom(), rect.left_top()], Stroke::new(w, tl));
-    painter.line_segment([rect.left_top(), rect.right_top()], Stroke::new(w, tl));
-    painter.line_segment([rect.right_top(), rect.right_bottom()], Stroke::new(w, br));
-    painter.line_segment(
-        [rect.right_bottom(), rect.left_bottom()],
-        Stroke::new(w, br),
+    let fill_color = if pressed {
+        fill_color.lerp_to_gamma(Color32::BLACK, 0.12)
+    } else {
+        fill_color
+    };
+    painter.rect_filled(rect, r, fill_color);
+    if !pressed {
+        let top = Rect::from_min_max(rect.min, Pos2::new(rect.right(), rect.center().y)).shrink(w);
+        let tr = CornerRadius {
+            sw: 0,
+            se: 0,
+            ..CornerRadius::same(r.nw.saturating_sub(1))
+        };
+        painter.rect_filled(top, tr, Color32::from_white_alpha(40));
+    }
+    painter.rect_stroke(
+        rect,
+        r,
+        Stroke::new(w, Color32::from_gray(150)),
+        StrokeKind::Inside,
     );
 }
 
@@ -432,10 +439,22 @@ fn format_value(w: &Widget, s: &PvState) -> String {
     }
 }
 
-fn is_on(w: &Widget, s: &PvState) -> bool {
-    let bit = w.i64("bit").unwrap_or(-1);
-    let v = s.value.as_i64().unwrap_or(0);
+/// The `bit` property: Phoebus defaults it to 0 for checkbox and slide_button,
+/// -1 (whole value) for LEDs and bool buttons.
+fn bit(w: &Widget) -> i64 {
+    let default = match w.kind.as_str() {
+        "checkbox" | "slide_button" => 0,
+        _ => -1,
+    };
+    w.i64("bit").unwrap_or(default)
+}
+
+fn bit_on(v: i64, bit: i64) -> bool {
     if bit < 0 { v != 0 } else { (v >> bit) & 1 == 1 }
+}
+
+fn is_on(w: &Widget, s: &PvState) -> bool {
+    bit_on(s.value.as_i64().unwrap_or(0), bit(w))
 }
 
 /// `value` with the widget's `bit` set to `on`, or 0/1 when `bit` is -1 (the
@@ -452,7 +471,7 @@ fn with_bit(bit: i64, value: i64, on: bool) -> i64 {
 
 /// The value that toggles the widget's bit (or the whole value).
 fn toggled(w: &Widget, s: Option<&PvState>) -> i64 {
-    let bit = w.i64("bit").unwrap_or(-1);
+    let bit = bit(w);
     let on = s.is_some_and(|s| s.connected && is_on(w, s));
     let v = s.and_then(|s| s.value.as_i64()).unwrap_or(0);
     with_bit(bit, v, !on)
@@ -999,7 +1018,7 @@ fn bool_button(
     );
     // Mode 0 toggles; 1 and 2 push (2 inverted): the pressed value is written
     // when the button goes down and the released one when it comes up.
-    let bit = w.i64("bit").unwrap_or(-1);
+    let bit = bit(&w);
     match w.i64("mode").unwrap_or(0) {
         0 if resp.clicked() => write(node, toggled(&w, s).to_string()),
         m @ (1 | 2) => {
@@ -1257,8 +1276,9 @@ fn checkbox(
     resp
 }
 
-/// Phoebus's slide button: an on/off switch whose thumb slides right when
-/// on, followed by the optional label. A click toggles the PV or its bit.
+/// Phoebus SlideButton (a JavaFX ToggleSwitch): the label, then a pill-shaped
+/// track in off_color/on_color with a round thumb that slides to the right
+/// when the selected bit is set. A click toggles the bit like a checkbox.
 fn slide_button(
     ui: &mut Ui,
     node: &mut Node,
@@ -1272,40 +1292,42 @@ fn slide_button(
     let on = s.is_some_and(|s| s.connected && is_on(&w, s));
     let resp = ui.interact(rect.intersect(cx.clip), id, Sense::click());
     let painter = ui.painter().with_clip_rect(cx.clip);
-    let track = switch_rect(rect, z);
-    let (key, default) = if on {
-        ("on_color", Color32::from_rgb(60, 255, 60))
+    let (track, label_rect) = slide_layout(rect, z, !node.prop("label").is_empty());
+    let track_color = if on {
+        w.color("on_color")
+            .map(|c| color(&c))
+            .unwrap_or(Color32::from_rgb(60, 255, 60))
     } else {
-        ("off_color", Color32::from_rgb(60, 100, 60))
+        w.color("off_color")
+            .map(|c| color(&c))
+            .unwrap_or(Color32::from_rgb(60, 100, 60))
     };
-    let track_color = w.color(key).map(|c| color(&c)).unwrap_or(default);
-    let radius = track.height() / 2.0;
+    let r = CornerRadius::same((track.height() / 2.0).min(255.0) as u8);
     painter.rect(
         track,
-        CornerRadius::same(radius.min(255.0) as u8),
+        r,
         track_color,
         Stroke::new(1.0, Color32::from_gray(150)),
         StrokeKind::Inside,
     );
-    let knob = radius - (1.5 * z).max(1.0);
-    let x = if on {
-        track.right() - radius
+    let d = track.height() - 2.0 * (z.max(1.0));
+    let cx_thumb = if on {
+        track.right() - track.height() / 2.0
     } else {
-        track.left() + radius
+        track.left() + track.height() / 2.0
     };
+    let thumb = Pos2::new(cx_thumb, track.center().y);
     painter.circle(
-        Pos2::new(x, track.center().y),
-        knob,
+        thumb,
+        d / 2.0,
         Color32::WHITE,
-        Stroke::new(1.0, Color32::from_gray(120)),
+        Stroke::new(1.0, Color32::from_gray(140)),
     );
-    let label = node.prop("label");
-    if !label.is_empty() {
-        let tr = Rect::from_min_max(Pos2::new(track.right() + 4.0 * z, rect.top()), rect.max);
+    if let Some(lr) = label_rect {
         text_in(
             &painter,
-            tr,
-            &label,
+            lr,
+            &node.prop("label"),
             font(&w, z),
             fg(&w),
             Align2::LEFT_CENTER,
@@ -1318,18 +1340,29 @@ fn slide_button(
     resp
 }
 
-/// The track of a slide button: twice as wide as it is high, at the left of
-/// the widget and centred vertically, shrunk to fit a narrow widget.
-fn switch_rect(rect: Rect, z: f32) -> Rect {
-    let h = (rect.height() - 2.0 * z)
-        .min(16.0 * z)
-        .min(rect.width() / 1.75)
-        .max(1.0);
-    let w = (h * 1.75).min(rect.width());
-    Rect::from_min_size(
-        Pos2::new(rect.left(), rect.center().y - h / 2.0),
-        Vec2::new(w, h),
-    )
+/// Track rect and optional label rect of a slide button. The track is a
+/// pill 1.8 times as wide as it is tall, at most 16px tall at zoom 1,
+/// fitted into the widget; with a label, the label is left and the track
+/// right, otherwise the track is centred.
+fn slide_layout(rect: Rect, z: f32, has_label: bool) -> (Rect, Option<Rect>) {
+    let h = (16.0 * z)
+        .min(rect.height() - 2.0)
+        .min((rect.width() - 2.0) / 1.8)
+        .max(2.0);
+    let tw = h * 1.8;
+    if has_label {
+        let track = Rect::from_min_size(
+            Pos2::new(rect.right() - 1.0 - tw, rect.center().y - h / 2.0),
+            Vec2::new(tw, h),
+        );
+        let label = Rect::from_min_max(rect.min, Pos2::new(track.left() - 4.0 * z, rect.bottom()));
+        (track, Some(label))
+    } else {
+        (
+            Rect::from_center_size(rect.center(), Vec2::new(tw, h)),
+            None,
+        )
+    }
 }
 
 fn slider(
@@ -1732,7 +1765,11 @@ mod tests {
 
     #[test]
     fn toggles_the_whole_value_or_one_bit() {
-        let whole = widget("");
+        // A slide button's bit defaults to 0, as in Phoebus.
+        let default = widget("");
+        assert_eq!(toggled(&default, Some(&state(0, true))), 1);
+        assert_eq!(toggled(&default, Some(&state(5, true))), 4);
+        let whole = widget("<bit>-1</bit>");
         assert_eq!(toggled(&whole, Some(&state(0, true))), 1);
         assert_eq!(toggled(&whole, Some(&state(5, true))), 0);
         let bit1 = widget("<bit>1</bit>");
@@ -1788,11 +1825,31 @@ mod tests {
     }
 
     #[test]
-    fn switch_fits_a_small_widget() {
-        let r = switch_rect(Rect::from_min_size(Pos2::ZERO, Vec2::splat(20.0)), 1.0);
-        assert!(r.width() <= 20.0 && r.height() > 8.0);
-        assert!(r.width() > r.height());
-        let r = switch_rect(Rect::from_min_size(Pos2::ZERO, Vec2::new(200.0, 30.0)), 1.0);
-        assert_eq!((r.width(), r.height()), (28.0, 16.0));
+    fn bit_selection() {
+        assert!(bit_on(1, 0));
+        assert!(!bit_on(2, 0));
+        assert!(bit_on(2, 1));
+        assert!(bit_on(2, -1));
+        assert!(!bit_on(0, -1));
+    }
+
+    #[test]
+    fn slide_track_fits_small_widget() {
+        let rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::splat(20.0));
+        let (track, label) = slide_layout(rect, 1.0, false);
+        assert!(label.is_none());
+        assert!(rect.contains_rect(track));
+        assert!(track.width() > track.height());
+        assert_eq!(track.center(), rect.center());
+    }
+
+    #[test]
+    fn slide_track_right_of_label() {
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(120.0, 30.0));
+        let (track, label) = slide_layout(rect, 1.0, true);
+        let label = label.unwrap();
+        assert!(rect.contains_rect(track));
+        assert!(label.right() < track.left());
+        assert_eq!(track.height(), 16.0);
     }
 }
