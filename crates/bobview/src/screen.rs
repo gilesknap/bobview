@@ -1,8 +1,6 @@
 //! A loaded display: widgets with resolved positions, macros and PVs.
 
-use std::path::{Path, PathBuf};
-
-use bob::{Display, Macros, Widget};
+use bob::{Display, Macros, Source, Widget};
 use pv::{Pv, PvManager};
 
 use crate::rules::CompiledRule;
@@ -42,8 +40,8 @@ pub struct Node {
     pub edit: Option<String>,
     /// Problems to show on the widget, such as a missing embedded file.
     pub error: Option<String>,
-    /// The display file this node came from, to resolve relative paths.
-    pub base: Option<PathBuf>,
+    /// The display file or URL this node came from, to resolve relative paths.
+    pub base: Option<Source>,
     /// The image widget's texture and the frame it shows.
     pub image: Option<crate::image::ImageCache>,
     /// The x and y PVs of each trace of an XY plot.
@@ -55,9 +53,9 @@ pub struct Builder<'a> {
 }
 
 impl Screen {
-    /// Load `path` with `macros` layered over the display's own macros.
-    pub fn load(path: &Path, macros: &Macros, pvs: &PvManager) -> Result<Self, bob::Error> {
-        let display = Display::load(path)?;
+    /// Load `source` with `macros` layered over the display's own macros.
+    pub fn load(source: &Source, macros: &Macros, pvs: &PvManager) -> Result<Self, bob::Error> {
+        let display = crate::fetch::load(source)?;
         Ok(Builder { pvs }.screen(display, macros, None, 0))
     }
 }
@@ -82,16 +80,11 @@ impl Node {
     }
 
     /// Resolve a file named by this widget against the display it is in.
-    pub fn resolve(&self, file: &str) -> PathBuf {
-        resolve(self.base.as_deref(), file)
-    }
-}
-
-fn resolve(base: Option<&Path>, file: &str) -> PathBuf {
-    let path = Path::new(file);
-    match base.and_then(|b| b.parent()) {
-        Some(dir) if path.is_relative() => dir.join(path),
-        _ => path.to_path_buf(),
+    pub fn resolve(&self, file: &str) -> Source {
+        match &self.base {
+            Some(base) => base.resolve(file),
+            None => Source::parse(file),
+        }
     }
 }
 
@@ -146,7 +139,7 @@ impl Builder<'_> {
     ) -> Screen {
         // Macros passed in override the display's own defaults.
         let macros = display.macros.with(macros);
-        let base = display.path.clone();
+        let base = display.source.clone();
         let (widgets, width, height) = match group.filter(|g| !g.is_empty()) {
             Some(name) => match find_group(&display.widgets, name) {
                 Some(g) => {
@@ -163,7 +156,7 @@ impl Builder<'_> {
             },
             None => (display.widgets.clone(), display.width, display.height),
         };
-        let nodes = self.nodes(&widgets, (0.0, 0.0), &macros, base.as_deref(), depth);
+        let nodes = self.nodes(&widgets, (0.0, 0.0), &macros, base.as_ref(), depth);
         // Phoebus shows widgets beyond the declared display size, so grow to fit them.
         let (width, height) = nodes
             .iter()
@@ -184,7 +177,7 @@ impl Builder<'_> {
         widgets: &[Widget],
         origin: (f64, f64),
         macros: &Macros,
-        base: Option<&Path>,
+        base: Option<&Source>,
         depth: u32,
     ) -> Vec<Node> {
         widgets
@@ -198,7 +191,7 @@ impl Builder<'_> {
         w: &Widget,
         origin: (f64, f64),
         parent: &Macros,
-        base: Option<&Path>,
+        base: Option<&Source>,
         depth: u32,
     ) -> Node {
         let macros = parent.with(&w.macros());
@@ -247,7 +240,7 @@ impl Builder<'_> {
             action_pvs,
             edit: None,
             error: None,
-            base: base.map(Path::to_path_buf),
+            base: base.cloned(),
             image: None,
             traces: Vec::new(),
         };
@@ -320,12 +313,15 @@ impl Builder<'_> {
             node.error = Some("embedded displays nested too deeply".into());
             return;
         }
-        let path = node.resolve(file);
-        match Display::load(&path) {
+        let source = node.resolve(file);
+        match crate::fetch::load(&source) {
             Ok(d) => node.embedded = Some(Box::new(self.screen(d, macros, Some(group), depth + 1))),
             Err(e) => {
                 log::warn!("{e}");
-                node.error = Some(format!("{}: not found", path.display()));
+                node.error = Some(match e {
+                    bob::Error::Io(..) => format!("{source}: not found"),
+                    e => e.to_string(),
+                });
             }
         }
     }
@@ -414,6 +410,7 @@ mod tests {
 #[cfg(test)]
 pub mod display_set {
     use super::*;
+    use std::path::{Path, PathBuf};
 
     /// Widget types bobview draws (anything else gets a placeholder).
     const KNOWN: &[&str] = &[
@@ -499,7 +496,8 @@ pub mod display_set {
     fn all_test_displays_load() {
         let pvs = PvManager::new();
         for f in files() {
-            let s = Screen::load(&f, &Macros::default(), &pvs).unwrap_or_else(|e| panic!("{e}"));
+            let s = Screen::load(&f.clone().into(), &Macros::default(), &pvs)
+                .unwrap_or_else(|e| panic!("{e}"));
             assert!(!s.nodes.is_empty(), "{} is empty", f.display());
             check(&s.nodes, &f);
         }
@@ -512,7 +510,7 @@ pub mod display_set {
             .into_iter()
             .find(|f| f.ends_with("motors.bob"))
             .unwrap();
-        let s = Screen::load(&path, &Macros::default(), &pvs).unwrap();
+        let s = Screen::load(&path.into(), &Macros::default(), &pvs).unwrap();
         let axis2 = s.nodes.iter().find(|n| n.w.name() == "Axis2").unwrap();
         let group = &axis2.embedded.as_ref().unwrap().nodes[0];
         let rbv = group.children.iter().find(|n| n.w.name() == "Rbv").unwrap();

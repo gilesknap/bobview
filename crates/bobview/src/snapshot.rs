@@ -58,7 +58,7 @@ pub fn run(start: Location, opts: &Options, out: &Path) -> Result<(), String> {
 
     // Run frames until PVs have had time to connect and clicks have settled.
     let output = loop {
-        let started = begin.elapsed() >= opts.wait;
+        let started = begin.elapsed() >= opts.wait && !app.is_loading();
         let events = if started {
             pending.pop_front().unwrap_or_default()
         } else {
@@ -86,7 +86,7 @@ pub fn run(start: Location, opts: &Options, out: &Path) -> Result<(), String> {
                         Duration::from_secs(1)
                     }
             });
-            if begin.elapsed() >= until {
+            if begin.elapsed() >= until && !app.is_loading() {
                 break output;
             }
         }
@@ -250,7 +250,7 @@ mod tests {
         for f in crate::screen::display_set::files() {
             let out = dir.join(f.file_name().unwrap()).with_extension("png");
             let start = Location {
-                path: f.clone(),
+                source: f.clone().into(),
                 macros: bob::Macros::default(),
             };
             let opts = Options {

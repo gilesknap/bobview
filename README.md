@@ -33,7 +33,14 @@ This installs into `~/.local`:
 bobview-testioc &                    # simulated BL01T IOCs on this machine
 EPICS_CA_ADDR_LIST=127.0.0.1 bobview # opens share/bobview/displays/index.bob
 bobview path/to/screen.bob -m P=BL01T,R=:DET:
+bobview http://host:8080/opi/demo.bob  # displays can be served over http(s)
 ```
+
+A display can be a file or an `http://` / `https://` URL, on the command line
+or typed into Open…. Files it names (buttons, embedded displays, navigation
+tabs) are found relative to it, so a directory of screens served by any web
+server (e.g. `python3 -m http.server`) works as it does from disk. Fetched
+screens are kept in memory for Back and Forward; Reload fetches them again.
 
 `bobview-testioc` serves the PVs of the
 [epics-containers example-services](https://github.com/epics-containers/example-services)

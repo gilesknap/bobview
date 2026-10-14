@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use bob::Macros;
+use bob::{Macros, Source};
 use eframe::egui::{self, Color32, Id, Vec2};
 use pv::PvManager;
 
@@ -14,7 +14,7 @@ use crate::widgets::{self, Cx, Request};
 
 #[derive(Clone, Debug)]
 pub struct Location {
-    pub path: PathBuf,
+    pub source: Source,
     pub macros: Macros,
 }
 
@@ -34,6 +34,8 @@ pub struct BobApp {
     keypad_mode: bool,
     keypad: Option<Keypad>,
     details: Option<pvmenu::Details>,
+    /// A URL being fetched for `current`, shown once it arrives.
+    loading: Option<std::sync::mpsc::Receiver<Result<(), bob::Error>>>,
 }
 
 struct Keypad {
@@ -67,9 +69,10 @@ impl BobApp {
             keypad_mode: false,
             keypad: None,
             details: None,
+            loading: None,
             open_path: start
                 .as_ref()
-                .map(|l| l.path.display().to_string())
+                .map(|l| l.source.to_string())
                 .unwrap_or_default(),
         };
         if let Some(loc) = start {
@@ -86,7 +89,15 @@ impl BobApp {
     fn show(&mut self, loc: Location) {
         // Drop the old screen first so its PVs disconnect before the new ones start.
         self.screen = None;
-        match Screen::load(&loc.path, &loc.macros, &self.pvs) {
+        self.open_path = loc.source.to_string();
+        // Fetch a URL on a thread first; `poll_loading` shows it once it arrives.
+        self.loading = crate::fetch::prefetch(&loc.source);
+        if self.loading.is_some() {
+            self.error = None;
+            self.current = Some(loc);
+            return;
+        }
+        match Screen::load(&loc.source, &loc.macros, &self.pvs) {
             Ok(screen) => {
                 self.screen = Some(screen);
                 self.error = None;
@@ -96,8 +107,33 @@ impl BobApp {
                 self.error = Some(e.to_string());
             }
         }
-        self.open_path = loc.path.display().to_string();
         self.current = Some(loc);
+    }
+
+    /// Whether a display is still being fetched.
+    pub fn is_loading(&self) -> bool {
+        self.loading.is_some()
+    }
+
+    /// Show the display being fetched, or its error, once the fetch is done.
+    fn poll_loading(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.loading else { return };
+        match rx.try_recv() {
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint_after(Duration::from_millis(50));
+            }
+            Ok(Ok(())) => {
+                if let Some(cur) = self.current.clone() {
+                    self.show(cur);
+                }
+            }
+            Ok(Err(e)) => {
+                log::error!("{e}");
+                self.error = Some(e.to_string());
+                self.loading = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.loading = None,
+        }
     }
 
     /// Navigate to a display, recording where we came from.
@@ -157,6 +193,7 @@ impl BobApp {
             if ui.button("⟳").on_hover_text("Reload").clicked()
                 && let Some(cur) = self.current.clone()
             {
+                crate::fetch::forget();
                 self.show(cur);
             }
             ui.separator();
@@ -193,15 +230,18 @@ impl BobApp {
     fn open_panel(&mut self, ui: &mut egui::Ui) {
         let mut chosen = None;
         ui.horizontal(|ui| {
-            ui.label("File:");
+            ui.label("File or URL:");
             let edit = ui
                 .add(egui::TextEdit::singleline(&mut self.open_path).desired_width(f32::INFINITY));
             if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                chosen = Some(PathBuf::from(self.open_path.trim()));
+                chosen = Some(Source::parse(&self.open_path));
             }
         });
         let path = PathBuf::from(self.open_path.trim());
-        let dir = if path.is_dir() {
+        // Nothing to list for a URL (an empty path lists nothing).
+        let dir = if Source::parse(&self.open_path).is_url() {
+            PathBuf::new()
+        } else if path.is_dir() {
             path
         } else {
             path.parent()
@@ -227,20 +267,20 @@ impl BobApp {
                             self.open_path = format!("{}/", entry.display());
                         }
                     } else if ui.button(format!("🗋 {name}")).clicked() {
-                        chosen = Some(entry);
+                        chosen = Some(Source::File(entry));
                     }
                 }
             });
-        if let Some(path) = chosen {
+        if let Some(source) = chosen {
             self.show_open = false;
             if self.home.is_none() {
                 self.home = Some(Location {
-                    path: path.clone(),
+                    source: source.clone(),
                     macros: Macros::default(),
                 });
             }
             self.open(Location {
-                path,
+                source,
                 macros: Macros::default(),
             });
         }
@@ -250,11 +290,16 @@ impl BobApp {
         ui.horizontal(|ui| {
             if let Some(e) = &self.error {
                 ui.colored_label(Color32::RED, e);
+            } else if self.loading.is_some()
+                && let Some(cur) = &self.current
+            {
+                ui.spinner();
+                ui.label(format!("Loading {}", cur.source));
             } else if let Some(s) = &self.screen {
                 let (connected, total) = count_pvs(&s.nodes);
                 ui.label(format!("PVs {connected}/{total} connected"));
                 if let Some(cur) = &self.current {
-                    ui.weak(cur.path.display().to_string());
+                    ui.weak(cur.source.to_string());
                 }
             }
         });
@@ -309,6 +354,7 @@ impl eframe::App for BobApp {
 
 impl BobApp {
     pub fn draw(&mut self, ui: &mut egui::Ui) {
+        self.poll_loading(ui.ctx());
         if !self.keypad_mode && ui.input(|i| i.any_touches()) {
             self.keypad_mode = true;
         }
@@ -360,12 +406,12 @@ impl BobApp {
         for req in requests {
             match req {
                 Request::Open {
-                    path,
+                    source,
                     macros,
                     target,
                 } => {
-                    log::info!("open {} ({target})", path.display());
-                    self.open(Location { path, macros });
+                    log::info!("open {source} ({target})");
+                    self.open(Location { source, macros });
                 }
                 Request::Keypad { pv, text } => self.keypad = Some(Keypad { pv, text }),
                 Request::Details(details) => self.details = Some(details),

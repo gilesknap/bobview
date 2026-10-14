@@ -1,8 +1,6 @@
 //! Painting and interaction for each widget type.
 
-use std::path::PathBuf;
-
-use bob::{Action, Macros, Widget};
+use bob::{Action, Macros, Source, Widget};
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, FontId, Id, Pos2, Rect, Response, Sense, Shape, Stroke,
     StrokeKind, Ui, Vec2,
@@ -16,7 +14,7 @@ use crate::style::{self, View, color, named, severity_color};
 /// Requests that widgets pass up to the application.
 pub enum Request {
     Open {
-        path: PathBuf,
+        source: Source,
         macros: Macros,
         target: String,
     },
@@ -959,7 +957,7 @@ fn run_action(node: &Node, action: &Action, cx: &mut Cx) {
             let expanded =
                 Macros::from_pairs(macros.iter().map(|(k, v)| (k.to_string(), node.expand(v))));
             cx.requests.push(Request::Open {
-                path: node.resolve(&file),
+                source: node.resolve(&file),
                 macros: node.macros.with(&expanded),
                 target: target.clone(),
             });

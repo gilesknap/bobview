@@ -3,6 +3,7 @@
 mod app;
 mod axis;
 mod colormaps;
+mod fetch;
 mod image;
 mod meter;
 mod plot;
@@ -15,11 +16,11 @@ mod widgets;
 
 use std::path::PathBuf;
 
-use bob::Macros;
+use bob::{Macros, Source};
 use eframe::egui;
 
 const USAGE: &str = "\
-usage: bobview [options] [display.bob]
+usage: bobview [options] [display.bob | http(s)://host/display.bob]
 
 options:
   -m, --macros P=X,R=Y   macros for the display
@@ -36,6 +37,8 @@ options:
 
 With no display, bobview opens index.bob from the bundled displays
 (~/.local/share/bobview/displays) when present, else a file chooser.
+A display may also be an http:// or https:// URL; files it names are
+fetched relative to it.
 PVs without a prefix use Channel Access; EPICS_CA_ADDR_LIST and
 EPICS_CA_NAME_SERVERS select the IOCs. Set BOBVIEW_LOG=debug for more output.";
 
@@ -84,12 +87,12 @@ fn main() -> eframe::Result {
                 println!("bobview {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
-            _ => file = Some(PathBuf::from(arg)),
+            _ => file = Some(Source::parse(&arg)),
         }
     }
     let start = file
-        .or_else(default_display)
-        .map(|path| app::Location { path, macros });
+        .or_else(|| default_display().map(Source::File))
+        .map(|source| app::Location { source, macros });
 
     if let Some(out) = snapshot {
         let Some(start) = start else {
