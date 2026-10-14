@@ -16,8 +16,8 @@ pub struct Options {
     pub zoom: Option<f32>,
     /// Time for PVs to connect before anything else happens.
     pub wait: Duration,
-    /// Points to click, in order, once `wait` has passed.
-    pub clicks: Vec<Pos2>,
+    /// Points to click and the button to use, in order, once `wait` has passed.
+    pub clicks: Vec<(Pos2, egui::PointerButton)>,
     pub keypad: bool,
 }
 
@@ -36,10 +36,10 @@ pub fn run(start: Location, opts: &Options, out: &Path) -> Result<(), String> {
     let mut pending: std::collections::VecDeque<Vec<egui::Event>> = opts
         .clicks
         .iter()
-        .flat_map(|&pos| {
+        .flat_map(|&(pos, which)| {
             let button = |pressed| egui::Event::PointerButton {
                 pos,
-                button: egui::PointerButton::Primary,
+                button: which,
                 pressed,
                 modifiers: Default::default(),
             };

@@ -52,8 +52,10 @@ Access.
 
 Options: `-z ZOOM` fixes the zoom instead of fitting the window, `-f` starts
 full screen, `--snapshot out.png` renders headless and exits (with `--size WxH`
-and `--wait SECONDS`), `BOBVIEW_LOG=debug` gives more output. On a touch
-screen, pinch to zoom; long-press a widget to see its PV and value.
+and `--wait SECONDS`, and `--click X,Y` or `--right-click X,Y` to interact
+first), `BOBVIEW_LOG=debug` gives more output. Hover over a widget to see its
+PV and value; right-click it (long-press on a touch screen) to copy the PV
+name or value, or open the PV details. On a touch screen, pinch to zoom.
 
 ## What it draws
 
