@@ -28,7 +28,13 @@ fn main() {
         .collect();
     let writers: Vec<_> = puts
         .iter()
-        .filter_map(|p| p.split_once('='))
+        .filter_map(|p| {
+            let pair = p.split_once('=');
+            if pair.is_none() {
+                eprintln!("ignoring --put {p}: expected NAME=VALUE");
+            }
+            pair
+        })
         .map(|(n, v)| (manager.subscribe(n), v.to_string()))
         .collect();
     let mut written = false;

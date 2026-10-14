@@ -42,7 +42,11 @@ pub(crate) async fn run(name: PvName, shared: Arc<Shared>) {
         "ramp" => {
             let (lo, hi, step) = (arg(0, -5.0), arg(1, 5.0), arg(2, 1.0));
             (min, max, period) = (lo, hi, arg(3, 1.0));
-            let count = ((hi - lo) / step).abs().floor() as u64 + 1;
+            let count = if step == 0.0 || !step.is_finite() {
+                1
+            } else {
+                ((hi - lo) / step).abs().min(1e9).floor() as u64 + 1
+            };
             Box::new(move |n| Value::Double(lo + step * (n % count.max(1)) as f64))
         }
         "noise" => {

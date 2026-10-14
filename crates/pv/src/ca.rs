@@ -15,12 +15,16 @@ pub(crate) async fn run(client: &CaClient, pv: &str, shared: Arc<Shared>) {
     let (tx, mut writes) = mpsc::unbounded_channel();
     shared.set_writer(Writer::Channel(tx));
 
-    let mut monitor = match channel.subscribe().await {
-        Ok(m) => m,
-        Err(e) => {
-            log::warn!("{pv}: cannot subscribe: {e}");
-            shared.update(|s| s.error = Some(e.to_string()));
-            return;
+    let mut retry = std::time::Duration::from_millis(500);
+    let mut monitor = loop {
+        match channel.subscribe().await {
+            Ok(m) => break m,
+            Err(e) => {
+                log::warn!("{pv}: cannot subscribe, retrying in {retry:?}: {e}");
+                shared.update(|s| s.error = Some(e.to_string()));
+                tokio::time::sleep(retry).await;
+                retry = (retry * 2).min(std::time::Duration::from_secs(30));
+            }
         }
     };
 
