@@ -1,7 +1,6 @@
 //! The context menu on widgets with a PV (right-click, or long-press on a
 //! touch screen) and the PV details window it can open.
 
-use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use eframe::egui::{self, Ui};
@@ -15,7 +14,7 @@ use crate::widgets::Request;
 pub struct Details {
     pub pv: Pv,
     pub widget: String,
-    pub file: Option<PathBuf>,
+    pub file: Option<bob::Source>,
 }
 
 /// Fill the context menu for a widget's PV.
@@ -118,7 +117,7 @@ fn details_rows(details: &Details, s: &PvState) -> Vec<(&'static str, String)> {
     }
     rows.push(("Widget", details.widget.clone()));
     if let Some(file) = &details.file {
-        rows.push(("Display", file.display().to_string()));
+        rows.push(("Display", file.to_string()));
     }
     rows
 }

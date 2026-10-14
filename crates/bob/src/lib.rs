@@ -8,12 +8,14 @@
 mod element;
 mod macros;
 mod model;
+mod source;
 
 use std::path::{Path, PathBuf};
 
 pub use element::Element;
 pub use macros::{Macros, expand};
 pub use model::{Action, Color, Font, FontStyle, Rule, RuleExpr, named_color};
+pub use source::Source;
 
 /// A parsed `.bob` display.
 #[derive(Clone, Debug)]
@@ -24,8 +26,8 @@ pub struct Display {
     pub background: Color,
     pub macros: Macros,
     pub widgets: Vec<Widget>,
-    /// The file it was read from, used to resolve relative paths.
-    pub path: Option<PathBuf>,
+    /// The file or URL it was read from, used to resolve relative paths.
+    pub source: Option<Source>,
 }
 
 /// One widget: its type, property elements and child widgets.
@@ -41,6 +43,8 @@ pub enum Error {
     Io(PathBuf, std::io::Error),
     Xml(roxmltree::Error),
     NotADisplay(String),
+    /// A URL that could not be fetched, and why.
+    Fetch(String, String),
 }
 
 impl std::fmt::Display for Error {
@@ -49,6 +53,7 @@ impl std::fmt::Display for Error {
             Error::Io(p, e) => write!(f, "cannot read {}: {e}", p.display()),
             Error::Xml(e) => write!(f, "invalid XML: {e}"),
             Error::NotADisplay(root) => write!(f, "expected a <display>, found <{root}>"),
+            Error::Fetch(url, why) => write!(f, "cannot fetch {url}: {why}"),
         }
     }
 }
@@ -59,7 +64,7 @@ impl Display {
     pub fn load(path: &Path) -> Result<Self, Error> {
         let text = std::fs::read_to_string(path).map_err(|e| Error::Io(path.into(), e))?;
         let mut display = Self::parse(&text)?;
-        display.path = Some(path.to_path_buf());
+        display.source = Some(Source::File(path.to_path_buf()));
         Ok(display)
     }
 
@@ -84,16 +89,15 @@ impl Display {
                 .unwrap_or(named_color("Background")),
             macros: as_widget.macros(),
             widgets,
-            path: None,
+            source: None,
         })
     }
 
-    /// Resolve a file named by this display (e.g. in an action) against its directory.
-    pub fn resolve(&self, file: &str) -> PathBuf {
-        let file = Path::new(file);
-        match self.path.as_ref().and_then(|p| p.parent()) {
-            Some(dir) if file.is_relative() => dir.join(file),
-            _ => file.to_path_buf(),
+    /// Resolve a file named by this display (e.g. in an action) against its location.
+    pub fn resolve(&self, file: &str) -> Source {
+        match &self.source {
+            Some(s) => s.resolve(file),
+            None => Source::parse(file),
         }
     }
 
