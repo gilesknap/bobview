@@ -1,5 +1,6 @@
 #!/bin/bash
-# Install bobview for aarch64 Linux (e.g. the Android Linux Terminal) into ~/.local
+# Install bobview for aarch64 or x86_64 Linux (e.g. the Android Linux Terminal)
+# into ~/.local
 #
 #   curl -sSfL https://raw.githubusercontent.com/gilesknap/bobview/main/install.sh | bash
 #
@@ -7,7 +8,12 @@
 set -euo pipefail
 
 repo=gilesknap/bobview
-name=bobview-aarch64-linux
+case $(uname -m) in
+    aarch64 | arm64) arch=aarch64 ;;
+    x86_64 | amd64) arch=x86_64 ;;
+    *) echo "bobview: no release build for $(uname -m)" >&2; exit 1 ;;
+esac
+name=bobview-${arch}-linux
 prefix=${PREFIX:-$HOME/.local}
 here=$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" && pwd)
 

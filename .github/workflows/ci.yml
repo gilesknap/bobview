@@ -41,14 +41,23 @@ jobs:
           name: snapshots
           path: snapshots
 
-  build-arm64:
-    runs-on: ubuntu-24.04-arm
+  build:
+    # native release builds for each arch, packaged as bobview-<arch>-linux
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            os: ubuntu-24.04
+          - arch: aarch64
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --workspace
-      - name: Smoke test the aarch64 binaries
+      - name: Smoke test the ${{ matrix.arch }} binaries
         env:
           EPICS_CA_ADDR_LIST: 127.0.0.1
           EPICS_CA_AUTO_ADDR_LIST: "NO"
@@ -61,34 +70,35 @@ jobs:
             target/release/bobview-probe --seconds 3 pva://bl01t:SUM pva://BL01T-DI-CAM-01:PVA:OUTPUT | tee pva.txt
           grep -q "OUTPUT .*1024x1024 image" pva.txt
           mkdir -p snapshots
-          target/release/bobview --snapshot snapshots/index-arm64.png --size 800x600 --wait 5 tests/displays/index.bob
+          target/release/bobview --snapshot snapshots/index-${{ matrix.arch }}.png --size 800x600 --wait 5 tests/displays/index.bob
           EPICS_PVA_ADDR_LIST=127.0.0.1 EPICS_PVA_AUTO_ADDR_LIST=NO \
-            target/release/bobview --snapshot snapshots/demo-arm64.png --size 1300x780 --wait 5 tests/displays/demo.bob
+            target/release/bobview --snapshot snapshots/demo-${{ matrix.arch }}.png --size 1300x780 --wait 5 tests/displays/demo.bob
           kill %1
       - uses: actions/upload-artifact@v4
         with:
-          name: snapshots-arm64
+          name: snapshots-${{ matrix.arch }}
           path: snapshots
       - name: Package
-        run: ./scripts/package.sh bobview-aarch64-linux
+        run: ./scripts/package.sh bobview-${{ matrix.arch }}-linux
       - uses: actions/upload-artifact@v4
         with:
-          name: bobview-aarch64-linux
-          path: bobview-aarch64-linux.tar.gz
+          name: bobview-${{ matrix.arch }}-linux
+          path: bobview-${{ matrix.arch }}-linux.tar.gz
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [check, build-arm64]
+    needs: [check, build]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: bobview-aarch64-linux
+          pattern: bobview-*-linux
+          merge-multiple: true
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" bobview-aarch64-linux.tar.gz \
+          gh release create "${GITHUB_REF_NAME}" bobview-*-linux.tar.gz \
             --repo "${GITHUB_REPOSITORY}" --title "${GITHUB_REF_NAME}" --generate-notes
