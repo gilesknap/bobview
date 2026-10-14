@@ -156,6 +156,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "175571dd1d178ced59193a6fc02dde1b972eb0bc56c892cde9beeceac5bf0f6b"
 
 [[package]]
+name = "asyn-rs"
+version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a9f5c17fd8945b152a81acfc530cf8aa3305592c0b241505ca7e08302791bab"
+dependencies = [
+ "bitflags 2.13.2",
+ "chrono",
+ "epics-base-rs",
+ "epics-libcom-rs",
+ "libc",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "async-trait"
 version = "0.1.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1520,6 +1540,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "motor-rs"
+version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f98300a13562bd05e623028ba54b6bf14250d1fd3d7e34bcb17e15759420cc04"
+dependencies = [
+ "asyn-rs",
+ "bitflags 2.13.2",
+ "epics-base-rs",
+ "epics-ca-rs",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "moxcms"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2342,6 +2376,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
 dependencies = [
  "serde_core",
+ "serde_derive",
 ]
 
 [[package]]
@@ -2572,6 +2607,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "testioc"
+version = "0.1.0"
+dependencies = [
+ "asyn-rs",
+ "epics-base-rs",
+ "epics-ca-rs",
+ "motor-rs",
+ "tokio",
 ]
 
 [[package]]

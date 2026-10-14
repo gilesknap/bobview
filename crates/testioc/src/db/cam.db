@@ -1,0 +1,97 @@
+# A cut-down simDetector: the ADBase and NDPluginBase records demo.bob uses.
+# Setpoint _RBV mirrors follow by CP link; the rest are written by cam.rs.
+
+record(bo, "$(P)$(R)Acquire") {
+    field(ZNAM, "Done")
+    field(ONAM, "Acquire")
+}
+record(bi, "$(P)$(R)Acquire_RBV") {
+    field(ZNAM, "Done")
+    field(ONAM, "Acquire")
+}
+record(ao, "$(P)$(R)AcquireTime") {
+    field(PREC, "3")
+    field(EGU,  "s")
+    field(VAL,  "0.1")
+}
+record(ai, "$(P)$(R)AcquireTime_RBV") {
+    field(INP,  "$(P)$(R)AcquireTime CP")
+    field(PINI, "YES")
+    field(PREC, "3")
+    field(EGU,  "s")
+}
+record(ao, "$(P)$(R)AcquirePeriod") {
+    field(PREC, "3")
+    field(EGU,  "s")
+    field(VAL,  "0.0")
+}
+record(ai, "$(P)$(R)AcquirePeriod_RBV") {
+    field(INP,  "$(P)$(R)AcquirePeriod CP")
+    field(PINI, "YES")
+    field(PREC, "3")
+    field(EGU,  "s")
+}
+record(longout, "$(P)$(R)ArrayCounter") {
+    field(VAL,  "0")
+    field(PINI, "YES")
+}
+record(longin, "$(P)$(R)ArrayCounter_RBV") {
+}
+record(bo, "$(P)$(R)ArrayCallbacks") {
+    field(ZNAM, "Disable")
+    field(ONAM, "Enable")
+    field(VAL,  "1")
+}
+record(bi, "$(P)$(R)ArrayCallbacks_RBV") {
+    field(INP,  "$(P)$(R)ArrayCallbacks CP")
+    field(PINI, "YES")
+    field(ZNAM, "Disable")
+    field(ONAM, "Enable")
+}
+record(mbbi, "$(P)$(R)DetectorState_RBV") {
+    field(ZRST, "Idle")
+    field(ONST, "Acquire")
+    field(TWST, "Readout")
+    field(THST, "Correct")
+    field(FRST, "Saving")
+    field(FVST, "Aborting")
+    field(SXST, "Error")
+    field(SVST, "Waiting")
+    field(EIST, "Initializing")
+    field(NIST, "Disconnected")
+    field(TEST, "Aborted")
+}
+record(mbbo, "$(P)$(R)ImageMode") {
+    field(ZRST, "Single")
+    field(ONST, "Multiple")
+    field(TWST, "Continuous")
+    field(VAL,  "2")
+}
+record(mbbi, "$(P)$(R)ImageMode_RBV") {
+    field(INP,  "$(P)$(R)ImageMode CP")
+    field(PINI, "YES")
+    field(ZRST, "Single")
+    field(ONST, "Multiple")
+    field(TWST, "Continuous")
+}
+record(longout, "$(P)$(R)NumImages") {
+    field(VAL,  "100")
+}
+record(longin, "$(P)$(R)NumImages_RBV") {
+    field(INP,  "$(P)$(R)NumImages CP")
+    field(PINI, "YES")
+}
+record(longin, "$(P)$(R)NumImagesCounter_RBV") {
+}
+record(longout, "$(P)$(R)NumExposures") {
+    field(VAL,  "1")
+}
+record(longin, "$(P)$(R)NumExposures_RBV") {
+    field(INP,  "$(P)$(R)NumExposures CP")
+    field(PINI, "YES")
+}
+record(stringin, "$(P)$(R)StatusMessage_RBV") {
+    field(VAL,  "Idle")
+}
+record(longin, "$(P)$(R)UniqueId_RBV") {
+}

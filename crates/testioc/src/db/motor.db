@@ -1,0 +1,15 @@
+# One simulated motor axis, after motor-rs ioc/motor.template.
+record(motor, "$(P)$(M)") {
+    field(DESC, "$(DESC)")
+    field(DTYP, "simMotor_$(M)")
+    field(SCAN, "Passive")
+    field(EGU,  "mm")
+    field(VELO, "2.0")
+    field(HVEL, "1.0")
+    field(ACCL, "0.5")
+    field(DHLM, "100.0")
+    field(DLLM, "-100.0")
+    field(MRES, "0.001")
+    field(PREC, "3")
+    field(TWV,  "1.0")
+}

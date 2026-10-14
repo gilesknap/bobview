@@ -1,0 +1,17 @@
+[package]
+name = "testioc"
+description = "Pure-Rust CA test IOC serving the example-services BL01T PVs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "bobview-testioc"
+path = "src/main.rs"
+
+[dependencies]
+asyn-rs = "0.31.0"
+epics-base-rs = "0.31.0"
+epics-ca-rs = "0.31.0"
+motor-rs = "0.31.0"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
