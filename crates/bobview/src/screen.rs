@@ -422,6 +422,7 @@ pub mod display_set {
         "radio",
         "combo",
         "checkbox",
+        "slide_button",
         "rectangle",
         "ellipse",
         "arc",
