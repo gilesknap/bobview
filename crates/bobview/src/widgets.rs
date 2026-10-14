@@ -279,7 +279,9 @@ pub(crate) fn outline(painter: &egui::Painter, rect: Rect, width: f32, c: Color3
     );
 }
 
-/// Draw `text` in `rect` with the widget's alignment, optionally wrapping.
+/// Paint `text` in `rect` the way a JavaFX `Label` does: each row aligned on
+/// its own, only whole rows that fit the height, and overflow elided with `…`
+/// so the start of the text always stays visible.
 pub(crate) fn text_in(
     painter: &egui::Painter,
     rect: Rect,
@@ -289,26 +291,56 @@ pub(crate) fn text_in(
     align: Align2,
     wrap: bool,
 ) {
-    let width = if wrap {
-        rect.width().max(1.0)
-    } else {
-        f32::INFINITY
-    };
-    let galley = painter.layout(text.to_string(), font, c, width);
-    let size = galley.size();
+    let row_height = painter.fonts_mut(|f| f.row_height(&font));
+    let job = text_job(text, font, c, rect.size(), row_height, align.x(), wrap);
+    let galley = painter.layout_job(job);
     let x = match align.x() {
         egui::Align::Min => rect.left() + 1.0,
-        egui::Align::Center => rect.center().x - size.x / 2.0,
-        egui::Align::Max => rect.right() - size.x - 1.0,
+        egui::Align::Center => rect.center().x,
+        egui::Align::Max => rect.right() - 1.0,
     };
+    let height = galley.size().y;
     let y = match align.y() {
         egui::Align::Min => rect.top(),
-        egui::Align::Center => rect.center().y - size.y / 2.0,
-        egui::Align::Max => rect.bottom() - size.y,
+        egui::Align::Center => rect.center().y - height / 2.0,
+        egui::Align::Max => rect.bottom() - height,
     };
     painter
         .with_clip_rect(rect.intersect(painter.clip_rect()))
         .galley(Pos2::new(x, y), galley, c);
+}
+
+/// The layout for [`text_in`]: rows aligned on their own and limited to what
+/// fits in `size`, with the overflow elided.
+fn text_job(
+    text: &str,
+    font: FontId,
+    c: Color32,
+    size: Vec2,
+    row_height: f32,
+    halign: egui::Align,
+    wrap: bool,
+) -> egui::text::LayoutJob {
+    let rows = max_rows(size.y, row_height, wrap);
+    let mut job = egui::text::LayoutJob::simple(text.to_string(), font, c, f32::INFINITY);
+    job.wrap = egui::text::TextWrapping {
+        max_width: (size.x - 2.0).max(1.0),
+        max_rows: rows,
+        break_anywhere: rows == 1,
+        overflow_character: Some('…'),
+    };
+    job.halign = halign;
+    job
+}
+
+/// How many rows of text to lay out in a box `height` high: as many whole
+/// rows as fit when wrapping (allowing a little slack for font metrics), and
+/// always at least one.
+fn max_rows(height: f32, row_height: f32, wrap: bool) -> usize {
+    if !wrap || row_height <= 0.0 {
+        return 1;
+    }
+    (((height + 2.0) / row_height).floor() as usize).max(1)
 }
 
 fn alignment(w: &Widget, v_default: i64) -> Align2 {
@@ -1569,6 +1601,101 @@ fn alarm_border(painter: &egui::Painter, w: &Widget, s: &PvState, rect: Rect, z:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn rows_that_fit() {
+        // A 20px textupdate with a 14px font holds a single row.
+        assert_eq!(max_rows(18.0, 17.0, true), 1);
+        assert_eq!(max_rows(40.0, 17.0, true), 2);
+        // Never fewer than one row, even in a box shorter than the font.
+        assert_eq!(max_rows(5.0, 17.0, true), 1);
+        // Without wrapping it's always one row.
+        assert_eq!(max_rows(400.0, 17.0, false), 1);
+    }
+
+    /// Lay out `text` in a `w`x`h` box with Liberation Sans 14, as text_in does.
+    fn layout(text: &str, w: f32, h: f32, halign: egui::Align, wrap: bool) -> Arc<egui::Galley> {
+        let ctx = egui::Context::default();
+        style::install_fonts(&ctx);
+        let mut galley = None;
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let font = FontId::new(14.0, egui::FontFamily::Name(style::BOLD.into()));
+            let row_height = ui.fonts_mut(|f| f.row_height(&font));
+            let job = text_job(
+                text,
+                font,
+                Color32::BLACK,
+                Vec2::new(w, h),
+                row_height,
+                halign,
+                wrap,
+            );
+            galley = Some(ui.painter().layout_job(job));
+        });
+        out.textures_delta.clear();
+        galley.unwrap()
+    }
+
+    const PV: &str = "<BL01T-DI-CAM-01:DET:PortName_RBV>";
+
+    #[test]
+    fn overflow_in_one_row_keeps_the_start() {
+        // A 20px-high textupdate shows one whole row, elided, never a middle fragment.
+        for halign in [egui::Align::Min, egui::Align::Center, egui::Align::Max] {
+            for wrap in [true, false] {
+                let g = layout(PV, 205.0, 18.0, halign, wrap);
+                assert_eq!(g.rows.len(), 1);
+                assert!(g.elided);
+                assert!(g.rows[0].text().starts_with("<BL01T-DI-CAM-01"));
+                assert!(g.rows[0].text().ends_with('…'));
+                assert!(g.size().x <= 203.5);
+            }
+        }
+    }
+
+    #[test]
+    fn wrapped_rows_fit_and_align_on_their_own() {
+        let g = layout(PV, 205.0, 40.0, egui::Align::Center, true);
+        assert_eq!(g.rows.len(), 2);
+        assert!(!g.elided);
+        // Each row centred on x = 0, so the shorter row starts further right.
+        for row in &g.rows {
+            let r = row.rect();
+            assert!((r.center().x).abs() < 1.0, "{r:?}");
+        }
+        let g = layout(PV, 205.0, 40.0, egui::Align::Max, true);
+        for row in &g.rows {
+            assert!(row.rect().max.x.abs() < 1.0);
+        }
+    }
+
+    #[test]
+    fn short_text_is_untouched() {
+        let g = layout("12.5 mm", 100.0, 18.0, egui::Align::Center, true);
+        assert_eq!(g.rows.len(), 1);
+        assert!(!g.elided);
+        assert_eq!(g.text(), "12.5 mm");
+    }
+
+    #[test]
+    fn pvi_open_display_symbol_has_a_glyph() {
+        let ctx = egui::Context::default();
+        style::install_fonts(&ctx);
+        let mut found = vec![];
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            for family in [
+                egui::FontFamily::Proportional,
+                egui::FontFamily::Name(style::BOLD.into()),
+                egui::FontFamily::Monospace,
+            ] {
+                let font = FontId::new(14.0, family);
+                found.push(ui.fonts_mut(|f| f.has_glyph(&font, '\u{29C9}')));
+            }
+        });
+        out.textures_delta.clear();
+        assert_eq!(found, [true, true, true]);
+    }
 
     fn widget(props: &str) -> Widget {
         let xml = format!(r#"<display><widget type="slide_button">{props}</widget></display>"#);

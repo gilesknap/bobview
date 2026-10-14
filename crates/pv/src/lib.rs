@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 use tokio::sync::mpsc;
 
 pub use name::{PvName, Scheme};
-pub use value::{Image, ImageData, PvState, Severity, Value};
+pub use value::{Image, ImageData, PvState, Severity, Value, split_array};
 
 /// Called whenever any PV changes, so a UI can schedule a repaint.
 pub type Notifier = Arc<dyn Fn() + Send + Sync>;

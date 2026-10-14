@@ -68,12 +68,18 @@ pub(crate) fn apply(old: &Value, labels: &[String], text: &str) -> Value {
                 .unwrap_or(*i),
         ),
         Value::Double(v) => Value::Double(t.parse().unwrap_or(*v)),
-        Value::DoubleArray(_) => {
-            Value::DoubleArray(t.split([' ', ',']).filter_map(|x| x.parse().ok()).collect())
-        }
-        Value::LongArray(_) => {
-            Value::LongArray(t.split([' ', ',']).filter_map(|x| x.parse().ok()).collect())
-        }
+        Value::DoubleArray(_) => Value::DoubleArray(
+            crate::split_array(t)
+                .into_iter()
+                .filter_map(|x| x.parse().ok())
+                .collect(),
+        ),
+        Value::LongArray(_) => Value::LongArray(
+            crate::split_array(t)
+                .into_iter()
+                .filter_map(|x| x.parse().ok())
+                .collect(),
+        ),
         Value::StrArray(_) => Value::StrArray(Arc::from(vec![text.to_string()])),
         Value::Image(_) => old.clone(),
         Value::None => t

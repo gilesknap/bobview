@@ -54,8 +54,21 @@ pub(crate) async fn run(client: &CaClient, pv: &str, shared: Arc<Shared>) {
             Some(text) = writes.recv() => {
                 let channel = channel.clone();
                 let pv = pv.to_string();
+                // Arrays are typed as they are shown, `[1, 2]`; the server
+                // converts each string element to the field type.
+                let array = matches!(
+                    shared.snapshot().value,
+                    Value::DoubleArray(_) | Value::LongArray(_) | Value::StrArray(_)
+                );
                 tokio::spawn(async move {
-                    if let Err(e) = channel.put_string(&text).await {
+                    let result = if array {
+                        let items: Vec<String> =
+                            crate::split_array(&text).into_iter().map(String::from).collect();
+                        channel.put_string_array(&items).await
+                    } else {
+                        channel.put_string(&text).await
+                    };
+                    if let Err(e) = result {
                         log::warn!("{pv}: write '{text}' failed: {e}");
                     }
                 });
