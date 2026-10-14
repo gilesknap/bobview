@@ -22,7 +22,7 @@ else
         curl -sSfL -o "${tmp}/${name}.tar.gz" \
             "https://github.com/${repo}/releases/latest/download/${name}.tar.gz"
     fi
-    tar -C "${tmp}" -xzf "${tmp}/${name}.tar.gz"
+    tar --no-same-owner -C "${tmp}" -xzf "${tmp}/${name}.tar.gz"
     src=${tmp}/${name}
 fi
 
