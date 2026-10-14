@@ -1,0 +1,30 @@
+# The NDPluginBase records demo.bob uses, for one plugin.
+
+record(bo, "$(P)$(R)EnableCallbacks") {
+    field(ZNAM, "Disable")
+    field(ONAM, "Enable")
+}
+record(bi, "$(P)$(R)EnableCallbacks_RBV") {
+    field(INP,  "$(P)$(R)EnableCallbacks CP")
+    field(PINI, "YES")
+    field(ZNAM, "Disable")
+    field(ONAM, "Enable")
+}
+record(longout, "$(P)$(R)ArrayCounter") {
+}
+record(longin, "$(P)$(R)ArrayCounter_RBV") {
+}
+record(longin, "$(P)$(R)UniqueId_RBV") {
+}
+record(longout, "$(P)$(R)NDimensions") {
+}
+record(longin, "$(P)$(R)NDimensions_RBV") {
+}
+record(waveform, "$(P)$(R)Dimensions") {
+    field(FTVL, "LONG")
+    field(NELM, "10")
+}
+record(waveform, "$(P)$(R)Dimensions_RBV") {
+    field(FTVL, "LONG")
+    field(NELM, "10")
+}
