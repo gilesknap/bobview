@@ -334,15 +334,22 @@ fn text_job(
     halign: egui::Align,
     wrap: bool,
 ) -> egui::text::LayoutJob {
-    let rows = max_rows(size.y, row_height, wrap);
     let mut job = egui::text::LayoutJob::simple(text.to_string(), font, c, f32::INFINITY);
+    job.halign = halign;
+    if !wrap && text.contains('\n') {
+        // like a JavaFX Label without wrapping: keep every explicit line,
+        // unwrapped, and let the widget's clip trim what doesn't fit
+        return job;
+    }
+    let rows = max_rows(size.y, row_height, wrap);
     job.wrap = egui::text::TextWrapping {
-        max_width: (size.x - 2.0).max(1.0),
+        // the full width: the widget clip hides the 1 px the text may be
+        // inset by, and any less elides text that fits at fractional zooms
+        max_width: size.x.max(1.0),
         max_rows: rows,
         break_anywhere: rows == 1,
         overflow_character: Some('…'),
     };
-    job.halign = halign;
     job
 }
 
@@ -1701,7 +1708,7 @@ mod tests {
                 assert!(g.elided);
                 assert!(g.rows[0].text().starts_with("<BL01T-DI-CAM-01"));
                 assert!(g.rows[0].text().ends_with('…'));
-                assert!(g.size().x <= 203.5);
+                assert!(g.size().x <= 205.5);
             }
         }
     }
@@ -1720,6 +1727,31 @@ mod tests {
         for row in &g.rows {
             assert!(row.rect().max.x.abs() < 1.0);
         }
+    }
+
+    #[test]
+    fn text_that_just_fits_is_not_elided() {
+        // At fractional zooms text can fit with under a pixel to spare.
+        let natural = layout(PV, 10_000.0, 18.0, egui::Align::Center, true)
+            .size()
+            .x;
+        let g = layout(PV, natural.ceil(), 18.0, egui::Align::Center, true);
+        assert!(!g.elided);
+        assert_eq!(g.text(), PV);
+    }
+
+    #[test]
+    fn explicit_lines_are_kept_without_wrapping() {
+        // wrap_words=false still shows every line, as a JavaFX Label does.
+        let g = layout(
+            "Line one\nLine two longer",
+            200.0,
+            50.0,
+            egui::Align::Min,
+            false,
+        );
+        assert_eq!(g.rows.len(), 2);
+        assert!(!g.elided);
     }
 
     #[test]
