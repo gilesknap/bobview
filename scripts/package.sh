@@ -15,5 +15,5 @@ cp "${target}/bobview" "${target}/bobview-probe" "${target}/bobview-testioc" "${
 cp -r tests/displays "${out}/share/bobview/displays"
 cp README.md LICENSE install.sh "${out}/"
 
-tar -C "$(dirname "${out}")" -czf "${name}.tar.gz" "${name}"
+tar --owner=0 --group=0 -C "$(dirname "${out}")" -czf "${name}.tar.gz" "${name}"
 echo "wrote ${name}.tar.gz"
