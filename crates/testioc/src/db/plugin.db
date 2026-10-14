@@ -11,6 +11,8 @@ record(bi, "$(P)$(R)EnableCallbacks_RBV") {
     field(ONAM, "Enable")
 }
 record(longout, "$(P)$(R)ArrayCounter") {
+    field(VAL,  "0")
+    field(PINI, "YES")
 }
 record(longin, "$(P)$(R)ArrayCounter_RBV") {
 }

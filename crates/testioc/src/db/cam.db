@@ -32,6 +32,8 @@ record(ai, "$(P)$(R)AcquirePeriod_RBV") {
     field(EGU,  "s")
 }
 record(longout, "$(P)$(R)ArrayCounter") {
+    field(VAL,  "0")
+    field(PINI, "YES")
 }
 record(longin, "$(P)$(R)ArrayCounter_RBV") {
 }

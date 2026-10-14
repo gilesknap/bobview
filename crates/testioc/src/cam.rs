@@ -33,8 +33,13 @@ fn get(db: &PvDatabase, name: &str) -> f64 {
     db.get_pv(name).ok().and_then(|v| v.to_f64()).unwrap_or(0.0)
 }
 
+/// Write VAL as a CA put would (dbPutField): clears UDF and processes the
+/// record, so its alarm severity is recomputed.
 async fn post(db: &PvDatabase, name: &str, value: EpicsValue) {
-    if let Err(e) = db.put_pv_and_post(name, value).await {
+    if let Err(e) = db
+        .put_record_field_from_ca_no_notify(name, "VAL", value)
+        .await
+    {
         eprintln!("testioc: post {name}: {e}");
     }
 }
