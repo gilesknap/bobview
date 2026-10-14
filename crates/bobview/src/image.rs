@@ -1,20 +1,48 @@
 //! The image widget: a PVA NTNDArray (or a CA waveform shaped by
-//! `data_width` x `data_height`) drawn through a colour map, with a colour bar.
+//! `data_width` x `data_height`) drawn through a colour map, with a colour bar
+//! and, when `show_toolbar` is set, the Phoebus zoom/pan/crosshair toolbar.
 
 use std::sync::Arc;
 
 use bob::Widget;
-use eframe::egui::{self, Align2, Color32, ColorImage, FontId, Pos2, Rect, TextureHandle, Vec2};
+use eframe::egui::{
+    self, Align2, Color32, ColorImage, FontId, Id, Pos2, Rect, Response, Sense, Shape, Stroke,
+    StrokeKind, TextureHandle, Vec2,
+};
 use pv::{Image, ImageData, PvState, Value};
 
+use crate::axis::{self, Scale};
 use crate::colormaps::PREDEFINED;
 use crate::screen::Node;
-use crate::widgets::{bg, fg, fill, outline, placeholder, text_in};
+use crate::widgets::{bg, button_box, fg, fill, outline, placeholder};
 
 /// Largest texture side we upload; bigger images are decimated.
 const MAX_SIDE: usize = 2048;
 
+/// Height of the toolbar, before zoom.
+const TOOLBAR: f32 = 26.0;
+
+/// Smooth when shrinking a big image, square pixels when zoomed in.
+const PIXELS: egui::TextureOptions = egui::TextureOptions {
+    magnification: egui::TextureFilter::Nearest,
+    ..egui::TextureOptions::LINEAR
+};
+
+/// The texture and the user's view of one image widget.
+#[derive(Default)]
 pub struct ImageCache {
+    tex: Option<Texture>,
+    view: Zoom,
+    mode: Mode,
+    /// Whether the crosshair is on; starts from `cursor_crosshair`.
+    crosshair: Option<bool>,
+    /// Where the crosshair was placed, in image fractions.
+    cross_at: Option<Pos2>,
+    /// Screen position where a rubber-band zoom started.
+    band_from: Option<Pos2>,
+}
+
+struct Texture {
     /// Identifies what is on the texture: frame unique id, data pointer and
     /// the display settings, so a rule changing the colour map redraws it.
     key: (i64, usize, String),
@@ -23,6 +51,95 @@ pub struct ImageCache {
     range: (f64, f64),
 }
 
+/// What dragging and clicking on the image does, as picked on the toolbar.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Mode {
+    #[default]
+    Pointer,
+    ZoomIn,
+    ZoomOut,
+    Pan,
+}
+
+/// The part of the image shown, in fractions of its size (y down), with
+/// undo and redo history.
+#[derive(Debug)]
+struct Zoom {
+    shown: Rect,
+    undo: Vec<Rect>,
+    redo: Vec<Rect>,
+}
+
+fn whole() -> Rect {
+    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0))
+}
+
+impl Default for Zoom {
+    fn default() -> Self {
+        Self {
+            shown: whole(),
+            undo: Vec::new(),
+            redo: Vec::new(),
+        }
+    }
+}
+
+impl Zoom {
+    /// Show `r`, kept inside the image and no larger than it.
+    fn set(&mut self, r: Rect) {
+        let size = r.size().min(Vec2::splat(1.0)).max(Vec2::splat(1e-4));
+        let min = r.min.clamp(Pos2::ZERO, (Vec2::splat(1.0) - size).to_pos2());
+        let r = Rect::from_min_size(min, size);
+        if r != self.shown {
+            self.undo.push(self.shown);
+            if self.undo.len() > 100 {
+                self.undo.remove(0);
+            }
+            self.redo.clear();
+            self.shown = r;
+        }
+    }
+
+    /// Scale the view by `factor` (below 1 zooms in) about `at`, in image fractions.
+    fn scale_about(&mut self, at: Pos2, factor: f32) {
+        let s = self.shown;
+        let min = at + (s.min - at) * factor;
+        self.set(Rect::from_min_size(min, s.size() * factor));
+    }
+
+    fn pan(&mut self, by: Vec2) {
+        let s = self.shown;
+        let size = s.size();
+        let min = (s.min - by).clamp(Pos2::ZERO, (Vec2::splat(1.0) - size).to_pos2());
+        // Panning moves continuously, so it is not recorded step by step.
+        self.shown = Rect::from_min_size(min, size);
+    }
+
+    fn undo(&mut self) {
+        if let Some(r) = self.undo.pop() {
+            self.redo.push(self.shown);
+            self.shown = r;
+        }
+    }
+
+    fn redo(&mut self) {
+        if let Some(r) = self.redo.pop() {
+            self.undo.push(self.shown);
+            self.shown = r;
+        }
+    }
+
+    /// Image fraction under screen point `p` of `area`.
+    fn to_image(&self, area: Rect, p: Pos2) -> Pos2 {
+        let t = (p - area.min) / area.size();
+        self.shown.min + t * self.shown.size()
+    }
+
+    /// Screen point of image fraction `f` in `area`.
+    fn to_screen(&self, area: Rect, f: Pos2) -> Pos2 {
+        area.min + (f - self.shown.min) / self.shown.size() * area.size()
+    }
+}
 /// 256 colours from the widget's `color_map` (default VIRIDIS).
 fn lut(w: &Widget) -> [Color32; 256] {
     let el = w.get("color_map");
@@ -216,10 +333,31 @@ fn colorize_bytes(
     ))
 }
 
-pub fn draw(ui: &mut egui::Ui, node: &mut Node, state: Option<&PvState>, rect: Rect, z: f32) {
+#[allow(clippy::too_many_arguments)]
+pub fn draw(
+    ui: &mut egui::Ui,
+    node: &mut Node,
+    state: Option<&PvState>,
+    rect: Rect,
+    clip: Rect,
+    id: Id,
+    z: f32,
+) -> Response {
     let w = node.w.clone();
-    let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(rect));
+    let clip = clip.intersect(ui.clip_rect());
+    let painter = ui.painter().with_clip_rect(clip.intersect(rect));
     fill(&painter, rect, bg(&w, "Background"));
+    let cache = node.image.get_or_insert_with(ImageCache::default);
+    let crosshair = *cache
+        .crosshair
+        .get_or_insert_with(|| w.bool("cursor_crosshair").unwrap_or(false));
+
+    let mut body = rect;
+    if w.bool("show_toolbar") == Some(true) {
+        let bar = Rect::from_min_size(rect.min, Vec2::new(rect.width(), TOOLBAR * z));
+        body.min.y = bar.bottom();
+        toolbar(ui, &painter, cache, bar, clip, id, z);
+    }
 
     let bar = w.get("color_bar");
     let bar_visible = bar
@@ -231,17 +369,20 @@ pub fn draw(ui: &mut egui::Ui, node: &mut Node, state: Option<&PvState>, rect: R
         .and_then(|v| v.trim().parse::<f32>().ok())
         .unwrap_or(40.0)
         * z;
-    let (area, bar_rect) = if bar_visible && rect.width() > 3.0 * bar_size {
+    let (area, bar_rect) = if bar_visible && body.width() > 3.0 * bar_size {
         let gap = 4.0 * z;
         let area = Rect::from_min_max(
-            rect.min,
-            Pos2::new(rect.right() - bar_size - gap, rect.bottom()),
+            body.min,
+            Pos2::new(body.right() - bar_size - gap, body.bottom()),
         );
-        let bar_rect = Rect::from_min_max(Pos2::new(rect.right() - bar_size, rect.top()), rect.max);
+        let bar_rect = Rect::from_min_max(Pos2::new(body.right() - bar_size, body.top()), body.max);
         (area, Some(bar_rect))
     } else {
-        (rect, None)
+        (body, None)
     };
+
+    let resp = ui.interact(area.intersect(clip), id, Sense::click_and_drag());
+    mouse(ui, cache, &resp, area, crosshair);
 
     let img = state.filter(|s| s.connected).and_then(|s| image_of(&w, s));
     let Some(img) = img else {
@@ -254,7 +395,7 @@ pub fn draw(ui: &mut egui::Ui, node: &mut Node, state: Option<&PvState>, rect: R
             None => "image".to_string(),
         };
         placeholder(&painter, area, &msg, z);
-        return;
+        return resp;
     };
 
     let lut = lut(&w);
@@ -267,19 +408,17 @@ pub fn draw(ui: &mut egui::Ui, node: &mut Node, state: Option<&PvState>, rect: R
     });
     let settings = format!("{:?}{unsigned}{fixed:?}", w.get("color_map"));
     let key = (img.unique_id, data_key(&img), settings);
-    if node.image.as_ref().map(|c| &c.key) != Some(&key) {
+    if cache.tex.as_ref().map(|c| &c.key) != Some(&key) {
         let (pixels, range) = colorize(&img, unsigned, fixed, &lut);
-        match node.image.as_mut() {
-            Some(cache) => {
-                cache.texture.set(pixels, egui::TextureOptions::LINEAR);
-                cache.key = key;
-                cache.range = range;
+        match cache.tex.as_mut() {
+            Some(tex) => {
+                tex.texture.set(pixels, PIXELS);
+                tex.key = key;
+                tex.range = range;
             }
             None => {
-                let texture =
-                    ui.ctx()
-                        .load_texture("bobview-image", pixels, egui::TextureOptions::LINEAR);
-                node.image = Some(ImageCache {
+                let texture = ui.ctx().load_texture("bobview-image", pixels, PIXELS);
+                cache.tex = Some(Texture {
                     key,
                     texture,
                     range,
@@ -287,16 +426,311 @@ pub fn draw(ui: &mut egui::Ui, node: &mut Node, state: Option<&PvState>, rect: R
             }
         }
     }
-    let Some(cache) = &node.image else { return };
-    let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-    painter.image(cache.texture.id(), area, uv, Color32::WHITE);
+    let Some(tex) = &cache.tex else { return resp };
+    // The whole image, placed so the zoomed part fills the area.
+    let full = Rect::from_min_max(
+        cache.view.to_screen(area, Pos2::ZERO),
+        cache.view.to_screen(area, Pos2::new(1.0, 1.0)),
+    );
+    let inside = painter.with_clip_rect(painter.clip_rect().intersect(area));
+    inside.image(tex.texture.id(), full, whole(), Color32::WHITE);
+
+    if let Some(from) = cache.band_from
+        && let Some(to) = resp.interact_pointer_pos()
+    {
+        inside.rect_stroke(
+            Rect::from_two_pos(from, to),
+            0.0,
+            Stroke::new(1.0, Color32::WHITE),
+            StrokeKind::Inside,
+        );
+    }
+    if crosshair && let Some(at) = cache.cross_at {
+        draw_crosshair(
+            &inside,
+            &img,
+            unsigned,
+            cache.view.to_screen(area, at),
+            at,
+            area,
+            z,
+        );
+    }
 
     if let Some(bar_rect) = bar_rect {
-        colour_bar(&painter, &w, bar_rect, &lut, cache.range, z);
+        colour_bar(&painter, &w, bar_rect, &lut, tex.range, z);
+    }
+    resp
+}
+
+/// Zoom, pan and crosshair placement with the mouse, per the toolbar mode.
+fn mouse(ui: &egui::Ui, cache: &mut ImageCache, resp: &Response, area: Rect, crosshair: bool) {
+    let view = &mut cache.view;
+    match cache.mode {
+        Mode::ZoomIn => {
+            if resp.drag_started() {
+                cache.band_from = resp.interact_pointer_pos();
+            }
+            if resp.drag_stopped()
+                && let (Some(a), Some(b)) = (cache.band_from.take(), resp.interact_pointer_pos())
+            {
+                let band = Rect::from_two_pos(a, b);
+                if band.width() > 4.0 && band.height() > 4.0 {
+                    let r = Rect::from_two_pos(view.to_image(area, a), view.to_image(area, b));
+                    view.set(r);
+                }
+            } else if resp.clicked()
+                && let Some(p) = resp.interact_pointer_pos()
+            {
+                view.scale_about(view.to_image(area, p), 0.5);
+            }
+        }
+        Mode::ZoomOut => {
+            if resp.clicked()
+                && let Some(p) = resp.interact_pointer_pos()
+            {
+                view.scale_about(view.to_image(area, p), 2.0);
+            }
+        }
+        Mode::Pan => {
+            if resp.drag_started() {
+                // One undo step per drag.
+                let shown = view.shown;
+                view.undo.push(shown);
+                view.redo.clear();
+            }
+            if resp.dragged() {
+                let d = resp.drag_delta() / area.size() * view.shown.size();
+                view.pan(d);
+            }
+        }
+        Mode::Pointer => {}
+    }
+    if crosshair
+        && cache.mode == Mode::Pointer
+        && resp.clicked()
+        && let Some(p) = resp.interact_pointer_pos()
+    {
+        cache.cross_at = Some(cache.view.to_image(area, p));
+    }
+    if !resp.dragged() && !resp.drag_stopped() {
+        cache.band_from = None;
+    }
+    if resp.hovered() {
+        let icon = match cache.mode {
+            Mode::Pan => egui::CursorIcon::Grab,
+            Mode::ZoomIn => egui::CursorIcon::ZoomIn,
+            Mode::ZoomOut => egui::CursorIcon::ZoomOut,
+            Mode::Pointer if crosshair => egui::CursorIcon::Crosshair,
+            Mode::Pointer => egui::CursorIcon::Default,
+        };
+        ui.ctx().set_cursor_icon(icon);
     }
 }
 
-/// A vertical gradient with the data range written at its ends.
+/// Crosshair lines through `p`, with the pixel and its value.
+fn draw_crosshair(
+    painter: &egui::Painter,
+    img: &Image,
+    unsigned: bool,
+    p: Pos2,
+    at: Pos2,
+    area: Rect,
+    z: f32,
+) {
+    for (c, width) in [(Color32::BLACK, 3.0), (Color32::WHITE, 1.0)] {
+        let s = Stroke::new(width * z.max(1.0), c);
+        painter.line_segment(
+            [Pos2::new(area.left(), p.y), Pos2::new(area.right(), p.y)],
+            s,
+        );
+        painter.line_segment(
+            [Pos2::new(p.x, area.top()), Pos2::new(p.x, area.bottom())],
+            s,
+        );
+    }
+    let x = ((at.x * img.width as f32) as usize).min(img.width.saturating_sub(1));
+    let y = ((at.y * img.height as f32) as usize).min(img.height.saturating_sub(1));
+    let channels = if img.rgb { 3 } else { 1 };
+    let i = (y * img.width + x) * channels;
+    let values: Vec<String> = (0..channels)
+        .filter(|c| i + c < img.data.len())
+        .map(|c| {
+            let v = img.data.get(i + c, unsigned);
+            if v.fract() == 0.0 {
+                format!("{v}")
+            } else {
+                format!("{v:.3}")
+            }
+        })
+        .collect();
+    let text = format!("{x}, {y}: {}", values.join(", "));
+    let font = FontId::proportional(12.0 * z.max(0.6));
+    let galley = painter.layout_no_wrap(text, font, Color32::WHITE);
+    let at = area.min + Vec2::splat(4.0 * z);
+    let back = Rect::from_min_size(at, galley.size()).expand(2.0 * z);
+    painter.rect_filled(back, 2.0, Color32::from_black_alpha(160));
+    painter.galley(at, galley, Color32::WHITE);
+}
+
+/// The toolbar buttons, left to right.
+const BUTTONS: [(&str, Button); 7] = [
+    ("Crosshair", Button::Crosshair),
+    ("Zoom in", Button::Mode(Mode::ZoomIn)),
+    ("Zoom out", Button::Mode(Mode::ZoomOut)),
+    ("Pan", Button::Mode(Mode::Pan)),
+    ("Pointer", Button::Mode(Mode::Pointer)),
+    ("Undo zoom", Button::Undo),
+    ("Redo zoom", Button::Redo),
+];
+
+#[derive(Clone, Copy)]
+enum Button {
+    Crosshair,
+    Mode(Mode),
+    Undo,
+    Redo,
+}
+
+fn toolbar(
+    ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    cache: &mut ImageCache,
+    bar: Rect,
+    clip: Rect,
+    id: Id,
+    z: f32,
+) {
+    fill(painter, bar, Color32::from_gray(236));
+    painter.line_segment(
+        [bar.left_bottom(), bar.right_bottom()],
+        Stroke::new(1.0, Color32::from_gray(190)),
+    );
+    let size = bar.height() - 4.0 * z;
+    let mut x = bar.left() + 2.0 * z;
+    for (i, (tip, button)) in BUTTONS.iter().enumerate() {
+        // Separators after the crosshair and after the mouse modes.
+        if i == 1 || i == 5 {
+            x += 6.0 * z;
+        }
+        let r = Rect::from_min_size(Pos2::new(x, bar.top() + 2.0 * z), Vec2::splat(size));
+        x += size + 2.0 * z;
+        let resp = ui.interact(r.intersect(clip), id.with(("toolbar", i)), Sense::click());
+        let (on, enabled) = match button {
+            Button::Crosshair => (cache.crosshair == Some(true), true),
+            Button::Mode(m) => (cache.mode == *m, true),
+            Button::Undo => (false, !cache.view.undo.is_empty()),
+            Button::Redo => (false, !cache.view.redo.is_empty()),
+        };
+        button_box(
+            painter,
+            r,
+            if on {
+                Color32::from_gray(200)
+            } else {
+                Color32::from_gray(236)
+            },
+            on || resp.is_pointer_button_down_on(),
+            z,
+        );
+        let ink = if enabled {
+            Color32::from_gray(40)
+        } else {
+            Color32::from_gray(160)
+        };
+        icon(painter, *button, r.shrink(5.0 * z), ink, z);
+        if resp.clicked() && enabled {
+            match button {
+                Button::Crosshair => cache.crosshair = Some(cache.crosshair != Some(true)),
+                Button::Mode(m) => cache.mode = *m,
+                Button::Undo => cache.view.undo(),
+                Button::Redo => cache.view.redo(),
+            }
+        }
+        resp.on_hover_text(*tip);
+    }
+}
+
+fn icon(painter: &egui::Painter, button: Button, r: Rect, c: Color32, z: f32) {
+    let s = Stroke::new(1.5 * z.max(0.7), c);
+    let lens = |sign: Option<bool>| {
+        let centre = r.min + r.size() * 0.4;
+        let rad = r.width() * 0.33;
+        painter.circle_stroke(centre, rad, s);
+        let d = Vec2::splat(rad * std::f32::consts::FRAC_1_SQRT_2);
+        painter.line_segment([centre + d, r.max], Stroke::new(s.width * 1.6, c));
+        if let Some(plus) = sign {
+            let h = rad * 0.55;
+            painter.line_segment([centre - Vec2::new(h, 0.0), centre + Vec2::new(h, 0.0)], s);
+            if plus {
+                painter.line_segment([centre - Vec2::new(0.0, h), centre + Vec2::new(0.0, h)], s);
+            }
+        }
+    };
+    let arrow_head = |tip: Pos2, dir: Vec2| {
+        let n = Vec2::new(-dir.y, dir.x);
+        let l = r.width() * 0.25;
+        painter.add(Shape::convex_polygon(
+            vec![
+                tip,
+                tip - dir * l + n * l * 0.6,
+                tip - dir * l - n * l * 0.6,
+            ],
+            c,
+            Stroke::NONE,
+        ));
+    };
+    match button {
+        Button::Crosshair => {
+            painter.circle_stroke(r.center(), r.width() * 0.3, s);
+            painter.line_segment([r.left_center(), r.right_center()], s);
+            painter.line_segment([r.center_top(), r.center_bottom()], s);
+        }
+        Button::Mode(Mode::ZoomIn) => lens(Some(true)),
+        Button::Mode(Mode::ZoomOut) => lens(Some(false)),
+        Button::Mode(Mode::Pan) => {
+            painter.line_segment([r.left_center(), r.right_center()], s);
+            painter.line_segment([r.center_top(), r.center_bottom()], s);
+            arrow_head(r.left_center(), Vec2::new(-1.0, 0.0));
+            arrow_head(r.right_center(), Vec2::new(1.0, 0.0));
+            arrow_head(r.center_top(), Vec2::new(0.0, -1.0));
+            arrow_head(r.center_bottom(), Vec2::new(0.0, 1.0));
+        }
+        Button::Mode(Mode::Pointer) => {
+            let p = |x: f32, y: f32| r.min + r.size() * Vec2::new(x, y);
+            painter.add(Shape::convex_polygon(
+                vec![p(0.2, 0.0), p(0.85, 0.6), p(0.5, 0.62), p(0.2, 0.95)],
+                c,
+                Stroke::NONE,
+            ));
+            painter.line_segment([p(0.5, 0.6), p(0.7, 1.0)], Stroke::new(s.width * 1.5, c));
+        }
+        Button::Undo | Button::Redo => {
+            let redo = matches!(button, Button::Redo);
+            let flip = |p: Pos2| {
+                if redo {
+                    Pos2::new(r.left() + r.right() - p.x, p.y)
+                } else {
+                    p
+                }
+            };
+            let centre = r.center() + Vec2::new(0.0, r.height() * 0.15);
+            let rad = r.width() * 0.38;
+            // An arc over the top, ending in a head pointing down-left.
+            let pts: Vec<Pos2> = (0..=12)
+                .map(|i| {
+                    let a = std::f32::consts::PI * (i as f32 / 12.0);
+                    flip(centre + Vec2::new(rad * a.cos(), -rad * a.sin()))
+                })
+                .collect();
+            let tip = *pts.last().unwrap_or(&centre);
+            painter.add(Shape::line(pts, s));
+            arrow_head(tip + Vec2::new(0.0, r.height() * 0.15), Vec2::new(0.0, 1.0));
+        }
+    }
+}
+
+/// A vertical gradient with a tick scale of the data range beside it.
 fn colour_bar(
     painter: &egui::Painter,
     w: &Widget,
@@ -306,10 +740,16 @@ fn colour_bar(
     z: f32,
 ) {
     let font = FontId::proportional(11.0 * z.max(0.6));
-    let label_h = 14.0 * z.max(0.6);
+    let label_h = painter
+        .layout_no_wrap("0".into(), font.clone(), Color32::BLACK)
+        .size()
+        .y;
     let strip = Rect::from_min_max(
-        rect.min + Vec2::new(0.0, label_h),
-        Pos2::new(rect.left() + rect.width() * 0.5, rect.bottom() - label_h),
+        rect.min + Vec2::new(0.0, label_h / 2.0),
+        Pos2::new(
+            rect.left() + (rect.width() * 0.4).max(4.0),
+            rect.bottom() - label_h / 2.0,
+        ),
     );
     let mut mesh = egui::Mesh::default();
     for (i, c) in lut
@@ -329,33 +769,34 @@ fn colour_bar(
     }
     painter.add(mesh);
     outline(painter, strip, 1.0, Color32::GRAY);
-    let fmt = |v: f64| {
-        if v.abs() >= 1e5 || (v != 0.0 && v.abs() < 1e-2) {
-            format!("{v:.1e}")
-        } else {
-            format!("{v:.0}")
-        }
+
+    let scale = Scale {
+        lo: range.0,
+        hi: range.1,
+        log: false,
+        from: strip.bottom(),
+        to: strip.top(),
     };
-    let top = Rect::from_min_max(rect.min, Pos2::new(rect.right(), rect.top() + label_h));
-    let bottom = Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() - label_h), rect.max);
-    text_in(
-        painter,
-        top,
-        &fmt(range.1),
-        font.clone(),
-        fg(w),
-        Align2::LEFT_CENTER,
-        false,
-    );
-    text_in(
-        painter,
-        bottom,
-        &fmt(range.0),
-        font,
-        fg(w),
-        Align2::LEFT_CENTER,
-        false,
-    );
+    let (ticks, step) = scale.ticks(label_h * 2.5);
+    let tick = 3.0 * z;
+    let stroke = Stroke::new(1.0, fg(w));
+    for v in ticks {
+        let y = scale.pos(v);
+        painter.line_segment(
+            [
+                Pos2::new(strip.right(), y),
+                Pos2::new(strip.right() + tick, y),
+            ],
+            stroke,
+        );
+        painter.text(
+            Pos2::new(strip.right() + tick + 1.0, y),
+            Align2::LEFT_CENTER,
+            axis::label(v, step),
+            font.clone(),
+            fg(w),
+        );
+    }
 }
 
 #[cfg(test)]

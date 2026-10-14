@@ -65,18 +65,20 @@ name or value, or open the PV details. On a touch screen, pinch to zoom.
 | led, multi_state_led, byte_monitor | |
 | action_button, bool_button, choice, radio, combo, checkbox | open display and write PV actions |
 | scaledslider, scrollbar, spinner | |
-| progressbar, tank, thermometer, linearmeter, meter | all drawn as bars for now |
+| linearmeter | scale, warning regions from the levels, limit markers, needle; horizontal or vertical |
+| progressbar, tank, thermometer, meter | drawn as bars for now |
+| xyplot | line, step and bar traces with markers against index or an x PV; several y axes, autoscale, log scale, grid, legend |
 | rectangle, ellipse, arc, polyline, polygon | |
 | group, tabs, embedded, navtabs | macros pass down; embedded resize modes 0–2 |
-| image | PVA NTNDArray (uncompressed, mono or RGB1) or a CA array shaped by `data_width`/`data_height`; Phoebus colour maps, autoscale or fixed range, `unsigned`, colour bar |
+| image | PVA NTNDArray (uncompressed, mono or RGB1) or a CA array shaped by `data_width`/`data_height`; Phoebus colour maps, autoscale or fixed range, `unsigned`, colour bar with a scale; toolbar to zoom, pan and place a crosshair that reads out the pixel value |
 
 Also: macros (`$(X)`, `${X}`, defaults, widget properties such as
 `$(pv_name)`), rules (expressions over `pv0`, `pvStr0`, `pvSev0` … that set any
 property), alarm borders and dashed borders for disconnected PVs, back and
 forward navigation, `loc://` and `sim://` PVs.
 
-Not yet: compressed (codec) images, image axes, ROIs and cursors, XY plot and
-strip chart widgets (drawn as placeholders), pictures.
+Not yet: compressed (codec) images, image axes, ROIs and cursor PVs, the XY plot
+`markers`, error bars and toolbar, strip chart widgets (drawn as placeholders), pictures.
 
 ## Build
 

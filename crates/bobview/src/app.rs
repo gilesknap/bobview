@@ -283,7 +283,8 @@ fn list_dir(dir: &Path) -> Vec<(PathBuf, bool)> {
 fn count_pvs(nodes: &[Node]) -> (usize, usize) {
     let mut acc = (0, 0);
     for n in nodes {
-        if let Some(pv) = &n.pv {
+        let traces = n.traces.iter().flat_map(|t| t.x.iter().chain(&t.y));
+        for pv in n.pv.iter().chain(traces) {
             acc.1 += 1;
             if pv.state().connected {
                 acc.0 += 1;
