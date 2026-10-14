@@ -92,15 +92,21 @@ pub fn changed(old: f32, new: f32) -> bool {
 /// (already multiplied by its zoom) under `chrome` points of controls,
 /// limited to `monitor` points when known.
 pub fn window_size(display: Vec2, chrome: f32, monitor: Option<Vec2>) -> Vec2 {
+    // On a monitor too small for the display at 100%, shrink the display
+    // keeping its shape, so Fit fills the window without a blank band.
+    let mut display = display;
+    if let Some(m) = monitor.filter(|m| m.x > 0.0 && m.y > 0.0) {
+        let room = m * MAX_MONITOR_FRACTION - Vec2::new(1.0, chrome.ceil() + 1.0);
+        let fit = (room.x / display.x).min(room.y / display.y);
+        if fit < 1.0 && fit > 0.0 {
+            display *= fit;
+        }
+    }
     // A pixel either way keeps rounding from adding scroll bars.
-    let mut size = Vec2::new(
+    Vec2::new(
         display.x.ceil().max(COMPACT_TOOLBAR_WIDTH) + 1.0,
         display.y.ceil() + chrome.ceil() + 1.0,
-    );
-    if let Some(m) = monitor.filter(|m| m.x > 0.0 && m.y > 0.0) {
-        size = size.min(m * MAX_MONITOR_FRACTION);
-    }
-    size
+    )
 }
 
 /// Whether the window should follow the display's size: not when the user
@@ -263,13 +269,18 @@ mod tests {
         // Narrow displays still leave room for the toolbar.
         let s = window_size(Vec2::new(100.0, 80.0), 60.0, None);
         assert_eq!(s.x, COMPACT_TOOLBAR_WIDTH + 1.0);
-        // Large ones are limited to most of the monitor.
-        let s = window_size(
-            Vec2::new(3000.0, 2000.0),
-            60.0,
-            Some(Vec2::new(1920.0, 1080.0)),
+        // Large ones are limited to most of the monitor, keeping the
+        // display's shape so Fit leaves no blank band.
+        let monitor = Some(Vec2::new(1920.0, 1080.0));
+        let s = window_size(Vec2::new(3000.0, 2000.0), 60.0, monitor);
+        assert!(s.y <= 973.0 && (s.x - 1368.0).abs() <= 1.0, "{s:?}");
+        // A wide one is limited by width, and its height shrinks with it.
+        let s = window_size(Vec2::new(3000.0, 500.0), 60.0, monitor);
+        assert!((s.x - 1728.0).abs() <= 1.0, "{s:?}");
+        assert!(
+            (s.y - (500.0 * 1727.0 / 3000.0 + 61.0)).abs() <= 1.5,
+            "{s:?}"
         );
-        assert_eq!(s, Vec2::new(1728.0, 972.0));
     }
 
     #[test]
