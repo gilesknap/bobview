@@ -7,13 +7,14 @@
 //! | prefix    | backend                                 |
 //! |-----------|-----------------------------------------|
 //! | `ca://`   | Channel Access (the default)            |
-//! | `pva://`  | PV Access (not implemented yet)         |
+//! | `pva://`  | PV Access                               |
 //! | `loc://`  | local PVs held in this process          |
 //! | `sim://`  | simulated signals (sine, ramp, noise …) |
 
 mod ca;
 mod local;
 mod name;
+mod pva;
 mod sim;
 mod value;
 
@@ -23,7 +24,7 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 use tokio::sync::mpsc;
 
 pub use name::{PvName, Scheme};
-pub use value::{PvState, Severity, Value};
+pub use value::{Image, ImageData, PvState, Severity, Value};
 
 /// Called whenever any PV changes, so a UI can schedule a repaint.
 pub type Notifier = Arc<dyn Fn() + Send + Sync>;
@@ -125,6 +126,7 @@ struct Inner {
     entries: Mutex<HashMap<String, Weak<Entry>>>,
     locals: Mutex<HashMap<String, Arc<Shared>>>,
     ca: tokio::sync::OnceCell<epics_ca_rs::client::CaClient>,
+    pva: std::sync::OnceLock<epics_pva_rs::client::PvaClient>,
     notify: Arc<RwLock<Option<Notifier>>>,
 }
 
@@ -148,6 +150,7 @@ impl PvManager {
                 entries: Mutex::new(HashMap::new()),
                 locals: Mutex::new(HashMap::new()),
                 ca: tokio::sync::OnceCell::new(),
+                pva: std::sync::OnceLock::new(),
                 notify: Arc::new(RwLock::new(None)),
             }),
         }
@@ -220,8 +223,14 @@ impl PvManager {
             }
             Scheme::Sim => Some(rt.spawn(sim::run(name.clone(), shared))),
             Scheme::Pva => {
-                shared.update(|s| s.error = Some("PV Access is not supported yet".into()));
-                None
+                let inner = self.inner.clone();
+                let pv = name.pv.clone();
+                Some(rt.spawn(async move {
+                    let client = inner
+                        .pva
+                        .get_or_init(|| epics_pva_rs::client::PvaClient::builder().build());
+                    pva::run(client, &pv, shared).await
+                }))
             }
             Scheme::Loc => unreachable!("local PVs have no task"),
         }

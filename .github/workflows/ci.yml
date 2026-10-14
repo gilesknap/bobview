@@ -25,6 +25,8 @@ jobs:
         env:
           EPICS_CA_ADDR_LIST: 127.0.0.1
           EPICS_CA_AUTO_ADDR_LIST: "NO"
+          EPICS_PVA_ADDR_LIST: 127.0.0.1
+          EPICS_PVA_AUTO_ADDR_LIST: "NO"
         run: |
           cargo build --workspace
           target/debug/bobview-testioc &
@@ -55,8 +57,13 @@ jobs:
           target/release/bobview-testioc &
           target/release/bobview-probe --seconds 3 bl01t:SUM BL01T-MO-SIMC-01:M1.RBV | tee probe.txt
           grep -q "bl01t:SUM .*5" probe.txt
+          EPICS_PVA_ADDR_LIST=127.0.0.1 EPICS_PVA_AUTO_ADDR_LIST=NO \
+            target/release/bobview-probe --seconds 3 pva://bl01t:SUM pva://BL01T-DI-CAM-01:PVA:OUTPUT | tee pva.txt
+          grep -q "OUTPUT .*1024x1024 image" pva.txt
           mkdir -p snapshots
           target/release/bobview --snapshot snapshots/index-arm64.png --size 800x600 --wait 5 tests/displays/index.bob
+          EPICS_PVA_ADDR_LIST=127.0.0.1 EPICS_PVA_AUTO_ADDR_LIST=NO \
+            target/release/bobview --snapshot snapshots/demo-arm64.png --size 1300x780 --wait 5 tests/displays/demo.bob
           kill %1
       - uses: actions/upload-artifact@v4
         with:

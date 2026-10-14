@@ -1,11 +1,12 @@
 # bobview-testioc
 
-A pure-Rust Channel Access IOC that serves a subset of the PVs of the
+A pure-Rust EPICS IOC that serves, over Channel Access and PV Access, a subset of the PVs of the
 [epics-containers example-services](https://github.com/epics-containers/example-services)
 BL01T beamline, enough for its `opi/demo.bob` screen. It has no C
 dependencies, so it runs natively on an aarch64 phone where the real amd64
 IOC containers would need qemu. Built on the
-[epics-rs](https://github.com/epics-rs/epics-rs) crates; uses about 7 MB RSS.
+[epics-rs](https://github.com/epics-rs/epics-rs) crates; uses about 15 MB RSS
+while streaming images.
 
 | part | PVs | how |
 | --- | --- | --- |
@@ -16,9 +17,27 @@ IOC containers would need qemu. Built on the
 The camera is not a real simDetector: it serves the ADBase / NDPluginBase
 records the demo screen uses (Acquire, AcquireTime, AcquirePeriod,
 ArrayCounter, ImageMode, NumImages, DetectorState_RBV, ...) and counts frames
-at the acquire period, honouring Single / Multiple / Continuous. No image data
-is produced and `pva://BL01T-DI-CAM-01:PVA:OUTPUT` is not served. As in its
+at the acquire period, honouring Single / Multiple / Continuous. As in its
 `ioc.yaml` it starts acquiring continuously at AcquireTime 0.1.
+
+## PV Access
+
+Every record is also served over PVA the way QSRV does it: NTScalar for
+analog and long records (with display, control and alarm metadata), NTEnum
+for bi / bo / mbbi / mbbo, NTScalarArray for waveforms; gets, puts and
+monitors all work.
+
+`BL01T-DI-CAM-01:PVA:OUTPUT` is an NTNDArray like NDPluginPVA's output. The
+image is simulated: 1024x1024 Int8 (`byteValue`, pixels 0..255 stored as i8
+bit patterns, as an Int8 simDetector produces), uncompressed, with drifting
+diagonal fringes, three gaussian spots on Lissajous paths and some noise.
+A frame is posted for every frame counted (10 Hz by default) while
+`DET:ArrayCallbacks` and `PVA:EnableCallbacks` are both on; `uniqueId` is the
+frame counter. To look at a frame without a viewer:
+
+```
+cargo run -p testioc --example frame_png -- /tmp/frame 1 50
+```
 
 ## Run
 
@@ -27,7 +46,10 @@ bobview-testioc [--only ea|motor|cam]...    # default: all three
 ```
 
 It needs no shell and keeps running with stdin closed. The usual
-`EPICS_CA_SERVER_PORT` / `EPICS_CAS_*` variables apply.
+`EPICS_CA_SERVER_PORT` / `EPICS_CAS_*` variables apply for CA, and
+`EPICS_PVAS_SERVER_PORT` / `EPICS_PVA_SERVER_PORT` (TCP, default 5075) and
+`EPICS_PVAS_BROADCAST_PORT` (UDP search, default 5076) for PVA. `--only`
+applies to both protocols.
 
 On the phone (Linux Terminal VM):
 

@@ -15,6 +15,76 @@ pub enum Value {
     DoubleArray(Arc<[f64]>),
     LongArray(Arc<[i64]>),
     StrArray(Arc<[String]>),
+    /// An areaDetector image (PVA NTNDArray).
+    Image(Arc<Image>),
+}
+
+/// A 2D image, row-major with x varying fastest.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Image {
+    pub width: usize,
+    pub height: usize,
+    /// 3 interleaved samples per pixel (RGB1) instead of 1.
+    pub rgb: bool,
+    pub data: ImageData,
+    pub unique_id: i64,
+}
+
+/// Image samples in their native type.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ImageData {
+    I8(Arc<[i8]>),
+    U8(Arc<[u8]>),
+    I16(Arc<[i16]>),
+    U16(Arc<[u16]>),
+    I32(Arc<[i32]>),
+    U32(Arc<[u32]>),
+    I64(Arc<[i64]>),
+    U64(Arc<[u64]>),
+    F32(Arc<[f32]>),
+    F64(Arc<[f64]>),
+}
+
+impl ImageData {
+    pub fn len(&self) -> usize {
+        match self {
+            ImageData::I8(a) => a.len(),
+            ImageData::U8(a) => a.len(),
+            ImageData::I16(a) => a.len(),
+            ImageData::U16(a) => a.len(),
+            ImageData::I32(a) => a.len(),
+            ImageData::U32(a) => a.len(),
+            ImageData::I64(a) => a.len(),
+            ImageData::U64(a) => a.len(),
+            ImageData::F32(a) => a.len(),
+            ImageData::F64(a) => a.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Sample `i` as a float; signed integer types are reinterpreted as
+    /// unsigned when `unsigned` is set, as the Phoebus image widget does.
+    pub fn get(&self, i: usize, unsigned: bool) -> f64 {
+        match self {
+            ImageData::I8(a) if unsigned => a[i] as u8 as f64,
+            ImageData::I8(a) => a[i] as f64,
+            ImageData::U8(a) => a[i] as f64,
+            ImageData::I16(a) if unsigned => a[i] as u16 as f64,
+            ImageData::I16(a) => a[i] as f64,
+            ImageData::U16(a) => a[i] as f64,
+            ImageData::I32(a) if unsigned => a[i] as u32 as f64,
+            ImageData::I32(a) => a[i] as f64,
+            ImageData::U32(a) => a[i] as f64,
+            ImageData::I64(a) if unsigned => a[i] as u64 as f64,
+            ImageData::I64(a) => a[i] as f64,
+            ImageData::U64(a) => a[i] as f64,
+            ImageData::F32(a) => a[i] as f64,
+            ImageData::F64(a) => a[i],
+        }
+    }
 }
 
 impl Value {
@@ -27,7 +97,7 @@ impl Value {
             Value::Str(s) => s.trim().parse().ok(),
             Value::DoubleArray(a) => a.first().copied(),
             Value::LongArray(a) => a.first().map(|v| *v as f64),
-            Value::StrArray(_) | Value::None => None,
+            Value::StrArray(_) | Value::Image(_) | Value::None => None,
         }
     }
 
@@ -97,6 +167,7 @@ impl PvState {
             Value::DoubleArray(a) => join(a.iter().map(|v| format_double(*v, prec))),
             Value::LongArray(a) => join(a.iter().map(|v| v.to_string())),
             Value::StrArray(a) => join(a.iter().cloned()),
+            Value::Image(img) => format!("{}x{} image #{}", img.width, img.height, img.unique_id),
         };
         let numeric = matches!(
             self.value,

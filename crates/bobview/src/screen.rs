@@ -44,6 +44,8 @@ pub struct Node {
     pub error: Option<String>,
     /// The display file this node came from, to resolve relative paths.
     pub base: Option<PathBuf>,
+    /// The image widget's texture and the frame it shows.
+    pub image: Option<crate::image::ImageCache>,
 }
 
 pub struct Builder<'a> {
@@ -244,6 +246,7 @@ impl Builder<'_> {
             edit: None,
             error: None,
             base: base.map(Path::to_path_buf),
+            image: None,
         };
 
         match w.kind.as_str() {

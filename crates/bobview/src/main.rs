@@ -1,6 +1,8 @@
 //! bobview: a lean viewer for Phoebus `.bob` displays.
 
 mod app;
+mod colormaps;
+mod image;
 mod rules;
 mod screen;
 mod snapshot;

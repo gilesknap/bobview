@@ -75,6 +75,7 @@ pub(crate) fn apply(old: &Value, labels: &[String], text: &str) -> Value {
             Value::LongArray(t.split([' ', ',']).filter_map(|x| x.parse().ok()).collect())
         }
         Value::StrArray(_) => Value::StrArray(Arc::from(vec![text.to_string()])),
+        Value::Image(_) => old.clone(),
         Value::None => t
             .parse()
             .map(Value::Double)

@@ -153,6 +153,10 @@ fn draw_node(ui: &mut Ui, node: &mut Node, cx: &mut Cx, id: Id) {
             navtabs(ui, node, rect, cx, id);
             None
         }
+        "image" => {
+            crate::image::draw(ui, node, state.as_ref(), rect, z);
+            None
+        }
         other => {
             let what = if node.pv_name.is_empty() {
                 other.to_string()
@@ -194,27 +198,27 @@ fn draw_node(ui: &mut Ui, node: &mut Node, cx: &mut Cx, id: Id) {
 
 // --- helpers -----------------------------------------------------------------
 
-fn fg(w: &Widget) -> Color32 {
+pub(crate) fn fg(w: &Widget) -> Color32 {
     w.color("foreground_color")
         .map(|c| color(&c))
         .unwrap_or(Color32::BLACK)
 }
 
-fn bg(w: &Widget, default: &str) -> Color32 {
+pub(crate) fn bg(w: &Widget, default: &str) -> Color32 {
     w.color("background_color")
         .map(|c| color(&c))
         .unwrap_or_else(|| named(default))
 }
 
-fn font(w: &Widget, z: f32) -> FontId {
+pub(crate) fn font(w: &Widget, z: f32) -> FontId {
     style::font_id(&w.font("font").unwrap_or_default(), z)
 }
 
-fn fill(painter: &egui::Painter, rect: Rect, c: Color32) {
+pub(crate) fn fill(painter: &egui::Painter, rect: Rect, c: Color32) {
     painter.rect_filled(rect, CornerRadius::ZERO, c);
 }
 
-fn outline(painter: &egui::Painter, rect: Rect, width: f32, c: Color32) {
+pub(crate) fn outline(painter: &egui::Painter, rect: Rect, width: f32, c: Color32) {
     painter.rect_stroke(
         rect,
         CornerRadius::ZERO,
@@ -224,7 +228,7 @@ fn outline(painter: &egui::Painter, rect: Rect, width: f32, c: Color32) {
 }
 
 /// Draw `text` in `rect` with the widget's alignment, optionally wrapping.
-fn text_in(
+pub(crate) fn text_in(
     painter: &egui::Painter,
     rect: Rect,
     text: &str,
@@ -285,7 +289,7 @@ fn button_box(painter: &egui::Painter, rect: Rect, fill_color: Color32, pressed:
     );
 }
 
-fn placeholder(painter: &egui::Painter, rect: Rect, what: &str, z: f32) {
+pub(crate) fn placeholder(painter: &egui::Painter, rect: Rect, what: &str, z: f32) {
     fill(painter, rect, Color32::from_gray(235));
     outline(painter, rect, 1.0, Color32::from_gray(160));
     text_in(
