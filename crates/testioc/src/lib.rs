@@ -1,18 +1,21 @@
-//! A pure-Rust CA IOC serving a subset of the epics-containers
+//! A pure-Rust CA and PVA IOC serving a subset of the epics-containers
 //! example-services BL01T beamline PVs.
 
 mod cam;
+pub mod image;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use asyn_rs::interfaces::motor::AsynMotor;
-use epics_base_rs::error::CaResult;
+use epics_base_rs::error::{CaError, CaResult};
 use epics_base_rs::server::database::db_access::DbChannel;
 use epics_base_rs::server::device_support::DeviceSupport;
 use epics_base_rs::server::scan::ScanOwner;
 use epics_ca_rs::server::CaServer;
+use epics_pva_rs::server::native_source::PvDatabaseSource;
+use epics_pva_rs::server_native::{CompositeSource, PvaServer, PvaServerConfig, SharedSource};
 use motor_rs::poll_loop::PollCommand;
 use motor_rs::sim_motor::SimMotor;
 use motor_rs::{MotorBuilder, MotorRecord};
@@ -54,10 +57,28 @@ impl Part {
     }
 }
 
-/// A running IOC. Dropping it stops scanning but not the CA server task.
+/// A running IOC: the CA server, and a PVA server that is already serving.
+/// Dropping it stops scanning and PVA but not the CA server task.
 pub struct Ioc {
     pub server: Arc<CaServer>,
+    pub pva: PvaServer,
     _scan: ScanOwner,
+}
+
+impl Ioc {
+    /// The bound PVA TCP and UDP (search) ports.
+    pub fn pva_ports(&self) -> (u16, u16) {
+        (self.pva.tcp_addr().port(), self.pva.config().udp_port)
+    }
+
+    /// Serve until either server stops or SIGINT.
+    pub async fn run(self) -> Result<(), String> {
+        let Ioc { server, pva, _scan } = self;
+        tokio::select! {
+            r = server.run() => r.map_err(|e| format!("CA: {e}")),
+            r = pva.run() => r.map_err(|e| format!("PVA: {e}")),
+        }
+    }
 }
 
 fn macros(pairs: &[(&str, &str)]) -> HashMap<String, String> {
@@ -67,11 +88,13 @@ fn macros(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         .collect()
 }
 
-/// Build the IOC for `parts` on `port` (None: EPICS_CA_SERVER_PORT or 5064)
-/// and run its startup actions. Call `server.run()` to serve.
-pub async fn build(parts: &[Part], port: Option<u16>) -> CaResult<Ioc> {
+/// Build the IOC for `parts` and run its startup actions. `ca_port` None
+/// means EPICS_CA_SERVER_PORT or 5064; `pva_port` None means the
+/// EPICS_PVA(S)_* variables or 5075/5076, Some(p) means TCP p and UDP p+1
+/// (0: both ephemeral). PVA serves from here on; call `run()` for CA.
+pub async fn build(parts: &[Part], ca_port: Option<u16>, pva_port: Option<u16>) -> CaResult<Ioc> {
     let mut b = CaServer::builder();
-    if let Some(port) = port {
+    if let Some(port) = ca_port {
         b = b.port(port);
     }
     let mut poll_txs = Vec::new();
@@ -125,12 +148,32 @@ pub async fn build(parts: &[Part], port: Option<u16>) -> CaResult<Ioc> {
     for tx in poll_txs {
         let _ = tx.send(PollCommand::StartPolling).await;
     }
+
+    // Records over PVA as QSRV serves them, plus the camera's image PV.
+    let source = CompositeSource::new();
+    let records = Arc::new(PvDatabaseSource::new(db.clone()));
+    source
+        .add_source("records", records, 0)
+        .map_err(CaError::InvalidValue)?;
     if parts.contains(&Part::Cam) {
-        cam::start(&db).await?;
+        let output = image::open_pv();
+        let shared = Arc::new(SharedSource::new());
+        shared.add(format!("{CAM_P}:PVA:OUTPUT"), output.clone());
+        source
+            .add_source("cam", shared, 1)
+            .map_err(CaError::InvalidValue)?;
+        cam::start(&db, output).await?;
     }
+    let mut config = PvaServerConfig::default().with_env();
+    if let Some(port) = pva_port {
+        config.tcp_port = port;
+        config.udp_port = if port == 0 { 0 } else { port + 1 };
+    }
+    let pva = PvaServer::start(source, config).map_err(|e| CaError::InvalidValue(e.to_string()))?;
 
     Ok(Ioc {
         server,
+        pva,
         _scan: scan,
     })
 }

@@ -2,8 +2,10 @@ use testioc::{Part, build};
 
 const USAGE: &str = "usage: bobview-testioc [--only ea|motor|cam]...
 
-Serves the example-services BL01T PVs over Channel Access.
-Honours EPICS_CA_SERVER_PORT and the other EPICS_CA(S)_* variables.";
+Serves the example-services BL01T PVs over Channel Access and PV Access.
+Honours EPICS_CA_SERVER_PORT and the other EPICS_CA(S)_* variables, and
+EPICS_PVAS_SERVER_PORT / EPICS_PVAS_BROADCAST_PORT and the other
+EPICS_PVA(S)_* variables.";
 
 fn parse_args() -> Result<Vec<Part>, String> {
     let mut parts = Vec::new();
@@ -39,7 +41,7 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    let ioc = match build(&parts, None).await {
+    let ioc = match build(&parts, None, None).await {
         Ok(ioc) => ioc,
         Err(e) => {
             eprintln!("bobview-testioc: startup failed: {e}");
@@ -47,12 +49,14 @@ async fn main() {
         }
     };
     let served: Vec<_> = parts.iter().map(|p| p.describe()).collect();
+    let (pva_tcp, pva_udp) = ioc.pva_ports();
     println!(
         "bobview-testioc: CA port {}, serving {}",
         ioc.server.tcp_port(),
         served.join("; ")
     );
-    if let Err(e) = ioc.server.run().await {
+    println!("bobview-testioc: PVA served on TCP port {pva_tcp}, UDP search port {pva_udp}");
+    if let Err(e) = ioc.run().await {
         eprintln!("bobview-testioc: {e}");
         std::process::exit(1);
     }

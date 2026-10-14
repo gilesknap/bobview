@@ -2,8 +2,8 @@
 
 A lean viewer for [Phoebus Display Builder](https://control-system-studio.readthedocs.io/en/latest/app/display/editor/doc/index.html)
 `.bob` screens, written in Rust with [egui](https://github.com/emilk/egui).
-It shows live EPICS Channel Access values and is small enough to run on a
-phone, in the Android 16 Linux Terminal (Debian 13, aarch64).
+It shows live EPICS Channel Access and PV Access values, including areaDetector
+images, and is small enough to run on a phone, in the Android 16 Linux Terminal (Debian 13, aarch64).
 
 Scripts (Jython/JavaScript), display editing, alarm and archiver services are
 out of scope.
@@ -38,14 +38,17 @@ bobview path/to/screen.bob -m P=BL01T,R=:DET:
 [epics-containers example-services](https://github.com/epics-containers/example-services)
 beamline natively, so the amd64 IOC containers are not needed on the phone:
 `bl01t-ea-test-01` (its `ioc.db` verbatim), two motor records on a simulated
-axis, and a simulated area detector without image data.
+axis, and a simulated area detector whose image is served over PV Access as
+`BL01T-DI-CAM-01:PVA:OUTPUT`. Every record is also served over PVA.
 See [crates/testioc](crates/testioc/README.md).
 
-To reach real IOCs from the phone instead, point Channel Access at them:
-`EPICS_CA_ADDR_LIST` for UDP search, or `EPICS_CA_NAME_SERVERS=host:port` for
-a ca-gateway reached over TCP (this works through the phone VM's NAT, since
+To reach real IOCs from the phone instead, point the clients at them with the
+standard variables: `EPICS_CA_ADDR_LIST` / `EPICS_PVA_ADDR_LIST` for UDP
+search, or `EPICS_CA_NAME_SERVERS=host:port` / `EPICS_PVA_NAME_SERVERS=host:port`
+for gateways reached over TCP (this works through the phone VM's NAT, since
 the phone opens the connection). The example-services `ca-gateway` listens on
-port 9064 of its host.
+port 9064 of its host. PVs prefixed `pva://` use PV Access; others use Channel
+Access.
 
 Options: `-z ZOOM` fixes the zoom instead of fitting the window, `-f` starts
 full screen, `--snapshot out.png` renders headless and exits (with `--size WxH`
@@ -63,13 +66,14 @@ screen, pinch to zoom; long-press a widget to see its PV and value.
 | progressbar, tank, thermometer, linearmeter, meter | all drawn as bars for now |
 | rectangle, ellipse, arc, polyline, polygon | |
 | group, tabs, embedded, navtabs | macros pass down; embedded resize modes 0–2 |
+| image | PVA NTNDArray (uncompressed, mono or RGB1) or a CA array shaped by `data_width`/`data_height`; Phoebus colour maps, autoscale or fixed range, `unsigned`, colour bar |
 
 Also: macros (`$(X)`, `${X}`, defaults, widget properties such as
 `$(pv_name)`), rules (expressions over `pv0`, `pvStr0`, `pvSev0` … that set any
 property), alarm borders and dashed borders for disconnected PVs, back and
 forward navigation, `loc://` and `sim://` PVs.
 
-Not yet: PV Access (`pva://` PVs show as unsupported), image, XY plot and
+Not yet: compressed (codec) images, image axes, ROIs and cursors, XY plot and
 strip chart widgets (drawn as placeholders), pictures.
 
 ## Build

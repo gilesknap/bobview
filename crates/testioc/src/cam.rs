@@ -1,5 +1,5 @@
-//! A simulated simDetector driver loop. It produces no pixel data, only the
-//! counters and state a detector screen shows.
+//! A simulated simDetector driver loop: the counters and state a detector
+//! screen shows, and a simulated image posted to the NDPluginPVA output.
 
 use std::time::{Duration, Instant};
 
@@ -7,8 +7,10 @@ use epics_base_rs::error::CaResult;
 use epics_base_rs::server::database::PvDatabase;
 use epics_base_rs::server::database::db_access::DbChannel;
 use epics_base_rs::types::EpicsValue;
+use epics_pva_rs::server_native::SharedPV;
 
 use crate::CAM_P;
+use crate::image::{self, HEIGHT, ImageSim, WIDTH};
 
 pub const PLUGINS: [&str; 2] = [":ARR:", ":PVA:"];
 
@@ -18,7 +20,7 @@ record(stringin, "$(P):PVA:PvName_RBV") {
 }
 "#;
 
-const DIMS: [i32; 2] = [1024, 1024];
+const DIMS: [i32; 2] = [WIDTH as i32, HEIGHT as i32];
 const TICK: Duration = Duration::from_millis(10);
 
 fn pv(r: &str, name: &str) -> String {
@@ -65,7 +67,7 @@ async fn set_state(db: &PvDatabase, acquiring: bool, msg: &str) {
 }
 
 /// Apply the ioc.yaml startup puts and start the driver loop.
-pub async fn start(db: &PvDatabase) -> CaResult<()> {
+pub async fn start(db: &PvDatabase, output: SharedPV) -> CaResult<()> {
     let dims = EpicsValue::LongArray(DIMS.to_vec().into());
     for r in PLUGINS {
         post_long(db, &pv(r, "NDimensions"), 2).await;
@@ -82,7 +84,7 @@ pub async fn start(db: &PvDatabase) -> CaResult<()> {
     DbChannel::new(db, &det("Acquire"))
         .put_i16_process(1)
         .await?;
-    tokio::spawn(run(db.clone()));
+    tokio::spawn(run(db.clone(), output));
     Ok(())
 }
 
@@ -123,7 +125,8 @@ impl Counter {
     }
 }
 
-async fn run(db: PvDatabase) {
+async fn run(db: PvDatabase, output: SharedPV) {
+    let mut sim = ImageSim::new();
     let mut acquiring = false;
     let mut images = 0;
     let mut unique_id = 0;
@@ -175,6 +178,9 @@ async fn run(db: PvDatabase) {
                 if get(&db, &pv(r, "EnableCallbacks")) != 0.0 {
                     c.bump(&db).await;
                     post_long(&db, &pv(r, "UniqueId_RBV"), unique_id).await;
+                    if *r == ":PVA:" {
+                        image::post(&output, sim.frame(unique_id as u32), unique_id);
+                    }
                 }
             }
         }

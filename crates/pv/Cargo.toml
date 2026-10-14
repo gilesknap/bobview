@@ -1,6 +1,6 @@
 [package]
 name = "pv"
-description = "PV access layer for bobview: CA, loc:// and sim:// behind one interface"
+description = "PV access layer for bobview: CA, PVA, loc:// and sim:// behind one interface"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,5 +8,6 @@ license.workspace = true
 [dependencies]
 epics-base-rs = "0.31.0"
 epics-ca-rs = "0.31.0"
+epics-pva-rs = { version = "0.31.0", default-features = false, features = ["client"] }
 log = "0.4"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
