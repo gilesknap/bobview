@@ -130,7 +130,15 @@ fn draw_node(ui: &mut Ui, node: &mut Node, cx: &mut Cx, id: Id) {
             poly(&painter, &node.w, cx.view, &node.rect);
             None
         }
-        "progressbar" | "tank" | "thermometer" | "linearmeter" | "meter" => {
+        "linearmeter" => {
+            crate::meter::linear_meter(&painter, &node.w, state.as_ref(), rect, z);
+            None
+        }
+        "xyplot" => {
+            crate::plot::draw(&painter, node, rect, z);
+            None
+        }
+        "progressbar" | "tank" | "thermometer" | "meter" => {
             bar(&painter, &node.w, state.as_ref(), rect, z);
             None
         }
@@ -153,10 +161,15 @@ fn draw_node(ui: &mut Ui, node: &mut Node, cx: &mut Cx, id: Id) {
             navtabs(ui, node, rect, cx, id);
             None
         }
-        "image" => {
-            crate::image::draw(ui, node, state.as_ref(), rect, z);
-            None
-        }
+        "image" => Some(crate::image::draw(
+            ui,
+            node,
+            state.as_ref(),
+            rect,
+            cx.clip,
+            id,
+            z,
+        )),
         other => {
             let what = if node.pv_name.is_empty() {
                 other.to_string()
@@ -266,7 +279,13 @@ fn alignment(w: &Widget, v_default: i64) -> Align2 {
 }
 
 /// Button-like 3D box.
-fn button_box(painter: &egui::Painter, rect: Rect, fill_color: Color32, pressed: bool, z: f32) {
+pub(crate) fn button_box(
+    painter: &egui::Painter,
+    rect: Rect,
+    fill_color: Color32,
+    pressed: bool,
+    z: f32,
+) {
     let r = CornerRadius::same((2.0 * z).min(255.0) as u8);
     painter.rect_filled(rect, r, fill_color);
     let (light, dark) = (
@@ -645,8 +664,8 @@ fn bar(painter: &egui::Painter, w: &Widget, s: Option<&PvState>, rect: Rect, z: 
         )
     };
     fill(painter, filled, fill_c);
-    if matches!(w.kind.as_str(), "linearmeter" | "meter") {
-        let text = s.format(None, true);
+    if w.kind == "meter" {
+        let text = format_value(w, s);
         text_in(
             painter,
             rect,
@@ -1342,7 +1361,7 @@ fn navtabs(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut Cx, id: Id) {
     }
 }
 
-fn alarm_border(painter: &egui::Painter, w: &Widget, s: &PvState, rect: Rect, z: f32) {
+pub(crate) fn alarm_border(painter: &egui::Painter, w: &Widget, s: &PvState, rect: Rect, z: f32) {
     if w.bool("border_alarm_sensitive") == Some(false) {
         return;
     }

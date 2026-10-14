@@ -46,6 +46,8 @@ pub struct Node {
     pub base: Option<PathBuf>,
     /// The image widget's texture and the frame it shows.
     pub image: Option<crate::image::ImageCache>,
+    /// The x and y PVs of each trace of an XY plot.
+    pub traces: Vec<crate::plot::TracePvs>,
 }
 
 pub struct Builder<'a> {
@@ -247,6 +249,7 @@ impl Builder<'_> {
             error: None,
             base: base.map(Path::to_path_buf),
             image: None,
+            traces: Vec::new(),
         };
 
         match w.kind.as_str() {
@@ -291,6 +294,10 @@ impl Builder<'_> {
                 let group = node.prop("group_name");
                 let macros = node.macros.clone();
                 self.embed(&mut node, &file, &macros, &group, depth);
+            }
+            "xyplot" => {
+                node.traces =
+                    crate::plot::subscribe(w, &|t| expand_for(w, &node.macros, t), self.pvs);
             }
             "navtabs" => {
                 node.active_tab = w.i64("active_tab").unwrap_or(0).max(0) as usize;
@@ -440,6 +447,7 @@ pub mod display_set {
         "embedded",
         "navtabs",
         "image",
+        "xyplot",
     ];
 
     pub fn files() -> Vec<PathBuf> {
