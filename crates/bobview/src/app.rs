@@ -29,6 +29,15 @@ pub struct BobApp {
     error: Option<String>,
     show_open: bool,
     open_path: String,
+    /// Use the on-screen keypad for text entries (switched on by the first touch).
+    keypad_mode: bool,
+    keypad: Option<Keypad>,
+    info: Option<String>,
+}
+
+struct Keypad {
+    pv: pv::Pv,
+    text: String,
 }
 
 impl BobApp {
@@ -54,6 +63,9 @@ impl BobApp {
             fit: zoom.is_none(),
             error: None,
             show_open: start.is_none(),
+            keypad_mode: false,
+            keypad: None,
+            info: None,
             open_path: start
                 .as_ref()
                 .map(|l| l.path.display().to_string())
@@ -63,6 +75,10 @@ impl BobApp {
             app.show(loc);
         }
         app
+    }
+
+    pub fn set_keypad(&mut self, on: bool) {
+        self.keypad_mode = on;
     }
 
     /// Load and show a display, without touching the history.
@@ -154,6 +170,13 @@ impl BobApp {
             }
             ui.label(format!("{:.0}%", self.zoom * 100.0));
             ui.separator();
+            if ui
+                .selectable_label(self.keypad_mode, "⌨")
+                .on_hover_text("Edit values with an on-screen keypad")
+                .clicked()
+            {
+                self.keypad_mode = !self.keypad_mode;
+            }
             if ui.selectable_label(self.show_open, "Open…").clicked() {
                 self.show_open = !self.show_open;
             }
@@ -281,6 +304,9 @@ impl eframe::App for BobApp {
 
 impl BobApp {
     pub fn draw(&mut self, ui: &mut egui::Ui) {
+        if !self.keypad_mode && ui.input(|i| i.any_touches()) {
+            self.keypad_mode = true;
+        }
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
         if self.show_open {
             egui::Panel::top("open").show(ui, |ui| self.open_panel(ui));
@@ -320,6 +346,7 @@ impl BobApp {
                         pvs: &self.pvs,
                         requests: &mut requests,
                         depth: 0,
+                        keypad: self.keypad_mode,
                     };
                     widgets::draw_screen(ui, screen, &mut cx, Id::new("display"));
                 });
@@ -335,12 +362,100 @@ impl BobApp {
                     log::info!("open {} ({target})", path.display());
                     self.open(Location { path, macros });
                 }
+                Request::Keypad { pv, text } => self.keypad = Some(Keypad { pv, text }),
+                Request::Info(text) => self.info = Some(text),
                 Request::Webpage(url) => {
                     if let Err(e) = std::process::Command::new("xdg-open").arg(&url).spawn() {
                         log::warn!("cannot open {url}: {e}");
                     }
                 }
             }
+        }
+        self.keypad_window(ui);
+        self.info_window(ui);
+    }
+
+    fn info_window(&mut self, ui: &mut egui::Ui) {
+        let mut open = self.info.is_some();
+        if let Some(text) = &self.info {
+            egui::Window::new("PV")
+                .open(&mut open)
+                .collapsible(false)
+                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                .show(ui.ctx(), |ui| ui.label(text));
+        }
+        if !open {
+            self.info = None;
+        }
+    }
+
+    fn keypad_window(&mut self, ui: &mut egui::Ui) {
+        let Some(pad) = self.keypad.as_mut() else {
+            return;
+        };
+        let mut done = None;
+        let title = pad.pv.name().to_string();
+        let state = pad.pv.state();
+        egui::Window::new(title)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_BOTTOM, Vec2::new(0.0, -8.0))
+            .show(ui.ctx(), |ui| {
+                let size = Vec2::new(64.0, 48.0);
+                let font = egui::FontId::proportional(22.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut pad.text)
+                        .font(font.clone())
+                        .desired_width(4.0 * size.x + 12.0),
+                );
+                // Enums get one button per state instead of digits.
+                if !state.labels.is_empty() {
+                    for label in &state.labels {
+                        let b = egui::Button::new(egui::RichText::new(label).font(font.clone()));
+                        if ui
+                            .add_sized(Vec2::new(4.0 * size.x + 12.0, size.y), b)
+                            .clicked()
+                        {
+                            done = Some(Some(label.clone()));
+                        }
+                    }
+                } else {
+                    let rows = [
+                        ["7", "8", "9", "Del"],
+                        ["4", "5", "6", "-"],
+                        ["1", "2", "3", "e"],
+                        ["0", ".", "C", "OK"],
+                    ];
+                    for row in rows {
+                        ui.horizontal(|ui| {
+                            for key in row {
+                                let b =
+                                    egui::Button::new(egui::RichText::new(key).font(font.clone()));
+                                if ui.add_sized(size, b).clicked() {
+                                    match key {
+                                        "Del" => {
+                                            pad.text.pop();
+                                        }
+                                        "C" => pad.text.clear(),
+                                        "OK" => done = Some(Some(pad.text.clone())),
+                                        k => pad.text.push_str(k),
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
+                if ui.button("Cancel").clicked() {
+                    done = Some(None);
+                }
+            });
+        match done {
+            Some(Some(value)) => {
+                pad.pv.write(value);
+                self.keypad = None;
+            }
+            Some(None) => self.keypad = None,
+            None => {}
         }
     }
 }

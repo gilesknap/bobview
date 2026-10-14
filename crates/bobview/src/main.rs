@@ -19,9 +19,11 @@ options:
   -m, --macros P=X,R=Y   macros for the display
   -z, --zoom FACTOR      fixed zoom instead of fit-to-window
   -f, --fullscreen       start full screen
+  -k, --keypad           edit values with an on-screen keypad (automatic on touch)
   --snapshot OUT.png     render to a PNG without a window and exit
   --size WxH             snapshot size (default 1280x800)
   --wait SECONDS         time for PVs to connect before a snapshot (default 2)
+  --click X,Y            click here before the snapshot (repeatable)
   -h, --help             show this help
   -V, --version          show the version
 
@@ -39,12 +41,22 @@ fn main() -> eframe::Result {
     let mut snapshot = None;
     let mut size = [1280, 800];
     let mut wait = 2.0;
+    let mut clicks = Vec::new();
+    let mut keypad = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-m" | "--macros" => macros = parse_macros(&args.next().unwrap_or_default()),
             "-z" | "--zoom" => zoom = args.next().and_then(|z| z.parse().ok()),
             "-f" | "--fullscreen" => fullscreen = true,
+            "-k" | "--keypad" => keypad = true,
+            "--click" => {
+                if let Some((x, y)) = args.next().as_deref().and_then(|s| s.split_once(','))
+                    && let (Ok(x), Ok(y)) = (x.trim().parse(), y.trim().parse())
+                {
+                    clicks.push(egui::pos2(x, y));
+                }
+            }
             "--snapshot" => snapshot = args.next().map(PathBuf::from),
             "--size" => {
                 if let Some((w, h)) = args.next().as_deref().and_then(|s| s.split_once('x')) {
@@ -72,13 +84,14 @@ fn main() -> eframe::Result {
             eprintln!("--snapshot needs a display file");
             std::process::exit(2);
         };
-        if let Err(e) = snapshot::run(
-            start,
+        let opts = snapshot::Options {
             size,
             zoom,
-            std::time::Duration::from_secs_f64(wait),
-            &out,
-        ) {
+            wait: std::time::Duration::from_secs_f64(wait),
+            clicks,
+            keypad,
+        };
+        if let Err(e) = snapshot::run(start, &opts, &out) {
             eprintln!("snapshot failed: {e}");
             std::process::exit(1);
         }
@@ -96,7 +109,11 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "bobview",
         options,
-        Box::new(move |cc| Ok(Box::new(app::BobApp::new(&cc.egui_ctx, start, zoom)))),
+        Box::new(move |cc| {
+            let mut app = app::BobApp::new(&cc.egui_ctx, start, zoom);
+            app.set_keypad(keypad);
+            Ok(Box::new(app))
+        }),
     )
 }
 

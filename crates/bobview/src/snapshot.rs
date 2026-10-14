@@ -10,24 +10,64 @@ use eframe::egui::{self, Color32, ColorImage, Pos2, Rect, TextureId, Vec2, epain
 
 use crate::app::{BobApp, Location};
 
-pub fn run(
-    start: Location,
-    size: [u32; 2],
-    zoom: Option<f32>,
-    wait: Duration,
-    out: &Path,
-) -> Result<(), String> {
+/// What to render and how.
+pub struct Options {
+    pub size: [u32; 2],
+    pub zoom: Option<f32>,
+    /// Time for PVs to connect before anything else happens.
+    pub wait: Duration,
+    /// Points to click, in order, once `wait` has passed.
+    pub clicks: Vec<Pos2>,
+    pub keypad: bool,
+}
+
+pub fn run(start: Location, opts: &Options, out: &Path) -> Result<(), String> {
     let ctx = egui::Context::default();
-    let mut app = BobApp::new(&ctx, Some(start), zoom);
+    let mut app = BobApp::new(&ctx, Some(start), opts.zoom);
+    app.set_keypad(opts.keypad);
     let mut textures: HashMap<TextureId, ColorImage> = HashMap::new();
     let begin = Instant::now();
-    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(size[0] as f32, size[1] as f32));
+    let screen = Rect::from_min_size(
+        Pos2::ZERO,
+        Vec2::new(opts.size[0] as f32, opts.size[1] as f32),
+    );
 
-    // Run frames until PVs have had time to connect, then keep the last one.
+    // Each click is a press frame then a release frame.
+    let mut pending: std::collections::VecDeque<Vec<egui::Event>> = opts
+        .clicks
+        .iter()
+        .flat_map(|&pos| {
+            let button = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            };
+            // A few idle frames after each click let windows appear.
+            [
+                vec![egui::Event::PointerMoved(pos), button(true)],
+                vec![button(false)],
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+            ]
+        })
+        .collect();
+    let mut settle_until = None;
+
+    // Run frames until PVs have had time to connect and clicks have settled.
     let output = loop {
+        let started = begin.elapsed() >= opts.wait;
+        let events = if started {
+            pending.pop_front().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let input = egui::RawInput {
             screen_rect: Some(screen),
             time: Some(begin.elapsed().as_secs_f64()),
+            events,
             ..Default::default()
         };
         let mut output = ctx.run_ui(input, |ui| app.draw(ui));
@@ -37,14 +77,24 @@ pub fn run(
             }
         }
         output.textures_delta.clear();
-        if begin.elapsed() >= wait {
-            break output;
+        if started && pending.is_empty() {
+            let until = *settle_until.get_or_insert_with(|| {
+                begin.elapsed()
+                    + if opts.clicks.is_empty() {
+                        Duration::ZERO
+                    } else {
+                        Duration::from_secs(1)
+                    }
+            });
+            if begin.elapsed() >= until {
+                break output;
+            }
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(if started { 50 } else { 100 }));
     };
 
     let prims = ctx.tessellate(output.shapes, output.pixels_per_point);
-    let mut canvas = Canvas::new(size[0] as usize, size[1] as usize);
+    let mut canvas = Canvas::new(opts.size[0] as usize, opts.size[1] as usize);
     for prim in prims {
         if let epaint::Primitive::Mesh(mesh) = &prim.primitive {
             canvas.draw_mesh(mesh, prim.clip_rect, textures.get(&mesh.texture_id));
@@ -203,7 +253,14 @@ mod tests {
                 path: f.clone(),
                 macros: bob::Macros::default(),
             };
-            run(start, [320, 240], Some(0.5), Duration::ZERO, &out).unwrap();
+            let opts = Options {
+                size: [320, 240],
+                zoom: Some(0.5),
+                wait: Duration::ZERO,
+                clicks: Vec::new(),
+                keypad: false,
+            };
+            run(start, &opts, &out).unwrap();
             assert!(
                 std::fs::metadata(&out).unwrap().len() > 1000,
                 "{} rendered nothing",

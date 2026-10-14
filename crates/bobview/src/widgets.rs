@@ -21,6 +21,13 @@ pub enum Request {
         target: String,
     },
     Webpage(String),
+    /// Edit a value with the on-screen keypad.
+    Keypad {
+        pv: pv::Pv,
+        text: String,
+    },
+    /// Show details of a widget's PV (long press on a touch screen).
+    Info(String),
 }
 
 /// Per-frame drawing context.
@@ -30,6 +37,8 @@ pub struct Cx<'a> {
     pub pvs: &'a PvManager,
     pub requests: &'a mut Vec<Request>,
     pub depth: u32,
+    /// Text entries open the on-screen keypad instead of taking keyboard focus.
+    pub keypad: bool,
 }
 
 impl Cx<'_> {
@@ -40,6 +49,7 @@ impl Cx<'_> {
             pvs: self.pvs,
             requests: self.requests,
             depth: self.depth + 1,
+            keypad: self.keypad,
         }
     }
 }
@@ -175,6 +185,9 @@ fn draw_node(ui: &mut Ui, node: &mut Node, cx: &mut Cx, id: Id) {
             ),
             None => node.pv_name.clone(),
         };
+        if resp.long_touched() {
+            cx.requests.push(Request::Info(text.clone()));
+        }
         resp.on_hover_text(text);
     }
 }
@@ -659,8 +672,39 @@ fn text_entry(
         Some(s) if s.connected => format_value(&w, s),
         _ => format!("<{}>", node.pv_name),
     };
-    let mut buf = node.edit.clone().unwrap_or(shown);
     let align = alignment(&w, 1);
+    let enabled = connected && w.bool("enabled") != Some(false);
+    if cx.keypad {
+        let resp = ui.interact(rect.intersect(cx.clip), id, Sense::click());
+        let painter = ui.painter().with_clip_rect(cx.clip);
+        fill(&painter, rect, bg(&w, "Write_Background"));
+        text_in(
+            &painter,
+            rect.shrink2(Vec2::new(2.0, 0.0)),
+            &shown,
+            font(&w, cx.view.zoom),
+            fg(&w),
+            align,
+            false,
+        );
+        if resp.clicked()
+            && enabled
+            && let Some(pv) = &node.pv
+        {
+            let text = state.map(|s| {
+                s.format(
+                    w.i64("precision").filter(|p| *p >= 0).map(|p| p as i32),
+                    false,
+                )
+            });
+            cx.requests.push(Request::Keypad {
+                pv: pv.clone(),
+                text: text.unwrap_or_default(),
+            });
+        }
+        return resp;
+    }
+    let mut buf = node.edit.clone().unwrap_or(shown);
     let edit = egui::TextEdit::singleline(&mut buf)
         .id(id)
         .font(font(&w, cx.view.zoom))
@@ -669,7 +713,7 @@ fn text_entry(
         .horizontal_align(align.x())
         .vertical_align(egui::Align::Center)
         .margin(Vec2::new(2.0, 0.0))
-        .interactive(connected && w.bool("enabled") != Some(false))
+        .interactive(enabled)
         .min_size(rect.size());
     let resp = put_clipped(ui, rect, cx.clip, edit);
     if resp.has_focus() {
