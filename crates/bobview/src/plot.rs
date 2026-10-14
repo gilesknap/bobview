@@ -750,7 +750,9 @@ mod tests {
     }
 
     #[test]
-    fn the_first_y_axes_wins() {
+    fn the_last_y_axes_wins() {
+        // pvi writes <y_axes> twice; Phoebus reads properties in order, so
+        // the second one (its title and autoscale) is what it shows.
         let pvs = PvManager::new();
         let n = node(&pvs);
         let cfg = axis_cfg(
@@ -759,12 +761,10 @@ mod tests {
             &n,
             1.0,
         );
-        assert_eq!(cfg.title, "Y");
-        assert!(!cfg.autoscale);
-        assert_eq!(
-            axis_range(&cfg, [5.0, 500.0].into_iter(), true),
-            (0.0, 100.0)
-        );
+        assert_eq!(cfg.title, "Total");
+        assert!(cfg.autoscale);
+        let (lo, hi) = axis_range(&cfg, [5.0, 500.0].into_iter(), true);
+        assert!(lo <= 5.0 && hi >= 500.0, "{lo}..{hi}");
         let x = axis_cfg(n.w.get("x_axis"), "X", &n, 1.0);
         assert_eq!(x.title, "");
         assert_eq!(
