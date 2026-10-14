@@ -1099,7 +1099,9 @@ fn choice(
     let (items, current) = choices(&w, s);
     let horizontal = w.bool("horizontal").unwrap_or(true);
     let n = items.len().max(1);
-    let mut resp = ui.interact(rect.intersect(cx.clip), id, Sense::hover());
+    // Click sensing (here and merged from each choice below) lets the PV
+    // context menu open from anywhere on the widget.
+    let mut resp = ui.interact(rect.intersect(cx.clip), id, Sense::click());
     let painter = ui.painter().with_clip_rect(cx.clip);
     let selected = w
         .color("selected_color")
@@ -1168,7 +1170,6 @@ fn choice(
         if r.clicked() {
             write(node, item.clone());
         }
-        // The cells take the clicks, so the PV menu needs their right-clicks.
         resp = resp.union(r);
     }
     resp

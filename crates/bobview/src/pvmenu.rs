@@ -140,9 +140,20 @@ fn full_line(name: &str, s: &PvState) -> String {
 /// A shell command that reads the PV, for the protocols that have one.
 fn cli_command(name: &PvName) -> Option<String> {
     match name.scheme {
-        Scheme::Ca => Some(format!("caget {}", name.pv)),
-        Scheme::Pva => Some(format!("pvget {}", name.pv)),
+        Scheme::Ca => Some(format!("caget {}", shell_quote(&name.pv))),
+        Scheme::Pva => Some(format!("pvget {}", shell_quote(&name.pv))),
         Scheme::Loc | Scheme::Sim => None,
+    }
+}
+
+/// Quote `s` as one shell word, so a pasted command can't run anything else.
+/// Names made only of the usual PV characters are left bare.
+fn shell_quote(s: &str) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "_-:.+/=,@%".contains(c);
+    if !s.is_empty() && s.chars().all(plain) {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
     }
 }
 
@@ -240,6 +251,8 @@ mod tests {
         assert_eq!(cmd("pva://BL01T:IMG").as_deref(), Some("pvget BL01T:IMG"));
         assert_eq!(cmd("loc://x<VDouble>(3)"), None);
         assert_eq!(cmd("sim://sine"), None);
+        assert_eq!(cmd("PV;id").as_deref(), Some("caget 'PV;id'"));
+        assert_eq!(cmd("pva://a'b $x").as_deref(), Some(r"pvget 'a'\''b $x'"));
     }
 
     #[test]
