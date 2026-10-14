@@ -7,6 +7,7 @@ use bob::Macros;
 use eframe::egui::{self, Color32, Id, Vec2};
 use pv::PvManager;
 
+use crate::chrome::{self, Chrome, UiScale};
 use crate::pvmenu;
 use crate::screen::{Node, Screen};
 use crate::style::{self, View};
@@ -34,6 +35,7 @@ pub struct BobApp {
     keypad_mode: bool,
     keypad: Option<Keypad>,
     details: Option<pvmenu::Details>,
+    chrome: Chrome,
 }
 
 struct Keypad {
@@ -42,9 +44,16 @@ struct Keypad {
 }
 
 impl BobApp {
-    pub fn new(ctx: &egui::Context, start: Option<Location>, zoom: Option<f32>) -> Self {
+    pub fn new(
+        ctx: &egui::Context,
+        start: Option<Location>,
+        zoom: Option<f32>,
+        ui_scale: UiScale,
+    ) -> Self {
         style::install_fonts(ctx);
         ctx.set_theme(egui::Theme::Light);
+        // The controls' zoom is ours (see `chrome`), not ctrl+plus/minus.
+        ctx.options_mut(|o| o.zoom_with_keyboard = false);
 
         let pvs = PvManager::new();
         // Coalesce PV updates into at most ~10 repaints a second.
@@ -67,6 +76,7 @@ impl BobApp {
             keypad_mode: false,
             keypad: None,
             details: None,
+            chrome: Chrome::new(ui_scale),
             open_path: start
                 .as_ref()
                 .map(|l| l.path.display().to_string())
@@ -98,6 +108,7 @@ impl BobApp {
         }
         self.open_path = loc.path.display().to_string();
         self.current = Some(loc);
+        self.chrome.display_changed();
     }
 
     /// Navigate to a display, recording where we came from.
@@ -129,14 +140,17 @@ impl BobApp {
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         // One row whatever the width, so a window sized to the display shows it
-        // near 100%; the display name is elided when there is no room.
+        // near 100%; the display name is elided when there is no room. A narrow
+        // window (a phone) keeps the navigation and Fit, and moves the rest
+        // into a menu.
+        let compact = ui.available_width() < chrome::FULL_TOOLBAR_WIDTH;
         ui.horizontal(|ui| {
             ui.spacing_mut().button_padding = Vec2::new(10.0, 6.0);
-            if ui
+            let back = ui
                 .add_enabled(!self.back.is_empty(), egui::Button::new("◀"))
-                .on_hover_text("Back")
-                .clicked()
-            {
+                .on_hover_text("Back");
+            self.chrome.button = back.rect.height();
+            if back.clicked() {
                 self.go_back();
             }
             if ui
@@ -154,40 +168,72 @@ impl BobApp {
             {
                 self.open(home);
             }
-            if ui.button("⟳").on_hover_text("Reload").clicked()
-                && let Some(cur) = self.current.clone()
-            {
-                self.show(cur);
-            }
-            ui.separator();
-            if ui.button("−").clicked() {
-                self.fit = false;
-                self.zoom = (self.zoom / 1.25).max(0.2);
-            }
-            if ui.selectable_label(self.fit, "Fit").clicked() {
-                self.fit = !self.fit;
-            }
-            if ui.button("+").clicked() {
-                self.fit = false;
-                self.zoom = (self.zoom * 1.25).min(5.0);
-            }
-            ui.label(format!("{:.0}%", self.zoom * 100.0));
-            ui.separator();
-            if ui
-                .selectable_label(self.keypad_mode, "⌨")
-                .on_hover_text("Edit values with an on-screen keypad")
-                .clicked()
-            {
-                self.keypad_mode = !self.keypad_mode;
-            }
-            if ui.selectable_label(self.show_open, "Open…").clicked() {
-                self.show_open = !self.show_open;
+            if compact {
+                ui.separator();
+                if ui.selectable_label(self.fit, "Fit").clicked() {
+                    self.fit = !self.fit;
+                }
+                ui.label(format!("{:.0}%", self.zoom * 100.0));
+                ui.menu_button("☰", |ui| {
+                    if ui.button("⟳ Reload").clicked() {
+                        self.reload();
+                    }
+                    if ui.button("+ Zoom in").clicked() {
+                        self.zoom_by(1.25);
+                    }
+                    if ui.button("− Zoom out").clicked() {
+                        self.zoom_by(1.0 / 1.25);
+                    }
+                    if ui.selectable_label(self.keypad_mode, "⌨ Keypad").clicked() {
+                        self.keypad_mode = !self.keypad_mode;
+                    }
+                    if ui.selectable_label(self.show_open, "Open…").clicked() {
+                        self.show_open = !self.show_open;
+                    }
+                });
+            } else {
+                if ui.button("⟳").on_hover_text("Reload").clicked() {
+                    self.reload();
+                }
+                ui.separator();
+                if ui.button("−").clicked() {
+                    self.zoom_by(1.0 / 1.25);
+                }
+                if ui.selectable_label(self.fit, "Fit").clicked() {
+                    self.fit = !self.fit;
+                }
+                if ui.button("+").clicked() {
+                    self.zoom_by(1.25);
+                }
+                ui.label(format!("{:.0}%", self.zoom * 100.0));
+                ui.separator();
+                if ui
+                    .selectable_label(self.keypad_mode, "⌨")
+                    .on_hover_text("Edit values with an on-screen keypad")
+                    .clicked()
+                {
+                    self.keypad_mode = !self.keypad_mode;
+                }
+                if ui.selectable_label(self.show_open, "Open…").clicked() {
+                    self.show_open = !self.show_open;
+                }
             }
             if let Some(s) = &self.screen {
                 ui.add(egui::Label::new(egui::RichText::new(&s.display.name).strong()).truncate())
                     .on_hover_text(&s.display.name);
             }
         });
+    }
+
+    fn reload(&mut self) {
+        if let Some(cur) = self.current.clone() {
+            self.show(cur);
+        }
+    }
+
+    fn zoom_by(&mut self, factor: f32) {
+        self.fit = false;
+        self.zoom = (self.zoom * factor).clamp(0.2, 5.0);
     }
 
     fn open_panel(&mut self, ui: &mut egui::Ui) {
@@ -209,7 +255,8 @@ impl BobApp {
                 .unwrap_or_else(|| PathBuf::from("."))
         };
         egui::ScrollArea::vertical()
-            .max_height(200.0)
+            // Leave most of a short (landscape phone) window to the display.
+            .max_height(200f32.min(ui.ctx().content_rect().height() * 0.35))
             .show(ui, |ui| {
                 if let Some(parent) = dir.parent()
                     && ui.button("📁 ..").clicked()
@@ -312,11 +359,25 @@ impl BobApp {
         if !self.keypad_mode && ui.input(|i| i.any_touches()) {
             self.keypad_mode = true;
         }
-        egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
+        self.chrome.begin(ui.ctx());
+        let toolbar = egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
+        self.chrome.toolbar = toolbar.response.rect.height();
+        let mut panels = self.chrome.toolbar;
         if self.show_open {
-            egui::Panel::top("open").show(ui, |ui| self.open_panel(ui));
+            panels += egui::Panel::top("open")
+                .show(ui, |ui| self.open_panel(ui))
+                .response
+                .rect
+                .height();
         }
-        egui::Panel::bottom("status").show(ui, |ui| self.status(ui));
+        panels += egui::Panel::bottom("status")
+            .show(ui, |ui| self.status(ui))
+            .response
+            .rect
+            .height();
+        self.chrome.panels = panels;
+        // The display's zoom is relative to the desktop's scale, not the controls'.
+        let ui_zoom = ui.ctx().zoom_factor();
 
         let mut requests = Vec::new();
         egui::CentralPanel::default()
@@ -329,7 +390,7 @@ impl BobApp {
                 if self.fit && screen.width > 0.0 {
                     let fit = (avail.x / screen.width as f32)
                         .min(avail.y / screen.height.max(1.0) as f32);
-                    self.zoom = fit.clamp(0.2, 5.0);
+                    self.zoom = (fit * ui_zoom).clamp(0.2, 5.0);
                 }
                 // Pinch to zoom on a touch screen (or ctrl+scroll).
                 let pinch = ui.input(|i| i.zoom_delta());
@@ -337,7 +398,8 @@ impl BobApp {
                     self.fit = false;
                     self.zoom = (self.zoom * pinch).clamp(0.2, 5.0);
                 }
-                let size = Vec2::new(screen.width as f32, screen.height as f32) * self.zoom;
+                let zoom = self.zoom / ui_zoom;
+                let size = Vec2::new(screen.width as f32, screen.height as f32) * zoom;
                 egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
                     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
                     ui.painter()
@@ -345,7 +407,7 @@ impl BobApp {
                     let mut cx = Cx {
                         view: View {
                             origin: rect.min,
-                            zoom: self.zoom,
+                            zoom,
                         },
                         clip: ui.clip_rect().intersect(rect),
                         pvs: &self.pvs,
@@ -356,6 +418,14 @@ impl BobApp {
                     widgets::draw_screen(ui, screen, &mut cx, Id::new("display"));
                 });
             });
+
+        // A new display sizes the window to show it at 100% (or the fixed zoom).
+        let shown = if self.fit { 1.0 } else { self.zoom } / ui_zoom;
+        let display = self
+            .screen
+            .as_ref()
+            .map(|s| Vec2::new(s.width as f32, s.height as f32) * shown);
+        self.chrome.end(ui.ctx(), display);
 
         for req in requests {
             match req {

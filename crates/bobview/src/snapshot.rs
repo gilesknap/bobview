@@ -9,28 +9,40 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Color32, ColorImage, Pos2, Rect, TextureId, Vec2, epaint};
 
 use crate::app::{BobApp, Location};
+use crate::chrome::{self, UiScale};
+
+/// The monitor an automatically sized snapshot window sits on, in points
+/// at the desktop scale.
+const MONITOR: Vec2 = Vec2::new(1920.0, 1080.0);
 
 /// What to render and how.
 pub struct Options {
-    pub size: [u32; 2],
+    /// Size in pixels, or `None` to start at the default window size and
+    /// follow the app's requests to resize the window.
+    pub size: Option<[u32; 2]>,
+    /// The desktop scale (pixels per point) to simulate.
+    pub scale_factor: f32,
+    pub ui_scale: UiScale,
     pub zoom: Option<f32>,
     /// Time for PVs to connect before anything else happens.
     pub wait: Duration,
-    /// Points to click and the button to use, in order, once `wait` has passed.
+    /// Pixels to click and the button to use, in order, once `wait` has passed.
     pub clicks: Vec<(Pos2, egui::PointerButton)>,
     pub keypad: bool,
 }
 
 pub fn run(start: Location, opts: &Options, out: &Path) -> Result<(), String> {
     let ctx = egui::Context::default();
-    let mut app = BobApp::new(&ctx, Some(start), opts.zoom);
+    let mut app = BobApp::new(&ctx, Some(start), opts.zoom, opts.ui_scale);
     app.set_keypad(opts.keypad);
     let mut textures: HashMap<TextureId, ColorImage> = HashMap::new();
     let begin = Instant::now();
-    let screen = Rect::from_min_size(
-        Pos2::ZERO,
-        Vec2::new(opts.size[0] as f32, opts.size[1] as f32),
-    );
+    let native = opts.scale_factor;
+    let mut px = match opts.size {
+        Some([w, h]) => Vec2::new(w as f32, h as f32),
+        None => chrome::DEFAULT_WINDOW * native,
+    };
+    let monitor = opts.size.is_none().then_some(MONITOR * native);
 
     // Each click is a press frame then a release frame.
     let mut pending: std::collections::VecDeque<Vec<egui::Event>> = opts
@@ -64,13 +76,29 @@ pub fn run(start: Location, opts: &Options, out: &Path) -> Result<(), String> {
         } else {
             Vec::new()
         };
-        let input = egui::RawInput {
+        // Everything egui sees is in points: pixels / (scale factor * zoom).
+        let ppp = native * ctx.zoom_factor();
+        let screen = Rect::from_min_size(Pos2::ZERO, px / ppp);
+        let events = events.into_iter().map(|e| to_points(e, ppp)).collect();
+        let mut input = egui::RawInput {
             screen_rect: Some(screen),
             time: Some(begin.elapsed().as_secs_f64()),
             events,
             ..Default::default()
         };
+        let info = input.viewports.entry(egui::ViewportId::ROOT).or_default();
+        info.native_pixels_per_point = Some(native);
+        info.inner_rect = Some(screen);
+        info.monitor_size = monitor.map(|m| m / ppp);
         let mut output = ctx.run_ui(input, |ui| app.draw(ui));
+        if let (Some(m), Some(vp)) = (monitor, output.viewport_output.get(&egui::ViewportId::ROOT))
+        {
+            for cmd in &vp.commands {
+                if let egui::ViewportCommand::InnerSize(size) = cmd {
+                    px = (*size * output.pixels_per_point).round().min(m);
+                }
+            }
+        }
         for (id, deltas) in &output.textures_delta.set {
             for delta in deltas {
                 apply_texture(&mut textures, *id, delta);
@@ -93,14 +121,35 @@ pub fn run(start: Location, opts: &Options, out: &Path) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(if started { 50 } else { 100 }));
     };
 
-    let prims = ctx.tessellate(output.shapes, output.pixels_per_point);
-    let mut canvas = Canvas::new(opts.size[0] as usize, opts.size[1] as usize);
+    let ppp = output.pixels_per_point;
+    let prims = ctx.tessellate(output.shapes, ppp);
+    let mut canvas = Canvas::new(px.x as usize, px.y as usize);
     for prim in prims {
         if let epaint::Primitive::Mesh(mesh) = &prim.primitive {
-            canvas.draw_mesh(mesh, prim.clip_rect, textures.get(&mesh.texture_id));
+            canvas.draw_mesh(mesh, prim.clip_rect, ppp, textures.get(&mesh.texture_id));
         }
     }
     canvas.save(out)
+}
+
+/// Convert an event's pixel position into points.
+fn to_points(event: egui::Event, ppp: f32) -> egui::Event {
+    let p = |pos: Pos2| (pos.to_vec2() / ppp).to_pos2();
+    match event {
+        egui::Event::PointerMoved(pos) => egui::Event::PointerMoved(p(pos)),
+        egui::Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers,
+        } => egui::Event::PointerButton {
+            pos: p(pos),
+            button,
+            pressed,
+            modifiers,
+        },
+        other => other,
+    }
 }
 
 fn apply_texture(
@@ -145,7 +194,9 @@ impl Canvas {
         }
     }
 
-    fn draw_mesh(&mut self, mesh: &epaint::Mesh, clip: Rect, tex: Option<&ColorImage>) {
+    /// Draw a mesh in points at `ppp` pixels per point.
+    fn draw_mesh(&mut self, mesh: &epaint::Mesh, clip: Rect, ppp: f32, tex: Option<&ColorImage>) {
+        let clip = Rect::from_min_max(clip.min * ppp, clip.max * ppp);
         let clip = clip.intersect(Rect::from_min_size(
             Pos2::ZERO,
             Vec2::new(self.w as f32, self.h as f32),
@@ -154,8 +205,12 @@ impl Canvas {
             return;
         }
         for tri in mesh.indices.as_chunks::<3>().0 {
-            let v = tri.map(|i| &mesh.vertices[i as usize]);
-            self.triangle(v, clip, tex);
+            let v = tri.map(|i| {
+                let mut v = mesh.vertices[i as usize];
+                v.pos = (v.pos.to_vec2() * ppp).to_pos2();
+                v
+            });
+            self.triangle([&v[0], &v[1], &v[2]], clip, tex);
         }
     }
 
@@ -254,7 +309,9 @@ mod tests {
                 macros: bob::Macros::default(),
             };
             let opts = Options {
-                size: [320, 240],
+                size: Some([320, 240]),
+                scale_factor: 1.0,
+                ui_scale: UiScale::Auto,
                 zoom: Some(0.5),
                 wait: Duration::ZERO,
                 clicks: Vec::new(),
@@ -266,6 +323,52 @@ mod tests {
                 "{} rendered nothing",
                 f.display()
             );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn png_size(path: &Path) -> (u32, u32) {
+        let decoder =
+            png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path).unwrap()));
+        let info = decoder.read_info().unwrap();
+        (info.info().width, info.info().height)
+    }
+
+    #[test]
+    fn window_follows_a_small_display() {
+        let dir = std::env::temp_dir().join(format!("bobview-auto-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bob = dir.join("small.bob");
+        std::fs::write(
+            &bob,
+            r#"<display version="2.0.0"><width>400</width><height>100</height></display>"#,
+        )
+        .unwrap();
+        for (scale_factor, size) in [(1.0, None), (2.0, None), (2.0, Some([640, 480]))] {
+            let out = dir.join(format!("small-{scale_factor}.png"));
+            let opts = Options {
+                size,
+                scale_factor,
+                ui_scale: UiScale::Auto,
+                zoom: None,
+                wait: Duration::ZERO,
+                clicks: Vec::new(),
+                keypad: false,
+            };
+            let start = Location {
+                path: bob.clone(),
+                macros: bob::Macros::default(),
+            };
+            run(start, &opts, &out).unwrap();
+            let (w, h) = png_size(&out);
+            if let Some([sw, sh]) = size {
+                assert_eq!((w, h), (sw, sh));
+            } else {
+                // The display at 100%, a pixel spare, and the controls below 80 points.
+                let s = scale_factor;
+                assert_eq!(w as f32, (401.0 * s).round(), "{s}");
+                assert!(h as f32 > 140.0 * s && (h as f32) < 180.0 * s, "{s}: {h}");
+            }
         }
         std::fs::remove_dir_all(&dir).ok();
     }
