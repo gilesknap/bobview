@@ -198,8 +198,34 @@ fn format_double(v: f64, precision: Option<i32>) -> String {
     }
 }
 
-fn join(items: impl Iterator<Item = String>) -> String {
-    items.collect::<Vec<_>>().join(" ")
+/// Phoebus `max_array_formatting`: arrays show at most this many elements.
+const MAX_ARRAY_FORMATTING: usize = 256;
+
+/// An array as Phoebus formats it, `[1, 2, 3]`, ending `, ...]` when it has
+/// more than [`MAX_ARRAY_FORMATTING`] elements.
+fn join(mut items: impl ExactSizeIterator<Item = String>) -> String {
+    let more = items.len() > MAX_ARRAY_FORMATTING;
+    let mut text = String::from("[");
+    for (i, item) in items.by_ref().take(MAX_ARRAY_FORMATTING).enumerate() {
+        if i > 0 {
+            text.push_str(", ");
+        }
+        text.push_str(&item);
+    }
+    if more {
+        text.push_str(", ...");
+    }
+    text.push(']');
+    text
+}
+
+/// The elements of an array typed as text, in the `[1, 2, 3]` form that
+/// arrays are shown in, or just separated by spaces or commas.
+pub fn split_array(text: &str) -> Vec<&str> {
+    let t = text.trim();
+    let t = t.strip_prefix('[').unwrap_or(t);
+    let t = t.strip_suffix(']').unwrap_or(t);
+    t.split([' ', ',']).filter(|x| !x.is_empty()).collect()
 }
 
 #[cfg(test)]
@@ -226,5 +252,40 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(s.format(None, true), "Acquire");
+    }
+
+    #[test]
+    fn formats_arrays_like_phoebus() {
+        let s = PvState {
+            value: Value::LongArray(Arc::from(vec![1024, 1024])),
+            ..Default::default()
+        };
+        assert_eq!(s.format(None, true), "[1024, 1024]");
+        let s = PvState {
+            value: Value::DoubleArray(Arc::from(vec![1.5, 2.0])),
+            precision: Some(2),
+            units: "mm".into(),
+            ..Default::default()
+        };
+        assert_eq!(s.format(None, true), "[1.50, 2.00] mm");
+        let s = PvState {
+            value: Value::LongArray((0..300).collect()),
+            ..Default::default()
+        };
+        let text = s.format(None, false);
+        assert!(text.starts_with("[0, 1, 2,"));
+        assert!(text.ends_with("254, 255, ...]"));
+        let s = PvState {
+            value: Value::StrArray(Arc::from(vec!["a".to_string(), "b".to_string()])),
+            ..Default::default()
+        };
+        assert_eq!(s.format(None, true), "[a, b]");
+    }
+
+    #[test]
+    fn splits_typed_arrays() {
+        assert_eq!(split_array("[1024, 1024]"), ["1024", "1024"]);
+        assert_eq!(split_array(" 1 2,3 "), ["1", "2", "3"]);
+        assert!(split_array("[]").is_empty());
     }
 }
