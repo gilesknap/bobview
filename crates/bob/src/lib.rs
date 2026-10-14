@@ -112,12 +112,17 @@ impl Display {
 }
 
 /// Separate `<widget>` children from the property elements of `el`.
+///
+/// A property given more than once keeps its last value, as Phoebus reads it
+/// (pvi writes a placeholder `<items>` list followed by the real one).
 fn split_widgets(mut el: Element) -> (Element, Vec<Widget>) {
     let mut widgets = Vec::new();
-    let mut props = Vec::new();
+    let mut props: Vec<Element> = Vec::new();
     for child in el.children.drain(..) {
         if child.name == "widget" {
             widgets.push(Widget::from_element(child));
+        } else if let Some(prev) = props.iter_mut().find(|p| p.name == child.name) {
+            *prev = child;
         } else {
             props.push(child);
         }
@@ -286,5 +291,20 @@ mod tests {
     #[test]
     fn rejects_other_roots() {
         assert!(matches!(Display::parse("<x/>"), Err(Error::NotADisplay(_))));
+    }
+
+    #[test]
+    fn repeated_property_keeps_the_last() {
+        let d = Display::parse(
+            r#"<display version="2.0.0"><widget type="combo">
+              <items><item>item 0</item><item>Item 1</item><item>Item 2</item></items>
+              <x>1</x>
+              <items><item>Disable</item><item>Enable</item></items>
+            </widget></display>"#,
+        )
+        .unwrap();
+        let w = &d.widgets[0];
+        assert_eq!(w.items(), vec!["Disable", "Enable"]);
+        assert_eq!(w.f64("x"), Some(1.0));
     }
 }
