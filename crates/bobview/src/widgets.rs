@@ -52,6 +52,31 @@ impl Cx<'_> {
     }
 }
 
+/// The smallest target, in points, a finger can hit reliably.
+pub const TOUCH_TARGET: f32 = 44.0;
+
+/// egui's own hit radius outside touch mode.
+const MOUSE_RADIUS: f32 = 5.0;
+
+/// How far outside a control a touch still hits it: enough to make a 20
+/// point control (a pvi slide button or checkbox at 100%) a full
+/// [`TOUCH_TARGET`].
+const TOUCH_RADIUS: f32 = (TOUCH_TARGET - 20.0) / 2.0;
+
+/// Grow the hit area of every control in touch (keypad) mode, without
+/// changing how anything is drawn. egui hit-tests in two steps: a touch
+/// directly on a control always goes to that control (the topmost one), and
+/// only a touch on no control at all goes to the nearest control within
+/// `interact_radius`. So a small control gets a finger-sized target in the
+/// space around it, but never takes a touch from a neighbour that was hit
+/// directly, and the gap between two controls is shared by distance.
+pub fn touch_targets(ctx: &egui::Context, touch: bool) {
+    let radius = if touch { TOUCH_RADIUS } else { MOUSE_RADIUS };
+    if ctx.global_style().interaction.interact_radius != radius {
+        ctx.all_styles_mut(|s| s.interaction.interact_radius = radius);
+    }
+}
+
 pub fn draw_screen(ui: &mut Ui, screen: &mut Screen, cx: &mut Cx, id: Id) {
     draw_nodes(ui, &mut screen.nodes, cx, id);
 }
@@ -239,11 +264,14 @@ fn tooltip(node: &Node, s: Option<&PvState>) -> String {
     };
     match node.w.text("tooltip") {
         Some(t) => tooltip_text(t, &node.pv_name, &value, &|t| node.expand(t)),
-        None => match s {
-            Some(s) if s.connected => format!("{}\n{value} {:?}", node.pv_name, s.severity),
-            Some(_) => format!("{}\n{value}", node.pv_name),
-            None => node.pv_name.clone(),
-        },
+        None => {
+            let name = plain_pv_name(&node.pv_name);
+            match s {
+                Some(s) if s.connected => format!("{name}\n{value} {:?}", s.severity),
+                Some(_) => format!("{name}\n{value}"),
+                None => name,
+            }
+        }
     }
 }
 
@@ -260,6 +288,12 @@ fn tooltip_text(
 }
 
 // --- helpers -----------------------------------------------------------------
+
+/// A PV name as a user reads it, without a local PV's type and initial value
+/// (`loc://arr`, not `loc://arr<VDoubleArray>(1, 3, 2)`).
+pub(crate) fn plain_pv_name(name: &str) -> String {
+    crate::app::plain_name(&pv::PvName::parse(name))
+}
 
 pub(crate) fn fg(w: &Widget) -> Color32 {
     w.color("foreground_color")
@@ -343,12 +377,21 @@ fn text_job(
     job.wrap = egui::text::TextWrapping {
         // the full width: the widget clip hides the 1 px the text may be
         // inset by, and any less elides text that fits at fractional zooms
-        max_width: size.x.max(1.0),
         max_rows: rows,
         break_anywhere: rows == 1,
-        overflow_character: Some('…'),
+        ..elide_wrap(size.x)
     };
     job
+}
+
+/// One row `width` wide, with what does not fit elided with `…`.
+fn elide_wrap(width: f32) -> egui::text::TextWrapping {
+    egui::text::TextWrapping {
+        max_width: width.max(1.0),
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
+    }
 }
 
 /// How many rows of text to lay out in a box `height` high: as many whole
@@ -870,14 +913,35 @@ fn text_entry(
         return resp;
     }
     let mut buf = node.edit.clone().unwrap_or(shown);
+    // Text that does not fit is elided with `…` like a text update's, except
+    // while it is being edited, when every character must be there for the
+    // cursor. (A click that focuses it lands in the elided layout, which
+    // matches the full text up to the `…`.)
+    let editing = ui.memory(|m| m.has_focus(id));
+    let fnt = font(&w, cx.view.zoom);
+    let color = fg(&w);
+    let margin = Vec2::new(2.0, 0.0);
+    let text_width = rect.width() - 2.0 * margin.x;
+    let mut elided = |ui: &Ui, text: &dyn egui::TextBuffer, _wrap_width: f32| {
+        let job = entry_job(
+            text.as_str(),
+            fnt.clone(),
+            color,
+            align.x(),
+            text_width,
+            editing,
+        );
+        ui.fonts_mut(|f| f.layout_job(job))
+    };
     let edit = egui::TextEdit::singleline(&mut buf)
+        .layouter(&mut elided)
         .id(id)
         .font(font(&w, cx.view.zoom))
         .text_color(fg(&w))
         .background_color(bg(&w, "Write_Background"))
         .horizontal_align(align.x())
         .vertical_align(egui::Align::Center)
-        .margin(Vec2::new(2.0, 0.0))
+        .margin(margin)
         .interactive(enabled)
         .min_size(rect.size());
     let resp = put_clipped(ui, rect, cx.clip, edit);
@@ -890,6 +954,25 @@ fn text_entry(
         node.edit = None;
     }
     resp
+}
+
+/// The layout of a text entry's text: one row, as egui's own single-line
+/// layout, but elided with `…` to `width` unless it is being edited.
+fn entry_job(
+    text: &str,
+    font: FontId,
+    c: Color32,
+    halign: egui::Align,
+    width: f32,
+    editing: bool,
+) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::simple_singleline(text.to_string(), font, c);
+    job.halign = halign;
+    job.keep_trailing_whitespace = true;
+    if !editing {
+        job.wrap = elide_wrap(width);
+    }
+    job
 }
 
 fn put_clipped(ui: &mut Ui, rect: Rect, clip: Rect, widget: impl egui::Widget) -> Response {
@@ -1221,14 +1304,36 @@ fn combo(
     if !can_write(&w, s) {
         return resp;
     }
-    egui::Popup::menu(&resp).show(|ui| {
+    // Like Phoebus, the list is at least as wide as the combo and in its
+    // font (but never smaller than the rest of the UI, so it stays readable
+    // when the display is zoomed out); a finger-sized row in touch mode.
+    let item_font = combo_item_font(
+        font(&w, z),
+        &ui.style().text_styles[&egui::TextStyle::Button],
+    );
+    let row_h = if cx.keypad { TOUCH_TARGET } else { 0.0 };
+    egui::Popup::menu(&resp).width(rect.width()).show(|ui| {
+        ui.set_min_width(rect.width() - ui.spacing().menu_margin.sum().x);
         for item in &items {
-            if ui.selectable_label(*item == text, item).clicked() {
+            let label = egui::RichText::new(item).font(item_font.clone());
+            let button = egui::Button::selectable(*item == text, label)
+                .min_size(Vec2::new(ui.available_width(), row_h));
+            if ui.add(button).clicked() {
                 write(node, item.clone());
             }
         }
     });
     resp
+}
+
+/// The font for a combo's dropdown rows: the widget's, unless that is
+/// smaller than the UI's own button font.
+fn combo_item_font(widget: FontId, ui: &FontId) -> FontId {
+    if widget.size < ui.size {
+        FontId::new(ui.size, widget.family)
+    } else {
+        widget
+    }
 }
 
 fn checkbox(
@@ -1348,27 +1453,26 @@ fn slide_button(
 
 /// Track rect and optional label rect of a slide button. The track is a
 /// pill 1.8 times as wide as it is tall, at most 16px tall at zoom 1,
-/// fitted into the widget; with a label, the label is left and the track
-/// right, otherwise the track is centred.
+/// fitted into the widget at its right edge, with any label to its left.
+///
+/// The track stays at the right even without a label: Phoebus draws the
+/// widget with ControlsFX's ToggleSwitch, whose skin lays the label out from
+/// the left and the thumb area at `contentX + contentWidth - thumbAreaWidth`
+/// whatever the label holds, so an empty label leaves blank space on the
+/// left rather than centring the switch.
 fn slide_layout(rect: Rect, z: f32, has_label: bool) -> (Rect, Option<Rect>) {
     let h = (16.0 * z)
         .min(rect.height() - 2.0)
         .min((rect.width() - 2.0) / 1.8)
         .max(2.0);
     let tw = h * 1.8;
-    if has_label {
-        let track = Rect::from_min_size(
-            Pos2::new(rect.right() - 1.0 - tw, rect.center().y - h / 2.0),
-            Vec2::new(tw, h),
-        );
-        let label = Rect::from_min_max(rect.min, Pos2::new(track.left() - 4.0 * z, rect.bottom()));
-        (track, Some(label))
-    } else {
-        (
-            Rect::from_center_size(rect.center(), Vec2::new(tw, h)),
-            None,
-        )
-    }
+    let track = Rect::from_min_size(
+        Pos2::new(rect.right() - 1.0 - tw, rect.center().y - h / 2.0),
+        Vec2::new(tw, h),
+    );
+    let label = has_label
+        .then(|| Rect::from_min_max(rect.min, Pos2::new(track.left() - 4.0 * z, rect.bottom())));
+    (track, label)
 }
 
 fn slider(
@@ -1697,6 +1801,63 @@ mod tests {
 
     const PV: &str = "<BL01T-DI-CAM-01:DET:PortName_RBV>";
 
+    /// Lay out a text entry's text `w` wide, as `text_entry` does.
+    fn entry(text: &str, w: f32, editing: bool) -> Arc<egui::Galley> {
+        let ctx = egui::Context::default();
+        style::install_fonts(&ctx);
+        let mut galley = None;
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let font = FontId::new(14.0, egui::FontFamily::Name(style::BOLD.into()));
+            let job = entry_job(text, font, Color32::BLACK, egui::Align::Min, w, editing);
+            galley = Some(ui.painter().layout_job(job));
+        });
+        out.textures_delta.clear();
+        galley.unwrap()
+    }
+
+    #[test]
+    fn text_entry_elides_like_a_text_update_except_while_editing() {
+        let shown = entry(PV, 100.0, false);
+        assert_eq!(shown.rows.len(), 1);
+        assert!(shown.elided);
+        assert!(shown.rows[0].text().starts_with("<BL01T"));
+        assert!(shown.rows[0].text().ends_with('…'));
+        assert!(shown.size().x <= 100.0);
+        // Editing keeps every character for the cursor.
+        let editing = entry(PV, 100.0, true);
+        assert!(!editing.elided);
+        assert_eq!(editing.rows[0].text(), PV);
+        // Text that fits is untouched.
+        assert!(!entry("1.5", 100.0, false).elided);
+    }
+
+    #[test]
+    fn combo_items_never_shrink_below_the_ui_font() {
+        let ui = FontId::proportional(14.0);
+        assert_eq!(combo_item_font(FontId::proportional(8.0), &ui).size, 14.0);
+        assert_eq!(combo_item_font(FontId::proportional(28.0), &ui).size, 28.0);
+        let mono = combo_item_font(FontId::monospace(8.0), &ui);
+        assert_eq!(mono.family, egui::FontFamily::Monospace);
+    }
+
+    #[test]
+    fn touch_mode_widens_the_hit_radius_and_back() {
+        let ctx = egui::Context::default();
+        touch_targets(&ctx, true);
+        let radius = ctx.global_style().interaction.interact_radius;
+        assert_eq!(radius, TOUCH_RADIUS);
+        // A 20 point control is a full touch target.
+        assert_eq!(20.0 + 2.0 * radius, TOUCH_TARGET);
+        touch_targets(&ctx, false);
+        assert_eq!(ctx.global_style().interaction.interact_radius, MOUSE_RADIUS);
+    }
+
+    #[test]
+    fn pv_names_are_shown_without_local_initialisers() {
+        assert_eq!(plain_pv_name("loc://arr<VDoubleArray>(1,3,2)"), "loc://arr");
+        assert_eq!(plain_pv_name("BL01T:X"), "BL01T:X");
+    }
+
     #[test]
     fn overflow_in_one_row_keeps_the_start() {
         // A 20px-high textupdate shows one whole row, elided, never a middle fragment.
@@ -1871,7 +2032,16 @@ mod tests {
         assert!(label.is_none());
         assert!(rect.contains_rect(track));
         assert!(track.width() > track.height());
-        assert_eq!(track.center(), rect.center());
+        assert_eq!(track.center().y, rect.center().y);
+    }
+
+    #[test]
+    fn slide_track_without_label_is_at_the_right() {
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(80.0, 20.0));
+        let (track, label) = slide_layout(rect, 1.0, false);
+        assert!(label.is_none());
+        assert_eq!(track.right(), rect.right() - 1.0);
+        assert!(track.left() > rect.center().x);
     }
 
     #[test]

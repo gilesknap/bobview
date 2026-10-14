@@ -405,6 +405,7 @@ impl BobApp {
         if !self.keypad_mode && ui.input(|i| i.any_touches()) {
             self.keypad_mode = true;
         }
+        widgets::touch_targets(ui.ctx(), self.keypad_mode);
         self.chrome.begin(ui.ctx());
         let toolbar = egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
         self.chrome.toolbar = toolbar.response.rect.height();
@@ -583,7 +584,7 @@ impl BobApp {
 
 /// A PV's name as a user would type it: no `ca://` prefix, and no type or
 /// initial value for a local PV (`loc://x`, not `loc://x<VDouble>(1.5)`).
-fn plain_name(name: &pv::PvName) -> String {
+pub(crate) fn plain_name(name: &pv::PvName) -> String {
     match name.scheme {
         pv::Scheme::Ca => name.base().to_string(),
         _ => {
