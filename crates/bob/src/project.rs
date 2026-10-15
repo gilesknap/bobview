@@ -73,26 +73,36 @@ fn locate_within(path: &Path, hops: usize) -> PathBuf {
 /// The virtual path of `real` in the project at `project_dir`: the first
 /// linked folder holding it, so its `..` names resolve through the project.
 pub fn virtual_path(project_dir: &Path, real: &Path) -> Option<PathBuf> {
-    // The folder is found on disk, but the file keeps the name it was given
-    // (a symlinked screen is opened by its own name, as CS-Studio does).
-    let real = match (real.parent(), real.file_name()) {
-        (Some(dir), Some(name)) if !dir.as_os_str().is_empty() => std::fs::canonicalize(dir)
-            .map(|d| d.join(name))
-            .unwrap_or_else(|_| real.to_path_buf()),
-        _ => std::fs::canonicalize(real).unwrap_or_else(|_| real.to_path_buf()),
+    let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let targets: Vec<(String, PathBuf)> = links(project_dir)?
+        .into_iter()
+        .map(|(name, target)| (name, canonical(&target)))
+        .collect();
+    let find = |real: &Path| {
+        targets.iter().find_map(|(name, target)| {
+            let rest = real.strip_prefix(target).ok()?;
+            Some(project_dir.join(name).join(rest))
+        })
     };
-    links(project_dir)?.iter().find_map(|(name, target)| {
-        let target = std::fs::canonicalize(target).unwrap_or_else(|_| target.clone());
-        let rest = real.strip_prefix(&target).ok()?;
-        Some(project_dir.join(name).join(rest))
-    })
+    // A symlinked screen in a linked folder keeps its own name, as in
+    // CS-Studio; one elsewhere (`~/x.opi -> …/opi/x.opi`) goes by where it
+    // points.
+    let dir = match real.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    real.file_name()
+        .and_then(|name| find(&canonical(dir).join(name)))
+        .or_else(|| find(&canonical(real)))
 }
 
-/// The project that `-p DIR` names: `dir` when it holds a `.project`, else
-/// the (first) project of the launcher in `dir` (or `dir` itself, when that
-/// is a `runcss.sh`).
+/// The project that `-p DIR` names: `dir` when its `.project` links
+/// folders, else the (first) project of the launcher in `dir` (or `dir`
+/// itself, when that is a `runcss.sh`), else `dir` with a `.project` that
+/// links nothing.
 pub fn project_dir(dir: &Path) -> Option<PathBuf> {
-    if links(dir).is_some() {
+    let own = links(dir);
+    if own.as_ref().is_some_and(|l| !l.is_empty()) {
         return Some(dir.to_path_buf());
     }
     let script = if dir.file_name().is_some_and(|n| n == LAUNCHER) {
@@ -100,37 +110,77 @@ pub fn project_dir(dir: &Path) -> Option<PathBuf> {
     } else {
         dir.join(LAUNCHER)
     };
-    let (project, _) = launcher_projects(&script).into_iter().next()?;
-    Some(script.join(project))
+    match launcher_projects(&script).into_iter().next() {
+        Some((project, _)) => Some(script.join(project)),
+        None => own.map(|_| dir.to_path_buf()),
+    }
 }
 
-/// The virtual path of the real file `real` through the projects of the
-/// launcher in its folder (or one above), as CS-Studio would open it from
-/// there: `…/opi/opi/x.opi` is `…/opi/opi/runcss.sh/vacuum_4-100/vacuum/x.opi`.
-/// `None` for a path that is not a real file, one in an Eclipse project
-/// with a `.project` (which wins), and one in no launcher's linked folders.
+/// How far above a screen its launcher may be: in the screen's own folder
+/// (`opi/opi/x.opi`) or up to two above (`opi/opi/common/x.opi`).
+const LAUNCHER_DEPTH: usize = 3;
+
+/// The virtual path of the real BOY screen `real` through the projects of
+/// the launcher in its folder or up to two above, as CS-Studio would open it
+/// from there: `…/opi/opi/x.opi` is
+/// `…/opi/opi/runcss.sh/vacuum_4-100/vacuum/x.opi`. `None` for a path that
+/// is not a real file, one in no launcher's linked folders, and one in an
+/// Eclipse project nearer than the launcher (a `.project` below it, or one
+/// beside it that links the file; DLS modules often have an empty one).
 pub fn launcher_path(real: &Path) -> Option<PathBuf> {
     if !real.is_file() {
         return None;
     }
     let abs = normalize(&std::path::absolute(real).ok()?);
-    let dirs = || abs.ancestors().skip(1);
-    let script = dirs().find_map(|d| Some(d.join(LAUNCHER)).filter(|s| s.is_file()))?;
-    if dirs().any(|d| d.join(".project").is_file()) {
-        return None;
+    for dir in abs.ancestors().skip(1).take(LAUNCHER_DEPTH) {
+        let project = dir.join(".project").is_file();
+        let script = dir.join(LAUNCHER);
+        if script.is_file() {
+            if project && virtual_path(dir, real).is_some() {
+                return None;
+            }
+            return launcher_projects(&script)
+                .iter()
+                .find_map(|(project, _)| virtual_path(&script.join(project), real));
+        }
+        if project {
+            return None;
+        }
     }
-    launcher_projects(&script)
-        .iter()
-        .find_map(|(project, _)| virtual_path(&script.join(project), real))
+    None
+}
+
+/// Whether `dir` is a project: it holds a `.project` (which is not read),
+/// or is one of a launcher's.
+pub fn is_project(dir: &Path) -> bool {
+    match launcher_of(dir) {
+        Some(_) => links(dir).is_some(),
+        None => dir.join(".project").is_file(),
+    }
+}
+
+/// Whether `path` goes through a launcher's project.
+pub fn through_launcher(path: &Path) -> bool {
+    path.ancestors().any(|d| launcher_of(d).is_some())
+}
+
+/// The launcher whose project `dir` would be (`…/runcss.sh/PROJECT`).
+fn launcher_of(dir: &Path) -> Option<&Path> {
+    dir.parent()
+        .filter(|s| s.file_name() == Some(LAUNCHER.as_ref()))
+}
+
+/// Forget the projects read so far, so that changed `.project` and
+/// `runcss.sh` files are read again.
+pub fn forget() {
+    PROJECTS.lock().unwrap().clear();
+    LAUNCHERS.lock().unwrap().clear();
 }
 
 /// Linked folders of `dir`'s project, by name, when `dir` holds a `.project`
 /// or is a project of a launcher (`…/runcss.sh/PROJECT`).
 pub fn links(dir: &Path) -> Option<Links> {
-    if let Some(script) = dir
-        .parent()
-        .filter(|s| s.file_name() == Some(LAUNCHER.as_ref()))
-    {
+    if let Some(script) = launcher_of(dir) {
         let project = dir.file_name()?;
         return launcher_projects(script)
             .into_iter()
@@ -544,6 +594,123 @@ $CSS_RUN_SCRIPT -o "${launch_opi}" -s -l "$links" "$@"
     }
 
     #[test]
+    fn reads_a_generated_launcher() {
+        // vacuum 4-100's, verbatim.
+        let text = include_str!("testdata/runcss.sh");
+        let dir = Path::new("/nowhere/vacuum/4-100/vacuumApp/opi/opi");
+        let projects = parse_launcher(text, dir);
+        let [(project, links)] = projects.as_slice() else {
+            panic!("{projects:?}")
+        };
+        assert_eq!(project, "vacuum_dev");
+        assert_eq!(links.len(), 14);
+        assert_eq!(links[0], ("vacuum".to_string(), dir.to_path_buf()));
+        let support = Path::new("/dls_sw/prod/R3.14.12.7/support");
+        assert_eq!(
+            links[2],
+            (
+                "mks937a".to_string(),
+                support.join("mks937a/2-90/mks937aApp/opi/opi")
+            )
+        );
+        assert_eq!(links[13].0, "devIocStats");
+    }
+
+    #[test]
+    fn only_boy_screens_go_through_a_launcher() {
+        let (root, opi, _) = module("runcss-bob", Some("1-2"));
+        let boy = r#"<display typeId="org.csstudio.opibuilder.Display" version="1.0.0"/>"#;
+        std::fs::write(opi.join("x.opi"), boy).unwrap();
+        std::fs::write(opi.join("y.bob"), r#"<display version="2.0.0"/>"#).unwrap();
+        let source = |p: &Path| crate::Display::load(p).unwrap().source;
+        let x = opi.join("runcss.sh/vac_1-2/vac/x.opi");
+        assert_eq!(source(&opi.join("x.opi")), Some(crate::Source::File(x)));
+        let y = opi.join("y.bob");
+        assert_eq!(source(&y), Some(crate::Source::File(y)));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn symlinked_screens_map_by_name_or_by_target() {
+        let (root, opi, _) = module("runcss-links", Some("1-2"));
+        let proj = opi.join("runcss.sh/vac_1-2");
+        // In a linked folder, a link keeps its own name.
+        std::os::unix::fs::symlink("x.opi", opi.join("y.opi")).unwrap();
+        assert_eq!(
+            launcher_path(&opi.join("y.opi")),
+            Some(proj.join("vac/y.opi"))
+        );
+        // Elsewhere, it goes by where it points.
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(opi.join("x.opi"), home.join("z.opi")).unwrap();
+        assert_eq!(
+            virtual_path(&proj, &home.join("z.opi")),
+            Some(proj.join("vac/x.opi"))
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_project_file_beside_a_launcher_wins_only_with_links() {
+        let (root, opi, gauge) = module("runcss-empty", Some("1-2"));
+        let proj = opi.join("runcss.sh/vac_1-2");
+        // An empty one, as DLS modules often have.
+        std::fs::write(opi.join(".project"), "<projectDescription/>").unwrap();
+        assert_eq!(
+            launcher_path(&opi.join("x.opi")),
+            Some(proj.join("vac/x.opi"))
+        );
+        assert_eq!(project_dir(&opi), Some(proj));
+        // One linking the file wins.
+        let linking = format!(
+            "<projectDescription><linkedResources>
+            <link><name>me</name><location>{}</location></link>
+            </linkedResources></projectDescription>",
+            opi.display()
+        );
+        std::fs::write(opi.join(".project"), linking).unwrap();
+        forget();
+        assert_eq!(launcher_path(&opi.join("x.opi")), None);
+        assert_eq!(project_dir(&opi), Some(opi.clone()));
+        // An empty `.project` and no launcher is still a project.
+        std::fs::write(gauge.join(".project"), "<projectDescription/>").unwrap();
+        assert_eq!(project_dir(&gauge), Some(gauge.clone()));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_launcher_is_near_the_screen() {
+        let (root, opi, _) = module("runcss-deep", Some("1-2"));
+        let deep = opi.join("a/b/c");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("d.opi"), "<display/>").unwrap();
+        std::fs::write(opi.join("a/b/e.opi"), "<display/>").unwrap();
+        assert_eq!(launcher_path(&deep.join("d.opi")), None);
+        assert_eq!(
+            launcher_path(&opi.join("a/b/e.opi")),
+            Some(opi.join("runcss.sh/vac_1-2/vac/a/b/e.opi"))
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn forget_reads_launchers_again() {
+        let (root, opi, _) = module("runcss-forget", Some("1-2"));
+        assert!(project_dir(&opi).is_some());
+        let text = std::fs::read_to_string(opi.join(LAUNCHER)).unwrap();
+        std::fs::write(
+            opi.join(LAUNCHER),
+            text.replace("project=vac_", "project=new_"),
+        )
+        .unwrap();
+        // (Not checked before `forget`: other tests forget too.)
+        forget();
+        assert_eq!(project_dir(&opi), Some(opi.join("runcss.sh/new_1-2")));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn a_launcher_without_a_version_is_dev() {
         let (root, opi, _) = module("runcss-dev", None);
         assert_eq!(
@@ -554,10 +721,13 @@ $CSS_RUN_SCRIPT -o "${launch_opi}" -s -l "$links" "$@"
     }
 
     #[test]
-    fn a_project_file_wins_over_a_launcher() {
+    fn a_nearer_project_file_wins_over_a_launcher() {
         let (root, opi, _) = module("runcss-project", Some("1-2"));
+        std::fs::write(opi.join("common/.project"), "<projectDescription/>").unwrap();
+        assert_eq!(launcher_path(&opi.join("common/c.opi")), None);
+        // One further away than the launcher does not.
         std::fs::write(root.join(".project"), "<projectDescription/>").unwrap();
-        assert_eq!(launcher_path(&opi.join("x.opi")), None);
+        assert!(launcher_path(&opi.join("x.opi")).is_some());
         std::fs::remove_dir_all(&root).unwrap();
     }
 

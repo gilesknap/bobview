@@ -72,14 +72,15 @@ impl std::error::Error for Error {}
 
 impl Display {
     /// Read the display file at `path`, which may lie in an Eclipse
-    /// project's linked folder (see [`project`]). A real file beside a DLS
-    /// launcher is taken through the launcher's project (see
+    /// project's linked folder (see [`project`]). A real BOY screen beside a
+    /// DLS launcher is taken through the launcher's project (see
     /// [`project::launcher_path`]), so the files it names do too.
     pub fn load(path: &Path) -> Result<Self, Error> {
         let real = project::locate(path);
         let text = std::fs::read_to_string(&real).map_err(|e| Error::Io(path.into(), e))?;
         let mut display = Self::parse(&text)?;
-        let path = project::launcher_path(path).unwrap_or_else(|| path.to_path_buf());
+        let launched = display.legacy.then(|| project::launcher_path(path));
+        let path = launched.flatten().unwrap_or_else(|| path.to_path_buf());
         display.source = Some(Source::File(path));
         Ok(display)
     }

@@ -214,7 +214,7 @@ fn in_project(dir: &Path) -> bool {
     let real = std::fs::canonicalize(bob::project::locate(&dir)).ok();
     std::iter::once(dir)
         .chain(real)
-        .any(|d| d.ancestors().any(|a| bob::project::links(a).is_some()))
+        .any(|d| d.ancestors().any(bob::project::is_project))
 }
 
 /// The runs of digits in `text`, with a `-N` suffix kept (`02-1`).

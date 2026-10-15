@@ -37,9 +37,9 @@ usage: bobview [options] [display.bob | display.opi | http(s)://host/display.bob
 options:
   -m, --macros P=X,R=Y   macros for the display
   -p, --project DIR      open a display file through the linked folders of the
-                         Eclipse project in DIR (its .project, or the links
-                         of a DLS runcss.sh in DIR), so that links between
-                         the project's modules work
+                         Eclipse project in DIR (its .project, or for a BOY
+                         .opi screen the links of a DLS runcss.sh in DIR), so
+                         that links between the project's modules work
   -z, --zoom FACTOR      fixed zoom instead of fit-to-window
   -f, --fullscreen       start full screen
   -k, --keypad           edit values with an on-screen keypad (automatic on touch)
@@ -70,9 +70,9 @@ been saved (in $XDG_CONFIG_HOME/bobview/layouts, by default
 A display may also be an http:// or https:// URL; files it names are
 fetched relative to it. CS-Studio BOY .opi displays are translated as
 Phoebus does; a path through an Eclipse project's linked folders (such as
-project/module/screen.opi) finds the linked files. A screen beside a DLS
-runcss.sh launcher is opened through the links that script gives CS-Studio,
-with no .project or -p needed.
+project/module/screen.opi) finds the linked files. A BOY .opi screen beside
+a DLS runcss.sh launcher is opened through the links that script gives
+CS-Studio, with no .project or -p needed.
 PVs without a prefix use Channel Access; EPICS_CA_ADDR_LIST and
 EPICS_CA_NAME_SERVERS select the IOCs. Set BOBVIEW_LOG=debug for more output.";
 
@@ -165,6 +165,7 @@ fn main() -> eframe::Result {
         }
     }
     let ui_scale = ui_scale.unwrap_or_else(chrome::UiScale::from_env);
+    let is_opi = |p: &std::path::Path| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("opi"));
     if let (Some(dir), Some(Source::File(path))) = (&project, &file) {
         let Some(project) = bob::project::project_dir(dir) else {
             eprintln!(
@@ -174,6 +175,16 @@ fn main() -> eframe::Result {
             );
             std::process::exit(2);
         };
+        // A launcher's links are CS-Studio's, for BOY screens only.
+        if bob::project::through_launcher(&project) && !is_opi(path) {
+            eprintln!(
+                "{} is not a BOY .opi screen, which is all the {} in {} links",
+                path.display(),
+                bob::project::LAUNCHER,
+                dir.display()
+            );
+            std::process::exit(2);
+        }
         match bob::project::virtual_path(&project, path) {
             Some(p) => file = Some(Source::File(p)),
             None => {
@@ -186,9 +197,10 @@ fn main() -> eframe::Result {
             }
         }
     } else if let Some(Source::File(path)) = &file
+        && is_opi(path)
         && let Some(p) = bob::project::launcher_path(path)
     {
-        // A DLS screen beside its runcss.sh: through the project that
+        // A DLS BOY screen beside its runcss.sh: through the project that
         // launcher would give CS-Studio.
         log::info!("{}: opening as {}", path.display(), p.display());
         file = Some(Source::File(p));
@@ -196,7 +208,7 @@ fn main() -> eframe::Result {
     // An .opi opened directly (in an Eclipse project) gets the macros its
     // DLS launcher script would give it; those given here override them.
     if let Some(Source::File(path)) = &file
-        && path.extension().is_some_and(|x| x == "opi")
+        && is_opi(path)
         && let Some(defaults) = launch::defaults(path)
     {
         macros = defaults.with(&macros);

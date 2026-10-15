@@ -164,8 +164,24 @@ impl WindowLayout {
     /// The display and macros to show.
     pub fn location(&self) -> Location {
         let mut source = Source::parse(&self.display);
+        let mut project = self.project.clone();
+        // A DLS launcher's project is named after the module's version, so
+        // after the version changes take the launcher's project as it is now.
+        if let Some(dir) = &project
+            && bob::project::links(dir).is_none()
+            && let Some(script) = dir.parent()
+            && bob::project::through_launcher(dir)
+            && let Some(now) = bob::project::project_dir(script)
+        {
+            if let Source::File(path) = &source
+                && let Ok(rest) = path.strip_prefix(dir)
+            {
+                source = Source::File(now.join(rest));
+            }
+            project = Some(now);
+        }
         // A real path saved with its project goes back through the project.
-        if let (Some(dir), Source::File(path)) = (&self.project, &source)
+        if let (Some(dir), Source::File(path)) = (&project, &source)
             && !path.starts_with(dir)
             && let Some(p) = bob::project::virtual_path(dir, path)
         {
@@ -237,7 +253,7 @@ fn project_of(path: &Path) -> Option<PathBuf> {
     }
     path.ancestors()
         .skip(1)
-        .find(|d| bob::project::links(d).is_some())
+        .find(|d| bob::project::is_project(d))
         .map(Path::to_path_buf)
 }
 
@@ -627,7 +643,15 @@ mod tests {
             display: dir.join("x.opi").display().to_string(),
             ..back
         };
-        assert_eq!(real.location().source, Source::File(virt));
+        assert_eq!(real.location().source, Source::File(virt.clone()));
+        // One saved before the module's version changed.
+        let old = dir.join("runcss.sh/m_1-0");
+        let before = WindowLayout {
+            display: old.join("m/x.opi").display().to_string(),
+            project: Some(old),
+            ..real
+        };
+        assert_eq!(before.location().source, Source::File(virt));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

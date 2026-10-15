@@ -125,7 +125,9 @@ mod native {
         }
     }
 
-    /// The `.bob` next to an `.opi` file, which Phoebus opens in its place.
+    /// The `.bob` next to an `.opi` file, which Phoebus opens in its place:
+    /// by its real path when the `.opi` goes through a DLS launcher's
+    /// project, which is for BOY screens only.
     pub(super) fn bob_instead(path: &Path) -> Option<PathBuf> {
         if !path
             .extension()
@@ -134,7 +136,15 @@ mod native {
             return None;
         }
         let bob = path.with_extension("bob");
-        bob::project::locate(&bob).exists().then_some(bob)
+        let real = bob::project::locate(&bob);
+        if !real.exists() {
+            return None;
+        }
+        Some(if bob::project::through_launcher(&bob) {
+            real
+        } else {
+            bob
+        })
     }
 
     pub(super) fn get(url: &str) -> Result<Fetched, Error> {
@@ -336,5 +346,22 @@ mod tests {
             .port();
         let err = load(&Source::parse(&format!("http://127.0.0.1:{port}/x.bob"))).unwrap_err();
         assert!(matches!(err, Error::Fetch(..)), "{err}");
+    }
+
+    #[test]
+    fn a_bob_instead_of_a_launcher_screen_is_real() {
+        let dir = std::env::temp_dir().join(format!("bobview-fetch-runcss-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("runcss.sh"),
+            "project=m_${version}\nmodule=m\nlinks=\"${SCRIPT_DIR}=${project}/${module}\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("x.opi"), "<display/>").unwrap();
+        std::fs::write(dir.join("x.bob"), r#"<display version="2.0.0"/>"#).unwrap();
+        let virt = bob::project::launcher_path(&dir.join("x.opi")).unwrap();
+        let d = load(&Source::File(virt)).unwrap();
+        assert_eq!(d.source, Some(Source::File(dir.join("x.bob"))));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
