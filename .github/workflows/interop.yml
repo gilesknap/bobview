@@ -1,0 +1,78 @@
+name: Interop
+
+# Runs the pv crate against a real softIoc (CA and PVXS) and a ca-gateway.
+# A separate, non-required workflow: it pulls third-party container images and
+# depends on UDP/TCP networking on the runner, so it may be flaky. A failure
+# here must not block CI.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "crates/pv/**"
+      - ".github/workflows/interop.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # epics-containers images, pinned. Bump deliberately. The developer image
+  # ships epics-base 7.0.9 and PVXS's softIocPVX (a softIoc serving CA and PVA);
+  # gateways-runtime is the ca-gateway image the example-services use.
+  IOC_IMAGE: ghcr.io/epics-containers/epics-base-developer:7.0.9ec2
+  GATEWAY_IMAGE: ghcr.io/epics-containers/gateways-runtime:2024.12.3
+
+jobs:
+  interop:
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Write the test database and gateway config
+        run: |
+          mkdir gw
+          cat > gw/interop.db <<'DB'
+          record(ao, "INTEROP:AO") { field(VAL, "3.5") }
+          record(ai, "INTEROP:AI") { field(VAL, "1.25") }
+          record(longin, "INTEROP:LI") { field(VAL, "42") }
+          DB
+          printf 'EVALUATION ORDER ALLOW, DENY\n[A-Z].*  ALLOW\n' > gw/pvlist
+          printf 'ASG(DEFAULT) {\n  RULE(1,READ)\n  RULE(1,WRITE)\n}\n' > gw/access
+      - name: Start a softIocPVX (CA on 5064, PVA on 5075)
+        run: |
+          # -i keeps stdin open: the IOC shell exits at EOF
+          docker run -d -i --name ioc --network host -v "$PWD/gw:/db:ro" "$IOC_IMAGE" \
+            /epics/support/pvxs/bin/linux-x86_64/softIocPVX -d /db/interop.db
+      - name: Start ca-gateway in front of it (serves on 9064)
+        run: |
+          docker run -d --name gw --network host -v "$PWD/gw:/config:ro" "$GATEWAY_IMAGE" \
+            bash -c '/epics/ca-gateway/bin/linux-x86_64/gateway -cip 127.0.0.1 -cport 5064 -sip 127.0.0.1 -sport 9064 -pvlist /config/pvlist -access /config/access -log /dev/stdout -debug 1'
+          sleep 5
+          docker ps -a
+      - name: Run the interop tests
+        env:
+          EPICS_CA_ADDR_LIST: 127.0.0.1
+          EPICS_CA_AUTO_ADDR_LIST: "NO"
+          EPICS_PVA_ADDR_LIST: 127.0.0.1
+          EPICS_PVA_AUTO_ADDR_LIST: "NO"
+          BOBVIEW_INTEROP_CA_PV: INTEROP:AI
+          BOBVIEW_INTEROP_PVA_PV: INTEROP:AI
+          BOBVIEW_INTEROP_WRITE_PV: INTEROP:AO
+          BOBVIEW_INTEROP_REQUIRE: "1"
+        run: cargo test -p pv --test interop -- --nocapture --skip ca_through_gateway
+      - name: Run the gateway test
+        env:
+          EPICS_CA_ADDR_LIST: 127.0.0.1:9064
+          EPICS_CA_AUTO_ADDR_LIST: "NO"
+          BOBVIEW_INTEROP_GW_PV: INTEROP:LI
+          BOBVIEW_INTEROP_REQUIRE: "1"
+        run: cargo test -p pv --test interop ca_through_gateway -- --nocapture
+      - name: Container logs
+        if: always()
+        run: docker logs ioc; docker logs gw
