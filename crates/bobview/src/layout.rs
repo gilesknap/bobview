@@ -26,6 +26,24 @@ pub struct Layout {
     #[serde(default)]
     pub multi_window: bool,
     pub windows: Vec<WindowLayout>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trends: Vec<TrendLayout>,
+}
+
+/// A trend window of a layout.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TrendLayout {
+    /// The PVs plotted, in order.
+    pub pvs: Vec<String>,
+    /// The seconds shown.
+    pub span: f64,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub log: bool,
+    /// As for a display window.
+    #[serde(default)]
+    pub position: Option<[f32; 2]>,
+    #[serde(default)]
+    pub size: Option<[f32; 2]>,
 }
 
 /// One window of a layout: the main window, or a display window.
@@ -163,16 +181,39 @@ impl WindowLayout {
     /// (a laptop that was docked when the layout was saved); with no
     /// monitors known, positions are kept.
     pub fn geometry(&self, monitors: &[Rect]) -> Geometry {
-        let size = self
-            .size
+        Geometry::restore(self.position, self.size, monitors)
+    }
+}
+
+impl TrendLayout {
+    pub fn new(pvs: Vec<String>, (span, log): (f64, bool), geometry: Geometry) -> Self {
+        Self {
+            pvs,
+            span,
+            log,
+            position: geometry.position.map(|p| [p.x, p.y]),
+            size: geometry.size.map(|s| [s.x, s.y]),
+        }
+    }
+
+    /// Where to put the window, as `WindowLayout::geometry`.
+    pub fn geometry(&self, monitors: &[Rect]) -> Geometry {
+        Geometry::restore(self.position, self.size, monitors)
+    }
+}
+
+impl Geometry {
+    /// A saved position and size, dropping a position on none of
+    /// `monitors`, and either one that isn't usable.
+    fn restore(position: Option<[f32; 2]>, size: Option<[f32; 2]>, monitors: &[Rect]) -> Self {
+        let size = size
             .map(|[w, h]| Vec2::new(w, h))
             .filter(|s| s.x >= 1.0 && s.y >= 1.0 && s.x.is_finite() && s.y.is_finite());
-        let position = self
-            .position
+        let position = position
             .map(|[x, y]| Pos2::new(x, y))
             .filter(|p| p.x.is_finite() && p.y.is_finite())
             .filter(|p| monitors.is_empty() || on_screen(*p, size, monitors));
-        Geometry { position, size }
+        Self { position, size }
     }
 }
 
@@ -200,11 +241,12 @@ fn project_of(path: &Path) -> Option<PathBuf> {
 }
 
 impl Layout {
-    pub fn new(multi_window: bool, windows: Vec<WindowLayout>) -> Self {
+    pub fn new(multi_window: bool, windows: Vec<WindowLayout>, trends: Vec<TrendLayout>) -> Self {
         Self {
             version: VERSION,
             multi_window,
             windows,
+            trends,
         }
     }
 }
@@ -392,10 +434,25 @@ mod tests {
             },
         );
         second.toolbar = true;
-        let layout = Layout::new(true, vec![first, second]);
+        let layout = Layout::new(
+            true,
+            vec![first, second],
+            vec![TrendLayout::new(
+                vec![
+                    "ca://SR-DI-DCCT-01:SIGNAL".into(),
+                    "pva://BL01C:TEMP".into(),
+                ],
+                (3600.0, true),
+                Geometry {
+                    position: Some(Pos2::new(200.0, 300.0)),
+                    size: Some(Vec2::new(640.0, 420.0)),
+                },
+            )],
+        );
         let text = serde_json::to_string_pretty(&layout).unwrap();
         assert!(text.contains("\"position\": null"), "{text}");
         assert!(text.contains("\"zoom\": \"fit\""), "{text}");
+        assert!(text.contains("\"span\": 3600.0"), "{text}");
         let back: Layout = serde_json::from_str(&text).unwrap();
         assert_eq!(back, layout);
 
@@ -424,10 +481,40 @@ mod tests {
         let layout: Layout = serde_json::from_str(text).unwrap();
         assert!(layout.multi_window && layout.windows[0].main && !layout.windows[1].main);
         assert_eq!(layout.windows[1].position, Some([1050.0, 0.0]));
+        // A layout from before trends were saved has none.
+        assert!(layout.trends.is_empty());
         assert_eq!(
             layout.windows[1].location().macros.get("prefix"),
             Some("SR")
         );
+    }
+
+    #[test]
+    fn reads_trends() {
+        let text = r#"{
+          "version": 1,
+          "windows": [],
+          "trends": [
+            { "pvs": ["ca://SR-DI-DCCT-01:SIGNAL"], "span": 60, "log": true,
+              "position": [9000, 0], "size": [640, 420] },
+            { "pvs": [], "span": 600 }
+          ]
+        }"#;
+        let layout: Layout = serde_json::from_str(text).unwrap();
+        let laptop = [Rect::from_min_size(Pos2::ZERO, Vec2::new(1920.0, 1080.0))];
+        let [rf, empty] = layout.trends.as_slice() else {
+            panic!("{layout:?}")
+        };
+        assert_eq!((rf.span, rf.log), (60.0, true));
+        // Off screen: the size is kept, the position dropped.
+        assert_eq!(
+            rf.geometry(&laptop),
+            Geometry {
+                position: None,
+                size: Some(Vec2::new(640.0, 420.0))
+            }
+        );
+        assert!(!empty.log && empty.position.is_none() && empty.size.is_none());
     }
 
     #[test]
@@ -481,7 +568,7 @@ mod tests {
 
     #[test]
     fn only_a_named_layout_must_load() {
-        let layout = Layout::new(false, Vec::new());
+        let layout = Layout::new(false, Vec::new(), Vec::new());
         let good = |_: &str| Ok(layout.clone());
         let bad = |_: &str| Err::<Layout, _>("newer".to_string());
         // --layout: loaded, or an error.

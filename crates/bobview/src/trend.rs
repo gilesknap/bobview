@@ -12,6 +12,7 @@ use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Stroke, Vec2};
 use pv::{Listener, Pv, PvManager, PvState};
 
 use crate::axis::{self, Scale};
+use crate::layout::Geometry;
 use crate::plot::{self, text_size, vertical_text};
 use crate::screen::Node;
 use crate::style::{self, color, named};
@@ -396,6 +397,10 @@ pub struct Trend {
     log: bool,
     /// A PV name being typed into "Add".
     adding: String,
+    /// Where to open the window, when a layout says.
+    pub place: Geometry,
+    /// Where the window is, for saving a layout.
+    pub geometry: Geometry,
 }
 
 impl Trend {
@@ -407,9 +412,32 @@ impl Trend {
             span: DEFAULT_SPAN,
             log: false,
             adding: String::new(),
+            place: Geometry::default(),
+            geometry: Geometry::default(),
         };
         t.extend(names, pvs);
         t
+    }
+
+    /// The PVs' names, scheme and all.
+    pub fn names(&self) -> Vec<String> {
+        self.series
+            .iter()
+            .map(|s| s.pv.name().to_string())
+            .collect()
+    }
+
+    /// The seconds shown, and whether on a log scale.
+    pub fn view(&self) -> (f64, bool) {
+        (self.span, self.log)
+    }
+
+    /// Show `span` seconds (a sensible one), on a log scale or not.
+    pub fn set_view(&mut self, span: f64, log: bool) {
+        if span.is_finite() && span > 0.0 {
+            self.span = span;
+        }
+        self.log = log;
     }
 
     /// Add the PVs `names` that it doesn't have yet, each taking the next
