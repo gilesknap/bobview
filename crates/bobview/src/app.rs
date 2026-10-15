@@ -8,7 +8,7 @@ use eframe::egui::{self, Id, Pos2, Rect, Vec2};
 use pv::PvManager;
 
 use crate::chrome::{self, Chrome, UiScale};
-use crate::layout::{self, Geometry, Layout, WindowLayout, Zoom};
+use crate::layout::{self, Geometry, Layout, TrendLayout, WindowLayout, Zoom};
 use crate::pvmenu;
 use crate::style;
 use crate::trend::Trend;
@@ -584,11 +584,18 @@ impl BobApp {
                 windows.push(w);
             }
         }
+        let trends: Vec<TrendLayout> = self
+            .trends
+            .iter()
+            .map(|t| TrendLayout::new(t.names(), t.view(), t.geometry))
+            .collect();
         // On X11 a window not drawn yet has no position either.
-        if on_wayland() && windows.iter().any(|w| w.position.is_none()) {
+        let unplaced = windows.iter().any(|w| w.position.is_none())
+            || trends.iter().any(|t| t.position.is_none());
+        if on_wayland() && unplaced {
             positions_unknown();
         }
-        Layout::new(self.multi_window, windows)
+        Layout::new(self.multi_window, windows, trends)
     }
 
     fn save_layout(&mut self, name: &str) -> Result<(), String> {
@@ -642,7 +649,17 @@ impl BobApp {
             self.show_open = false;
             self.main.open(loc);
         }
-        if layout.windows.iter().any(|w| w.position.is_some()) && on_wayland() {
+        self.trends.clear();
+        for t in &layout.trends {
+            let mut trend = Trend::new(self.next_trend, &t.pvs, &self.pvs);
+            self.next_trend += 1;
+            trend.set_view(t.span, t.log);
+            trend.place = t.geometry(&monitors);
+            self.trends.push(trend);
+        }
+        let placed = layout.windows.iter().any(|w| w.position.is_some())
+            || layout.trends.iter().any(|t| t.position.is_some());
+        if placed && on_wayland() {
             positions_unknown();
         }
         self.layout_name = name;
@@ -1158,13 +1175,23 @@ impl BobApp {
             });
             return;
         }
+        // In desktop points: egui's are scaled by its zoom factor.
+        let zoom = ctx.zoom_factor();
         self.trends.retain_mut(|trend| {
-            // The window manager places it: Wayland won't let us.
-            let builder = egui::ViewportBuilder::default()
+            // The window manager places it, unless a layout says where;
+            // Wayland won't let us.
+            let size = trend
+                .place
+                .size
+                .map_or(Vec2::new(640.0, 420.0), |s| s / zoom);
+            let mut builder = egui::ViewportBuilder::default()
                 .with_title(trend.title())
                 .with_app_id("bobview")
-                .with_inner_size([640.0, 420.0])
+                .with_inner_size(size)
                 .with_min_inner_size([320.0, 200.0]);
+            if let Some(pos) = trend.place.position {
+                builder = builder.with_position(Pos2::ZERO + pos.to_vec2() / zoom);
+            }
             ctx.show_viewport_immediate(trend_viewport(trend.id), builder, |ui, class| {
                 if class == egui::ViewportClass::EmbeddedWindow {
                     // No native windows after all: a window in this one,
@@ -1172,6 +1199,7 @@ impl BobApp {
                     trend.ui(ui, pvs);
                     return true;
                 }
+                trend.geometry = geometry(ui);
                 egui::CentralPanel::default().show(ui, |ui| trend.ui(ui, pvs));
                 // Closing the window drops the trend, and its PVs with it.
                 !ui.input(|i| i.viewport().close_requested())

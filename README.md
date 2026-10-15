@@ -261,10 +261,11 @@ its windows.
 
 A layout records the open windows: each one's display, Eclipse project and
 effective macros, its position and size, the main window's zoom and whether
-a display window shows its toolbar. Layouts are JSON files in
+a display window shows its toolbar. It records the trend windows too: each
+one's PVs, time span, log scale, position and size. Layouts are JSON files in
 `$XDG_CONFIG_HOME/bobview/layouts` (by default `~/.config/bobview/layouts`).
-The main toolbar's layout list loads one (closing the display windows open
-now), and the ▾ menu next to it has Save (to the layout last loaded or
+The main toolbar's layout list loads one (closing the display and trend
+windows open now), and the ▾ menu next to it has Save (to the layout last loaded or
 saved), Save as default, Save as… (asking before replacing a layout),
 Delete, and Save default on exit (off unless ticked).
 
