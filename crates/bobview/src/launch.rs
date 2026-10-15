@@ -193,59 +193,101 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 /// Run a copy of `script` with `args` beside the stand-in `runcss.sh`, and
 /// return the arguments it passed that.
 fn run(script: &[u8], args: &[&str]) -> Option<Vec<String>> {
-    let dir = private_dir()?;
-    let result = (|| {
-        let launcher = dir.join("launcher");
-        write_executable(&launcher, script)?;
-        write_executable(&dir.join("runcss.sh"), STUB.as_bytes())?;
-        let mut child = Command::new(&launcher)
-            .args(args)
-            .current_dir(&dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok()?;
-        let start = Instant::now();
-        loop {
-            match child.try_wait().ok()? {
-                Some(_) => break,
-                None if start.elapsed() > TIMEOUT => {
-                    // Not waited for: a process stuck on a hung file system
-                    // ignores even SIGKILL.
-                    let _ = child.kill();
-                    log::warn!("launcher script took too long");
-                    return None;
-                }
-                None => std::thread::sleep(Duration::from_millis(5)),
+    // The temp dir is often mounted noexec (as on RHEL hosts), so try places
+    // that usually allow running files first.
+    for parent in run_dirs() {
+        let Some(dir) = private_dir(&parent) else {
+            continue;
+        };
+        let result = run_in(&dir, script, args);
+        let _ = std::fs::remove_dir_all(&dir);
+        match result {
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                log::debug!("cannot run a launcher in {}: {e}", parent.display());
             }
+            Err(e) => {
+                log::warn!("cannot run launcher script: {e}");
+                return None;
+            }
+            Ok(args) => return args,
         }
-        let out = std::fs::read(dir.join("args")).ok()?;
-        Some(
-            out.split(|b| *b == 0)
-                .filter(|a| !a.is_empty())
-                .map(|a| String::from_utf8_lossy(a).into_owned())
-                .collect(),
-        )
-    })();
-    let _ = std::fs::remove_dir_all(&dir);
-    result
+    }
+    log::warn!("cannot run launcher script: no folder allows running files");
+    None
 }
 
-/// A new directory in the temp dir that only this user can use: made here
+/// Where launcher scripts may be run: `$XDG_RUNTIME_DIR`, the user's cache
+/// folder, then the temp dir.
+fn run_dirs() -> Vec<PathBuf> {
+    let env = |k: &str| {
+        std::env::var_os(k)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
+    let cache = env("XDG_CACHE_HOME").or_else(|| env("HOME").map(|h| h.join(".cache")));
+    let mut dirs = vec![];
+    dirs.extend(env("XDG_RUNTIME_DIR"));
+    if let Some(cache) = cache.map(|c| c.join("bobview"))
+        && std::fs::create_dir_all(&cache).is_ok()
+    {
+        dirs.push(cache);
+    }
+    dirs.push(std::env::temp_dir());
+    dirs
+}
+
+/// [`run`] in `dir`: an error if the launcher cannot be started, `Ok(None)`
+/// if it did not pass `runcss.sh` anything.
+fn run_in(dir: &Path, script: &[u8], args: &[&str]) -> std::io::Result<Option<Vec<String>>> {
+    let launcher = dir.join("launcher");
+    write_executable(&launcher, script)?;
+    write_executable(&dir.join("runcss.sh"), STUB.as_bytes())?;
+    let mut child = Command::new(&launcher)
+        .args(args)
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let start = Instant::now();
+    loop {
+        match child.try_wait()? {
+            Some(_) => break,
+            None if start.elapsed() > TIMEOUT => {
+                // Not waited for: a process stuck on a hung file system
+                // ignores even SIGKILL.
+                let _ = child.kill();
+                log::warn!("launcher script took too long");
+                return Ok(None);
+            }
+            None => std::thread::sleep(Duration::from_millis(5)),
+        }
+    }
+    let Ok(out) = std::fs::read(dir.join("args")) else {
+        return Ok(None);
+    };
+    Ok(Some(
+        out.split(|b| *b == 0)
+            .filter(|a| !a.is_empty())
+            .map(|a| String::from_utf8_lossy(a).into_owned())
+            .collect(),
+    ))
+}
+
+/// A new directory in `parent` that only this user can use: made here
 /// (never one that already exists, which another user could have planted)
 /// with mode 0700, under a name nobody can predict.
-fn private_dir() -> Option<PathBuf> {
+fn private_dir(parent: &Path) -> Option<PathBuf> {
     use std::hash::{BuildHasher, RandomState};
     use std::os::unix::fs::DirBuilderExt;
     for _ in 0..16 {
         let n = RandomState::new().hash_one((std::process::id(), Instant::now()));
-        let dir = std::env::temp_dir().join(format!("bobview-launch-{n:016x}"));
+        let dir = parent.join(format!("bobview-launch-{n:016x}"));
         match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
             Ok(()) => return Some(dir),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => {
-                log::warn!("cannot make a directory to run a launcher in: {e}");
+                log::debug!("cannot make a directory to run a launcher in: {e}");
                 return None;
             }
         }
@@ -254,17 +296,15 @@ fn private_dir() -> Option<PathBuf> {
 }
 
 /// Write a new executable file at `path`; fails if it already exists.
-fn write_executable(path: &Path, data: &[u8]) -> Option<()> {
+fn write_executable(path: &Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o700)
-        .open(path)
-        .ok()?
+        .open(path)?
         .write_all(data)
-        .ok()
 }
 
 /// `a=1,b=2` as macros.
