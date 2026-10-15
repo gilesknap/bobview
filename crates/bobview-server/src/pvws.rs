@@ -11,7 +11,9 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::response::Response;
+use axum::http::header::{HOST, ORIGIN};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use base64::Engine;
 use pv::{Pv, PvManager, PvState, Severity, Value};
 use serde_json::{Map, Value as Json, json};
@@ -20,6 +22,9 @@ use tokio::sync::watch;
 pub struct Config {
     /// Accept `write` messages.
     pub write: bool,
+    /// Origins other than the server's own whose pages may connect when
+    /// writes are on, e.g. `https://host.example.com`.
+    pub allow_origins: Vec<String>,
     /// Least time between two rounds of updates to one client.
     pub throttle: Duration,
 }
@@ -52,8 +57,42 @@ impl Hub {
     }
 }
 
-pub async fn socket(State(hub): State<Arc<Hub>>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| serve(hub, socket))
+/// The largest message a client may send.
+const MAX_MESSAGE: usize = 1 << 20;
+/// The most PVs one client may subscribe to.
+const MAX_PVS: usize = 10_000;
+
+pub async fn socket(
+    State(hub): State<Arc<Hub>>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    // Browsers let any page open a websocket to any server, so with writes
+    // on, only pages from here (or allowed origins) may.
+    if hub.config.write && !origin_allowed(&headers, &hub.config.allow_origins) {
+        let origin = headers.get(ORIGIN).and_then(|o| o.to_str().ok());
+        log::warn!("refused a PVWS client from origin {origin:?} (see --allow-origin)");
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    ws.max_message_size(MAX_MESSAGE)
+        .on_upgrade(move |socket| serve(hub, socket))
+}
+
+/// Whether a request's `Origin` is this server or one of `allowed`; a
+/// request without one is not from a browser page.
+fn origin_allowed(headers: &HeaderMap, allowed: &[String]) -> bool {
+    let Some(origin) = headers.get(ORIGIN) else {
+        return true;
+    };
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+    if allowed.iter().any(|a| a.trim_end_matches('/') == origin) {
+        return true;
+    }
+    let host = headers.get(HOST).and_then(|h| h.to_str().ok());
+    let origin_host = origin.split_once("://").map(|(_, host)| host);
+    host.is_some_and(|h| origin_host.is_some_and(|o| o.eq_ignore_ascii_case(h)))
 }
 
 pub async fn info(State(hub): State<Arc<Hub>>) -> axum::Json<Json> {
@@ -116,14 +155,22 @@ fn handle(hub: &Hub, subs: &mut BTreeMap<String, Sub>, text: &str) -> Vec<String
     };
     match msg.get("type").and_then(Json::as_str) {
         Some("subscribe" | "monitor") => {
+            let mut refused = 0;
             for name in names() {
                 // A repeat subscription gets the full state again.
-                subs.entry(name.to_string())
-                    .or_insert_with(|| Sub {
-                        pv: hub.manager.subscribe(name),
-                        sent: None,
-                    })
-                    .sent = None;
+                if let Some(sub) = subs.get_mut(name) {
+                    sub.sent = None;
+                } else if subs.len() < MAX_PVS {
+                    let pv = hub.manager.subscribe(name);
+                    subs.insert(name.to_string(), Sub { pv, sent: None });
+                } else {
+                    refused += 1;
+                }
+            }
+            if refused > 0 {
+                return vec![error(format!(
+                    "Cannot subscribe to {refused} more PVs: at most {MAX_PVS} per client"
+                ))];
             }
             vec![]
         }
@@ -204,11 +251,14 @@ async fn send_updates(hub: &Hub, ws: &mut WebSocket, subs: &mut BTreeMap<String,
 fn update(name: &str, s: &PvState, last: Option<&PvState>, write: bool) -> Option<String> {
     let mut m = Map::new();
     let readonly = !(write && s.writable);
-    let was_connected = last.is_some_and(|l| l.connected);
+    // Connected without a value yet is still disconnected to a client, so
+    // the metadata goes with the first value.
+    let live = |s: &PvState| s.connected && s.value != Value::None;
+    let was_connected = last.is_some_and(live);
     if last.is_none_or(|l| readonly != !(write && l.writable)) {
         m.insert("readonly".into(), json!(readonly));
     }
-    if !s.connected || s.value == Value::None {
+    if !live(s) {
         if was_connected {
             // No value or text: disconnected.
             m.insert("severity".into(), json!("UNDEFINED"));
@@ -241,7 +291,7 @@ fn update(name: &str, s: &PvState, last: Option<&PvState>, write: bool) -> Optio
         if changed(&|l| l.severity != s.severity) {
             m.insert("severity".into(), json!(severity(s.severity)));
         }
-        if changed(&|l| l.value != s.value) {
+        if changed(&|l| !same_value(&l.value, &s.value)) {
             encode_value(&mut m, s);
         }
         if let Some(t) = s
@@ -261,6 +311,19 @@ fn update(name: &str, s: &PvState, last: Option<&PvState>, write: bool) -> Optio
     msg.insert("pv".into(), json!(name));
     msg.extend(m);
     Some(Json::Object(msg).to_string())
+}
+
+/// Whether two values are equal, without comparing arrays that are the
+/// same allocation element by element, and with NaN equal to NaN.
+fn same_value(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Double(x), Value::Double(y)) => x == y || (x.is_nan() && y.is_nan()),
+        (Value::DoubleArray(x), Value::DoubleArray(y)) => Arc::ptr_eq(x, y) || x == y,
+        (Value::LongArray(x), Value::LongArray(y)) => Arc::ptr_eq(x, y) || x == y,
+        (Value::StrArray(x), Value::StrArray(y)) => Arc::ptr_eq(x, y) || x == y,
+        (Value::Image(x), Value::Image(y)) => Arc::ptr_eq(x, y) || x == y,
+        _ => a == b,
+    }
 }
 
 fn vtype(value: &Value) -> &'static str {
@@ -405,6 +468,47 @@ mod tests {
     }
 
     #[test]
+    fn metadata_comes_with_the_first_value() {
+        // Connected, but the first value has yet to arrive.
+        let empty = PvState {
+            connected: true,
+            writable: true,
+            ..Default::default()
+        };
+        let m = parse(update("X", &empty, None, true));
+        assert!(!m.contains_key("vtype") && !m.contains_key("severity"));
+        assert!(update("X", &empty, Some(&empty), true).is_none());
+
+        let m = parse(update("X", &double(1.0), Some(&empty), true));
+        assert_eq!(m["vtype"], "VDouble");
+        assert_eq!(m["units"], "mA");
+        assert_eq!(m["value"], 1.0);
+    }
+
+    #[test]
+    fn no_change_no_update() {
+        let states = [
+            PvState::default(),
+            PvState {
+                connected: true,
+                ..Default::default()
+            },
+            double(1.0),
+            double(f64::NAN),
+            PvState {
+                connected: true,
+                value: Value::DoubleArray(vec![f64::NAN, 1.0].into()),
+                ..Default::default()
+            },
+        ];
+        for s in &states {
+            for write in [false, true] {
+                assert!(update("X", s, Some(s), write).is_none(), "{s:?}");
+            }
+        }
+    }
+
+    #[test]
     fn writes_off_means_readonly() {
         let m = parse(update("X", &double(1.0), None, false));
         assert_eq!(m["readonly"], true);
@@ -434,6 +538,26 @@ mod tests {
             .decode(m["b64int"].as_str().unwrap())
             .unwrap();
         assert_eq!(bytes, [1, 0, 0, 0, 0xfe, 0xff, 0xff, 0xff]);
+    }
+
+    #[test]
+    fn origins() {
+        let headers = |origin: Option<&str>| {
+            let mut h = HeaderMap::new();
+            h.insert(HOST, "server:8080".parse().unwrap());
+            if let Some(o) = origin {
+                h.insert(ORIGIN, o.parse().unwrap());
+            }
+            h
+        };
+        let allowed = ["https://other.example.com".to_string()];
+        assert!(origin_allowed(&headers(None), &[]));
+        assert!(origin_allowed(&headers(Some("http://server:8080")), &[]));
+        assert!(!origin_allowed(&headers(Some("http://evil:8080")), &[]));
+        assert!(!origin_allowed(&headers(Some("http://server")), &[]));
+        let other = headers(Some("https://other.example.com"));
+        assert!(!origin_allowed(&other, &[]));
+        assert!(origin_allowed(&other, &allowed));
     }
 
     #[test]

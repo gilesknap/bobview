@@ -14,6 +14,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
+use axum::extract::Request;
+use axum::http::StatusCode;
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use tower_http::services::ServeDir;
 
@@ -24,11 +28,16 @@ Serve the bobview web build, .bob files and a PV Web Socket on one port.
 Open http://HOST:PORT/?display=FILE.bob in a browser (default index.bob).
 
   -p, --port PORT        port to listen on (default 8080)
-  --bind ADDR            address to listen on (default 0.0.0.0)
-  --web DIR              the web build from scripts/build-web.sh (default dist/web)
+  --bind ADDR            address to listen on (default 0.0.0.0, every
+                         interface)
+  --web DIR              the web build from scripts/build-web.sh (default
+                         ../share/bobview/web next to this binary, else dist/web)
   --opi DIR              serve .bob files from here; they take precedence over
                          files of the same name in the web build
-  --write                let browsers write to PVs (off by default, as in PVWS)
+  --write                let browsers write to PVs (off by default, as in PVWS);
+                         only pages from this server may then connect
+  --allow-origin ORIGIN  with --write, also let pages from ORIGIN connect, e.g.
+                         https://host.example.com (may be repeated)
   --throttle-ms MS       least time between updates of one PV (default 100)
   -h, --help             show this help
   -V, --version          show the version
@@ -43,10 +52,11 @@ fn main() {
 
     let mut port = 8080;
     let mut bind = "0.0.0.0".to_string();
-    let mut web = PathBuf::from("dist/web");
+    let mut web = None;
     let mut opi = None;
     let mut config = pvws::Config {
         write: false,
+        allow_origins: Vec::new(),
         throttle: Duration::from_millis(100),
     };
     let mut args = std::env::args().skip(1);
@@ -54,9 +64,10 @@ fn main() {
         match arg.as_str() {
             "-p" | "--port" => port = parse(&arg, args.next()),
             "--bind" => bind = args.next().unwrap_or(bind),
-            "--web" => web = PathBuf::from(args.next().unwrap_or_default()),
+            "--web" => web = Some(PathBuf::from(args.next().unwrap_or_default())),
             "--opi" => opi = args.next().map(PathBuf::from),
             "--write" => config.write = true,
+            "--allow-origin" => config.allow_origins.extend(args.next()),
             "--throttle-ms" => config.throttle = Duration::from_millis(parse(&arg, args.next())),
             "-h" | "--help" => {
                 print!("{USAGE}");
@@ -72,6 +83,7 @@ fn main() {
             }
         }
     }
+    let web = web.unwrap_or_else(default_web);
     if !web.join("index.html").is_file() {
         eprintln!(
             "no web build in {} - run scripts/build-web.sh or pass --web DIR",
@@ -89,12 +101,15 @@ fn main() {
 
     let manager = pv::PvManager::new();
     let hub = Arc::new(pvws::Hub::new(manager.clone(), config));
-    let files = ServeDir::new(opi.as_ref().unwrap_or(&web)).fallback(ServeDir::new(&web));
     let app = Router::new()
         .route("/pvws/pv", get(pvws::socket))
-        .route("/pvws/info", get(pvws::info))
-        .fallback_service(files)
-        .with_state(hub);
+        .route("/pvws/info", get(pvws::info));
+    let app = match &opi {
+        Some(opi) => app.fallback_service(ServeDir::new(opi).fallback(ServeDir::new(&web))),
+        None => app.fallback_service(ServeDir::new(&web)),
+    }
+    .layer(middleware::from_fn(hide_dot_files))
+    .with_state(hub);
 
     manager.runtime().block_on(async move {
         let listener = match tokio::net::TcpListener::bind(addr).await {
@@ -112,6 +127,29 @@ fn main() {
             log::error!("server stopped: {e}");
         }
     });
+}
+
+/// The web build installed next to this binary, else the one
+/// scripts/build-web.sh writes in a checkout.
+fn default_web() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.parent()?.join("share/bobview/web")))
+        .filter(|web| web.join("index.html").is_file())
+        .unwrap_or_else(|| PathBuf::from("dist/web"))
+}
+
+/// Hide dot-files and dot-dirs, such as `.git` when `--opi` is a checkout.
+async fn hide_dot_files(request: Request, next: Next) -> Response {
+    let hidden =
+        request.uri().path().split('/').any(|segment| {
+            segment.starts_with('.') || segment.to_ascii_lowercase().starts_with("%2e")
+        });
+    if hidden {
+        StatusCode::NOT_FOUND.into_response()
+    } else {
+        next.run(request).await
+    }
 }
 
 fn parse<T: std::str::FromStr>(flag: &str, value: Option<String>) -> T {

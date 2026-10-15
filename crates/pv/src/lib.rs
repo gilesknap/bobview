@@ -149,7 +149,7 @@ struct Inner {
     /// Always `Some` until drop, which shuts it down without blocking.
     #[cfg(not(target_arch = "wasm32"))]
     rt: Option<tokio::runtime::Runtime>,
-    entries: Mutex<HashMap<String, Weak<Entry>>>,
+    entries: Mutex<Entries>,
     locals: Mutex<HashMap<String, Arc<Shared>>>,
     // Shared with the PV tasks, which must not hold `Inner` itself: the last
     // reference could then be dropped on a runtime thread.
@@ -169,6 +169,25 @@ impl Drop for Inner {
     }
 }
 
+/// Every subscription by key, including dropped ones until the next prune.
+#[derive(Default)]
+struct Entries {
+    map: HashMap<String, Weak<Entry>>,
+    /// Prune dropped entries once the map is this big, so a batch of
+    /// subscriptions doesn't scan the map for each one.
+    prune_at: usize,
+}
+
+impl Entries {
+    fn insert(&mut self, key: String, entry: Weak<Entry>) {
+        if self.map.len() >= self.prune_at {
+            self.map.retain(|_, w| w.strong_count() > 0);
+            self.prune_at = (2 * self.map.len()).max(64);
+        }
+        self.map.insert(key, entry);
+    }
+}
+
 impl Default for PvManager {
     fn default() -> Self {
         Self::new()
@@ -180,7 +199,7 @@ impl PvManager {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Inner {
-                entries: Mutex::new(HashMap::new()),
+                entries: Mutex::default(),
                 locals: Mutex::new(HashMap::new()),
                 notify: Arc::new(RwLock::new(None)),
             }),
@@ -198,7 +217,7 @@ impl PvManager {
         Self {
             inner: Arc::new(Inner {
                 rt: Some(rt),
-                entries: Mutex::new(HashMap::new()),
+                entries: Mutex::default(),
                 locals: Mutex::new(HashMap::new()),
                 ca: Arc::new(tokio::sync::OnceCell::new()),
                 pva: Arc::new(std::sync::OnceLock::new()),
@@ -223,7 +242,7 @@ impl PvManager {
         let name = PvName::parse(name);
         let key = name.key();
         let mut entries = self.inner.entries.lock().unwrap();
-        if let Some(entry) = entries.get(&key).and_then(Weak::upgrade) {
+        if let Some(entry) = entries.map.get(&key).and_then(Weak::upgrade) {
             return Pv(entry);
         }
 
@@ -236,7 +255,6 @@ impl PvManager {
             }
         };
         let entry = Arc::new(Entry { name, shared, task });
-        entries.retain(|_, w| w.strong_count() > 0);
         entries.insert(key, Arc::downgrade(&entry));
         Pv(entry)
     }

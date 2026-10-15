@@ -36,9 +36,13 @@ mkdir -p "${prefix}/bin" "${prefix}/share/bobview"
 cp "${src}/bin/"* "${prefix}/bin/"
 rm -rf "${prefix}/share/bobview/displays"
 cp -r "${src}/share/bobview/displays" "${prefix}/share/bobview/"
+rm -rf "${prefix}/share/bobview/web"
+if [[ -d "${src}/share/bobview/web" ]]; then
+    cp -r "${src}/share/bobview/web" "${prefix}/share/bobview/"
+fi
 cp "${src}/README.md" "${src}/LICENSE" "${prefix}/share/bobview/"
 if [[ -f "${src}/THIRD_PARTY_LICENSES.txt" ]]; then
     cp "${src}/THIRD_PARTY_LICENSES.txt" "${prefix}/share/bobview/"
 fi
-echo "installed bobview, bobview-ssh, bobview-testioc and bobview-probe into ${prefix}/bin"
+echo "installed bobview, bobview-ssh, bobview-testioc, bobview-probe and bobview-server into ${prefix}/bin"
 echo "displays are in ${prefix}/share/bobview/displays"

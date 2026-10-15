@@ -1732,7 +1732,29 @@ fn draw_embedded(ui: &mut Ui, w: &Widget, screen: &mut Screen, area: Rect, cx: &
     draw_screen(ui, screen, &mut cx.sub(view, clip), id);
 }
 
+/// Whether the display `node` embeds, fetched in the background (in a
+/// browser), has arrived, so should be embedded again.
+#[cfg(target_arch = "wasm32")]
+fn fetched(ui: &Ui, node: &Node) -> bool {
+    if node.loading && crate::fetch::pending() {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(50));
+    }
+    node.loading && !crate::fetch::pending()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn fetched(_ui: &Ui, _node: &Node) -> bool {
+    false
+}
+
 fn embedded(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut Cx, id: Id) {
+    if fetched(ui, node) {
+        let file = node.prop("file");
+        let group = node.prop("group_name");
+        let macros = node.macros.clone();
+        Builder { pvs: cx.pvs }.embed(node, &file, &macros, &group, cx.depth);
+    }
     let w = node.w.clone();
     match node.embedded.as_mut() {
         Some(screen) => draw_embedded(ui, &w, screen, rect, cx, id),
@@ -1794,15 +1816,8 @@ fn navtabs(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut Cx, id: Id) {
     if let Some(i) = clicked {
         Builder { pvs: cx.pvs }.select_navtab(node, i, cx.depth);
     }
-    // A tab fetched in the background (in a browser) is shown once it arrives.
-    #[cfg(target_arch = "wasm32")]
-    if node.loading {
-        if crate::fetch::pending() {
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(50));
-        } else {
-            Builder { pvs: cx.pvs }.select_navtab(node, node.active_tab, cx.depth);
-        }
+    if fetched(ui, node) {
+        Builder { pvs: cx.pvs }.select_navtab(node, node.active_tab, cx.depth);
     }
     let body = if vertical {
         Rect::from_min_max(rect.min + Vec2::new(tw + gap, 0.0), rect.max)

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Write the licence notices for everything compiled into the release binaries.
 
-Walks the normal (not dev or build) dependency graph of the workspace for one
-target, and for each third-party crate records its licence expression and the
+Walks the normal (not dev or build) dependency graph of the workspace for each
+target (the binaries' and wasm32-unknown-unknown for the browser build), and
+for each third-party crate records its licence expression and the
 licence/notice/copyright files it ships. Identical files are printed once with
 the crates that use them. Fonts embedded by bobview are added at the end.
 
@@ -16,6 +17,7 @@ from collections import defaultdict
 from pathlib import Path
 
 TARGET = sys.argv[1] if len(sys.argv) > 1 else "aarch64-unknown-linux-gnu"
+WEB_TARGET = "wasm32-unknown-unknown"
 ROOT = Path(__file__).resolve().parent.parent
 NOTICE_PREFIXES = ("LICENSE", "LICENCE", "COPYING", "COPYRIGHT", "NOTICE", "UNLICENSE", "THIRD_PARTY")
 EMBEDDED_FONTS = [
@@ -23,26 +25,29 @@ EMBEDDED_FONTS = [
     ("Noto Sans Math, symbol subset (embedded in bobview)", ROOT / "crates/bobview/fonts/LICENSE-NotoSansMath"),
 ]
 
-meta = json.loads(
-    subprocess.check_output(
-        ["cargo", "metadata", "--format-version", "1", "--filter-platform", TARGET, "--locked"],
-        cwd=ROOT,
-    )
-)
-packages = {p["id"]: p for p in meta["packages"]}
-nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
-
 # Everything reachable from the workspace through normal dependencies.
 seen = set()
-stack = list(meta["workspace_members"])
-while stack:
-    pid = stack.pop()
-    if pid in seen:
-        continue
-    seen.add(pid)
-    for dep in nodes[pid]["deps"]:
-        if any(k["kind"] is None for k in dep["dep_kinds"]):
-            stack.append(dep["pkg"])
+packages = {}
+for target in (TARGET, WEB_TARGET):
+    meta = json.loads(
+        subprocess.check_output(
+            ["cargo", "metadata", "--format-version", "1", "--filter-platform", target, "--locked"],
+            cwd=ROOT,
+        )
+    )
+    packages.update((p["id"], p) for p in meta["packages"])
+    nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
+    reached = set()
+    stack = list(meta["workspace_members"])
+    while stack:
+        pid = stack.pop()
+        if pid in reached:
+            continue
+        reached.add(pid)
+        for dep in nodes[pid]["deps"]:
+            if any(k["kind"] is None for k in dep["dep_kinds"]):
+                stack.append(dep["pkg"])
+    seen |= reached
 crates = sorted(
     (packages[p] for p in seen if p not in meta["workspace_members"]),
     key=lambda p: (p["name"], p["version"]),
@@ -95,8 +100,9 @@ for pkg in crates:
 out = sys.stdout
 out.write("Third-party software in the bobview release binaries\n")
 out.write("=" * 53 + "\n\n")
-out.write(f"bobview, bobview-probe and bobview-testioc (target {TARGET}) include the\n")
-out.write("following crates. Licence expressions are as declared by each crate.\n\n")
+out.write(f"bobview, bobview-probe, bobview-testioc and bobview-server (target {TARGET})\n")
+out.write(f"and the browser build of bobview ({WEB_TARGET}) include the following\n")
+out.write("crates. Licence expressions are as declared by each crate.\n\n")
 for pkg in crates:
     licence = pkg["license"] or f"see {pkg['license_file']}"
     source = pkg.get("repository") or "crates.io"

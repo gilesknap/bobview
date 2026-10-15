@@ -25,13 +25,14 @@ use crate::{PvName, PvState, Scheme, Severity, Shared, Value, Writer};
 static URL: Mutex<Option<String>> = Mutex::new(None);
 
 /// Use the PVWS server at `url`: `wss://host/pvws/pv`, or just `host[:port]`
-/// for that. Without one, the page's own server is used.
+/// for its `/pvws/pv` (over `wss://` unless the page is `http:` and the
+/// port is not 443). Without one, the page's own server is used.
 pub fn set_pvws(url: &str) {
     let url = url.trim().trim_end_matches('/');
     let url = if url.contains("://") {
         url.to_string()
     } else {
-        format!("wss://{url}/pvws/pv")
+        host_url(url)
     };
     *URL.lock().unwrap() = Some(url);
 }
@@ -40,12 +41,16 @@ fn url() -> String {
     if let Some(url) = URL.lock().unwrap().clone() {
         return url;
     }
-    let location = web_sys::window().map(|w| w.location());
-    let host = location
-        .as_ref()
-        .and_then(|l| l.host().ok())
+    let host = web_sys::window()
+        .and_then(|w| w.location().host().ok())
         .unwrap_or_default();
-    let secure = location.and_then(|l| l.protocol().ok()).as_deref() == Some("https:");
+    host_url(&host)
+}
+
+/// The PVWS URL on `host[:port]`, secure when the page is.
+fn host_url(host: &str) -> String {
+    let page = web_sys::window().and_then(|w| w.location().protocol().ok());
+    let secure = page.as_deref() != Some("http:") || host.ends_with(":443");
     format!("{}://{host}/pvws/pv", if secure { "wss" } else { "ws" })
 }
 
@@ -109,7 +114,7 @@ thread_local! {
 
 #[derive(Default)]
 struct Socket {
-    ws: Option<WebSocket>,
+    ws: Option<Connection>,
     open: bool,
     subs: HashMap<String, Sub>,
     /// Wait before the next connection attempt after one fails.
@@ -120,6 +125,25 @@ struct Sub {
     shared: Weak<Shared>,
     /// The PV's type (`VDouble`, `VEnum` …), sent with the first update only.
     vtype: String,
+}
+
+/// A websocket and the handlers it calls, which go with it.
+struct Connection {
+    ws: WebSocket,
+    _onopen: Closure<dyn FnMut()>,
+    _onmessage: Closure<dyn FnMut(MessageEvent)>,
+    _onclose: Closure<dyn FnMut()>,
+}
+
+impl Drop for Connection {
+    /// Close the socket and detach its handlers, so nothing it does later
+    /// reaches the socket replacing it (or calls a dropped closure).
+    fn drop(&mut self) {
+        self.ws.set_onopen(None);
+        self.ws.set_onmessage(None);
+        self.ws.set_onclose(None);
+        let _ = self.ws.close();
+    }
 }
 
 const RETRY_MIN: Duration = Duration::from_secs(1);
@@ -156,7 +180,7 @@ impl Socket {
     /// Send a message if the socket is open.
     fn send(&self, msg: &Json) -> bool {
         match &self.ws {
-            Some(ws) if self.open => ws.send_with_str(&msg.to_string()).is_ok(),
+            Some(c) if self.open => c.ws.send_with_str(&msg.to_string()).is_ok(),
             _ => false,
         }
     }
@@ -172,7 +196,6 @@ impl Socket {
                 return;
             }
         };
-        // The socket lives as long as the page, so its handlers can too.
         let onopen = Closure::<dyn FnMut()>::new(|| SOCKET.with_borrow_mut(Socket::opened));
         let onmessage = Closure::<dyn FnMut(MessageEvent)>::new(|e: MessageEvent| {
             if let Some(text) = e.data().as_string() {
@@ -185,10 +208,12 @@ impl Socket {
         ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
         ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
         ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
-        onopen.forget();
-        onmessage.forget();
-        onclose.forget();
-        self.ws = Some(ws);
+        self.ws = Some(Connection {
+            ws,
+            _onopen: onopen,
+            _onmessage: onmessage,
+            _onclose: onclose,
+        });
     }
 
     fn opened(&mut self) {
@@ -292,7 +317,9 @@ fn apply(s: &mut PvState, vtype: &str, msg: &Map<String, Json>) {
     }
     if let Some(secs) = f64_of("seconds") {
         let nanos = f64_of("nanos").unwrap_or(0.0);
-        s.timestamp = Some(SystemTime::UNIX_EPOCH + Duration::from_secs_f64(secs + nanos * 1e-9));
+        if let Ok(t) = Duration::try_from_secs_f64(secs + nanos * 1e-9) {
+            s.timestamp = Some(SystemTime::UNIX_EPOCH + t);
+        }
     }
     if let Some(value) = value(vtype, msg) {
         s.value = value;

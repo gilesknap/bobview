@@ -5,15 +5,23 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
   <title>bobview</title>
   <style>
-    html, body { margin: 0; height: 100%; overflow: hidden; background: #c8c8c8; }
-    canvas { display: block; width: 100%; height: 100%; }
+    html, body { margin: 0; height: 100%; height: 100dvh; overflow: hidden; background: #c8c8c8; }
+    canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+    #error { position: absolute; top: 0; left: 0; right: 0; margin: 0; padding: 1em;
+             font: 14px sans-serif; white-space: pre-wrap; background: #fdd; }
   </style>
 </head>
 <body>
+  <noscript>bobview needs JavaScript and WebAssembly.</noscript>
   <canvas id="bobview"></canvas>
   <script type="module">
-    import init from "./bobview.js";
-    init();
+    // A dynamic import, so a missing bundle shows here too.
+    import("./bobview.js").then(m => m.default()).catch(e => {
+      const p = document.createElement("pre");
+      p.id = "error";
+      p.textContent = `bobview could not start: ${e}`;
+      document.body.append(p);
+    });
   </script>
 </body>
 </html>
