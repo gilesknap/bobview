@@ -16,9 +16,11 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # epics-containers images, pinned. Bump deliberately.
-  EPICS_IMAGE: ghcr.io/epics-containers/epics-base-runtime:7.0.9ec2
-  GATEWAY_IMAGE: ghcr.io/epics-containers/ca-gateway:2.1.3
+  # epics-containers images, pinned. Bump deliberately. The developer image
+  # ships epics-base 7.0.9 and PVXS's softIocPVX (a softIoc serving CA and PVA);
+  # gateways-runtime is the ca-gateway image the example-services use.
+  IOC_IMAGE: ghcr.io/epics-containers/epics-base-developer:7.0.9ec2
+  GATEWAY_IMAGE: ghcr.io/epics-containers/gateways-runtime:2024.12.3
 
 jobs:
   interop:
@@ -29,24 +31,25 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Write a test database
+      - name: Write the test database and gateway config
         run: |
-          cat > interop.db <<'DB'
+          mkdir gw
+          cat > gw/interop.db <<'DB'
           record(ao, "INTEROP:AO") { field(VAL, "3.5") }
           record(ai, "INTEROP:AI") { field(VAL, "1.25") }
           record(longin, "INTEROP:LI") { field(VAL, "42") }
           DB
-      - name: Start a softIoc (CA and PVA on the host network)
+          printf 'EVALUATION ORDER ALLOW, DENY\n[A-Z].*  ALLOW\n' > gw/pvlist
+          printf 'ASG(DEFAULT) {\n  RULE(1,READ)\n  RULE(1,WRITE)\n}\n' > gw/access
+      - name: Start a softIocPVX (CA on 5064, PVA on 5075)
         run: |
-          docker run -d --name ioc --network host -v "$PWD/interop.db:/db/interop.db:ro" \
-            --entrypoint /epics/epics-base/bin/linux-x86_64/softIoc \
-            "$EPICS_IMAGE" -d /db/interop.db
-      - name: Start ca-gateway in front of it
+          # -i keeps stdin open: the IOC shell exits at EOF
+          docker run -d -i --name ioc --network host -v "$PWD/gw:/db:ro" "$IOC_IMAGE" \
+            /epics/support/pvxs/bin/linux-x86_64/softIocPVX -d /db/interop.db
+      - name: Start ca-gateway in front of it (serves on 9064)
         run: |
-          # the gateway serves on 9064/9065 and finds the IOC on 5064/5065
-          docker run -d --name gw --network host \
-            -e EPICS_CA_ADDR_LIST=127.0.0.1 -e EPICS_CA_AUTO_ADDR_LIST=NO \
-            "$GATEWAY_IMAGE" -sip 127.0.0.1 -cip 127.0.0.1 -sport 9064 -cport 5064 -pvlist /dev/null || true
+          docker run -d --name gw --network host -v "$PWD/gw:/config:ro" "$GATEWAY_IMAGE" \
+            bash -c '/epics/ca-gateway/bin/linux-x86_64/gateway -cip 127.0.0.1 -cport 5064 -sip 127.0.0.1 -sport 9064 -pvlist /config/pvlist -access /config/access -log /dev/stdout -debug 1'
           sleep 5
           docker ps -a
       - name: Run the interop tests
@@ -61,9 +64,8 @@ jobs:
         run: cargo test -p pv --test interop -- --nocapture
       - name: Run the gateway test
         env:
-          EPICS_CA_ADDR_LIST: ""
+          EPICS_CA_ADDR_LIST: 127.0.0.1:9064
           EPICS_CA_AUTO_ADDR_LIST: "NO"
-          EPICS_CA_NAME_SERVERS: 127.0.0.1:9064
           BOBVIEW_INTEROP_GW_PV: INTEROP:LI
         run: cargo test -p pv --test interop ca_through_gateway -- --nocapture
       - name: Container logs
