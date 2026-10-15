@@ -128,7 +128,9 @@ impl BobApp {
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
+        // One row whatever the width, so a window sized to the display shows it
+        // near 100%; the display name is elided when there is no room.
+        ui.horizontal(|ui| {
             ui.spacing_mut().button_padding = Vec2::new(10.0, 6.0);
             if ui
                 .add_enabled(!self.back.is_empty(), egui::Button::new("◀"))
@@ -182,7 +184,8 @@ impl BobApp {
                 self.show_open = !self.show_open;
             }
             if let Some(s) = &self.screen {
-                ui.strong(&s.display.name);
+                ui.add(egui::Label::new(egui::RichText::new(&s.display.name).strong()).truncate())
+                    .on_hover_text(&s.display.name);
             }
         });
     }
@@ -280,7 +283,8 @@ fn list_dir(dir: &Path) -> Vec<(PathBuf, bool)> {
 fn count_pvs(nodes: &[Node]) -> (usize, usize) {
     let mut acc = (0, 0);
     for n in nodes {
-        if let Some(pv) = &n.pv {
+        let traces = n.traces.iter().flat_map(|t| t.x.iter().chain(&t.y));
+        for pv in n.pv.iter().chain(traces) {
             acc.1 += 1;
             if pv.state().connected {
                 acc.0 += 1;
@@ -395,7 +399,7 @@ impl BobApp {
             return;
         };
         let mut done = None;
-        let title = pad.pv.name().to_string();
+        let title = plain_name(pad.pv.name());
         let state = pad.pv.state();
         egui::Window::new(title)
             .collapsible(false)
@@ -458,5 +462,33 @@ impl BobApp {
             Some(None) => self.keypad = None,
             None => {}
         }
+    }
+}
+
+/// A PV's name as a user would type it: no `ca://` prefix, and no type or
+/// initial value for a local PV (`loc://x`, not `loc://x<VDouble>(1.5)`).
+fn plain_name(name: &pv::PvName) -> String {
+    match name.scheme {
+        pv::Scheme::Ca => name.base().to_string(),
+        _ => {
+            let full = name.to_string();
+            let prefix = &full[..full.len() - name.pv.len()];
+            format!("{prefix}{}", name.base())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plain_name;
+    use pv::PvName;
+
+    #[test]
+    fn keypad_title_is_the_plain_name() {
+        let t = |n: &str| plain_name(&PvName::parse(n));
+        assert_eq!(t("loc://t1<VDouble>(1.5)"), "loc://t1");
+        assert_eq!(t("ca://BL01T:X"), "BL01T:X");
+        assert_eq!(t("BL01T:X"), "BL01T:X");
+        assert_eq!(t("pva://BL01T:Y"), "pva://BL01T:Y");
     }
 }

@@ -68,13 +68,19 @@ pub(crate) fn apply(old: &Value, labels: &[String], text: &str) -> Value {
                 .unwrap_or(*i),
         ),
         Value::Double(v) => Value::Double(t.parse().unwrap_or(*v)),
-        Value::DoubleArray(_) => {
-            Value::DoubleArray(t.split([' ', ',']).filter_map(|x| x.parse().ok()).collect())
-        }
-        Value::LongArray(_) => {
-            Value::LongArray(t.split([' ', ',']).filter_map(|x| x.parse().ok()).collect())
-        }
-        Value::StrArray(_) => Value::StrArray(Arc::from(vec![text.to_string()])),
+        Value::DoubleArray(_) => Value::DoubleArray(
+            crate::split_array(t)
+                .into_iter()
+                .filter_map(|x| x.parse().ok())
+                .collect(),
+        ),
+        Value::LongArray(_) => Value::LongArray(
+            crate::split_array(t)
+                .into_iter()
+                .filter_map(|x| x.parse().ok())
+                .collect(),
+        ),
+        Value::StrArray(_) => Value::StrArray(crate::split_strings(text).into()),
         Value::Image(_) => old.clone(),
         Value::None => t
             .parse()
@@ -113,5 +119,16 @@ mod tests {
         assert_eq!(apply(&Value::Enum(1), &labels, "0"), Value::Enum(0));
         assert_eq!(apply(&Value::Long(1), &[], "4"), Value::Long(4));
         assert_eq!(apply(&Value::Double(1.0), &[], "x"), Value::Double(1.0));
+        // Arrays read back in the form they are shown in.
+        let longs = Value::LongArray(Arc::from(vec![0]));
+        assert_eq!(
+            apply(&longs, &[], "[3, 4]"),
+            Value::LongArray(Arc::from(vec![3, 4]))
+        );
+        let strs = Value::StrArray(Arc::from(vec![String::new()]));
+        assert_eq!(
+            apply(&strs, &[], r#"["a b", "c"]"#),
+            Value::StrArray(Arc::from(vec!["a b".to_string(), "c".to_string()]))
+        );
     }
 }

@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Plots and meters: loc:// and sim:// PVs only, no IOC needed -->
+<display version="2.0.0">
+  <name>Plots and meters</name>
+  <width>900</width>
+  <height>620</height>
+  <widget type="xyplot" version="3.0.0">
+    <name>ByIndex</name>
+    <x>10</x>
+    <y>10</y>
+    <width>430</width>
+    <height>280</height>
+    <title>Against index</title>
+    <x_axis>
+      <title>Index</title>
+      <autoscale>true</autoscale>
+      <show_grid>true</show_grid>
+    </x_axis>
+    <y_axes>
+      <y_axis>
+        <title>Counts</title>
+        <autoscale>true</autoscale>
+        <show_grid>true</show_grid>
+      </y_axis>
+    </y_axes>
+    <traces>
+      <trace>
+        <name>$(traces[0].y_pv)</name>
+        <y_pv>loc://wave&lt;VDoubleArray&gt;(0, 3, 8, 15, 24, 35, 48, 63, 80, 99, 80, 63, 48, 35, 24, 15, 8, 3, 0)</y_pv>
+        <trace_type>1</trace_type>
+        <color><color red="0" green="0" blue="255"></color></color>
+        <line_width>2</line_width>
+        <point_type>2</point_type>
+        <point_size>6</point_size>
+      </trace>
+      <trace>
+        <name>Steps</name>
+        <y_pv>loc://steps&lt;VLongArray&gt;(10, 10, 30, 30, 20, 50, 50, 40, 60, 10)</y_pv>
+        <trace_type>2</trace_type>
+        <color><color red="255" green="0" blue="0"></color></color>
+        <line_width>1</line_width>
+        <line_style>1</line_style>
+      </trace>
+    </traces>
+  </widget>
+  <widget type="xyplot" version="3.0.0">
+    <name>XY</name>
+    <x>460</x>
+    <y>10</y>
+    <width>430</width>
+    <height>280</height>
+    <x_axis>
+      <title>Position (mm)</title>
+      <autoscale>false</autoscale>
+      <minimum>-5.0</minimum>
+      <maximum>5.0</maximum>
+    </x_axis>
+    <y_axes>
+      <y_axis>
+        <title>Left</title>
+        <autoscale>false</autoscale>
+        <minimum>0.0</minimum>
+        <maximum>1.0</maximum>
+      </y_axis>
+      <y_axis>
+        <title>Right</title>
+        <autoscale>true</autoscale>
+        <on_right>true</on_right>
+        <color><color red="0" green="128" blue="0"></color></color>
+      </y_axis>
+    </y_axes>
+    <traces>
+      <trace>
+        <name>Bars</name>
+        <x_pv>loc://xs&lt;VDoubleArray&gt;(-4, -3, -2, -1, 0, 1, 2, 3, 4)</x_pv>
+        <y_pv>loc://ys&lt;VDoubleArray&gt;(0.1, 0.3, 0.5, 0.8, 0.9, 0.7, 0.4, 0.2, 0.1)</y_pv>
+        <trace_type>5</trace_type>
+        <color><color red="255" green="160" blue="0"></color></color>
+      </trace>
+      <trace>
+        <name>Markers</name>
+        <x_pv>loc://xs&lt;VDoubleArray&gt;(-4, -3, -2, -1, 0, 1, 2, 3, 4)</x_pv>
+        <y_pv>loc://zs&lt;VDoubleArray&gt;(1200, 900, 400, 100, 0, 100, 400, 900, 1200)</y_pv>
+        <axis>1</axis>
+        <trace_type>0</trace_type>
+        <point_type>3</point_type>
+        <color><color red="0" green="128" blue="0"></color></color>
+      </trace>
+    </traces>
+  </widget>
+  <widget type="xyplot" version="3.0.0">
+    <name>Disconnected</name>
+    <x>10</x>
+    <y>310</y>
+    <width>430</width>
+    <height>200</height>
+    <traces>
+      <trace>
+        <name>$(traces[0].y_pv)</name>
+        <y_pv>sim://unknown</y_pv>
+      </trace>
+    </traces>
+  </widget>
+  <widget type="linearmeter" version="2.0.0">
+    <name>Horizontal</name>
+    <pv_name>sim://sine(-20, 20, 0.1)</pv_name>
+    <x>460</x>
+    <y>310</y>
+    <width>360</width>
+    <height>59</height>
+    <limits_from_pv>false</limits_from_pv>
+    <minimum>-25.0</minimum>
+    <maximum>25.0</maximum>
+    <level_lolo>-20.0</level_lolo>
+    <level_low>-10.0</level_low>
+    <level_high>10.0</level_high>
+    <level_hihi>20.0</level_hihi>
+  </widget>
+  <widget type="linearmeter" version="2.0.0">
+    <name>Vertical</name>
+    <pv_name>loc://level(42)</pv_name>
+    <x>840</x>
+    <y>310</y>
+    <width>50</width>
+    <height>200</height>
+    <display_horizontal>false</display_horizontal>
+    <level_lolo>5.0</level_lolo>
+    <level_low>10.0</level_low>
+    <level_high>90.0</level_high>
+    <level_hihi>95.0</level_hihi>
+  </widget>
+  <widget type="image" version="2.0.0">
+    <name>Image</name>
+    <pv_name>loc://pixels&lt;VDoubleArray&gt;(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)</pv_name>
+    <x>460</x>
+    <y>390</y>
+    <width>300</width>
+    <height>220</height>
+    <show_toolbar>true</show_toolbar>
+    <cursor_crosshair>true</cursor_crosshair>
+    <data_width>4</data_width>
+    <data_height>4</data_height>
+  </widget>
+</display>
