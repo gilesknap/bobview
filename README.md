@@ -200,9 +200,10 @@ launcher, and links to other modules work. The same goes for a BOY `.opi`
 screen reached by its real path from anywhere else (the file chooser, a
 layout, an absolute path in another screen), with the launcher in its
 folder or up to two above. This is for BOY screens only: a `.bob` (even one
-Phoebus-style in place of an `.opi`) keeps its real path. A `.project`
-nearer the screen than the launcher wins, as does one beside it that links
-the screen (an empty one, as many DLS modules have, does not). `-p` also
+Phoebus-style in place of an `.opi`, or one picked in a launcher project's
+folder) goes by its real path. A `.project` nearer the screen than the
+launcher, or beside it, wins when it links the screen (an empty one, as many
+DLS modules have, does not). `-p` also
 takes a module's screens folder (or its `runcss.sh`), to open another
 module's BOY screen through that module's links.
 

@@ -124,27 +124,23 @@ const LAUNCHER_DEPTH: usize = 3;
 /// the launcher in its folder or up to two above, as CS-Studio would open it
 /// from there: `…/opi/opi/x.opi` is
 /// `…/opi/opi/runcss.sh/vacuum_4-100/vacuum/x.opi`. `None` for a path that
-/// is not a real file, one in no launcher's linked folders, and one in an
-/// Eclipse project nearer than the launcher (a `.project` below it, or one
-/// beside it that links the file; DLS modules often have an empty one).
+/// is not a real file, one in no launcher's linked folders, and one that a
+/// `.project` nearer than the launcher (or beside it) links: a `.project`
+/// that links nothing, as many DLS modules have, does not count.
 pub fn launcher_path(real: &Path) -> Option<PathBuf> {
     if !real.is_file() {
         return None;
     }
     let abs = normalize(&std::path::absolute(real).ok()?);
     for dir in abs.ancestors().skip(1).take(LAUNCHER_DEPTH) {
-        let project = dir.join(".project").is_file();
+        if dir.join(".project").is_file() && virtual_path(dir, real).is_some() {
+            return None;
+        }
         let script = dir.join(LAUNCHER);
         if script.is_file() {
-            if project && virtual_path(dir, real).is_some() {
-                return None;
-            }
             return launcher_projects(&script)
                 .iter()
                 .find_map(|(project, _)| virtual_path(&script.join(project), real));
-        }
-        if project {
-            return None;
         }
     }
     None
@@ -626,7 +622,19 @@ $CSS_RUN_SCRIPT -o "${launch_opi}" -s -l "$links" "$@"
         let x = opi.join("runcss.sh/vac_1-2/vac/x.opi");
         assert_eq!(source(&opi.join("x.opi")), Some(crate::Source::File(x)));
         let y = opi.join("y.bob");
-        assert_eq!(source(&y), Some(crate::Source::File(y)));
+        assert_eq!(source(&y), Some(crate::Source::File(y.clone())));
+        // Nor does a `.bob` reached through the launcher's project: it goes
+        // by its real path, so its `..` names its real neighbours.
+        std::fs::create_dir_all(opi.join("sub")).unwrap();
+        let z = opi.join("sub/z.bob");
+        std::fs::write(&z, r#"<display version="2.0.0"/>"#).unwrap();
+        let d = crate::Display::load(&opi.join("runcss.sh/vac_1-2/vac/sub/z.bob")).unwrap();
+        assert_eq!(d.source, Some(crate::Source::File(z)));
+        let crate::Source::File(up) = d.resolve("../y.bob") else {
+            panic!("not a file")
+        };
+        assert_eq!(normalize(&up), y);
+        assert!(up.exists());
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -723,8 +731,19 @@ $CSS_RUN_SCRIPT -o "${launch_opi}" -s -l "$links" "$@"
     #[test]
     fn a_nearer_project_file_wins_over_a_launcher() {
         let (root, opi, _) = module("runcss-project", Some("1-2"));
-        std::fs::write(opi.join("common/.project"), "<projectDescription/>").unwrap();
-        assert_eq!(launcher_path(&opi.join("common/c.opi")), None);
+        let common = opi.join("common");
+        // Only if it links the screen.
+        std::fs::write(common.join(".project"), "<projectDescription/>").unwrap();
+        assert!(launcher_path(&common.join("c.opi")).is_some());
+        let linking = format!(
+            "<projectDescription><linkedResources>
+            <link><name>me</name><location>{}</location></link>
+            </linkedResources></projectDescription>",
+            common.display()
+        );
+        std::fs::write(common.join(".project"), linking).unwrap();
+        forget();
+        assert_eq!(launcher_path(&common.join("c.opi")), None);
         // One further away than the launcher does not.
         std::fs::write(root.join(".project"), "<projectDescription/>").unwrap();
         assert!(launcher_path(&opi.join("x.opi")).is_some());

@@ -74,13 +74,21 @@ impl Display {
     /// Read the display file at `path`, which may lie in an Eclipse
     /// project's linked folder (see [`project`]). A real BOY screen beside a
     /// DLS launcher is taken through the launcher's project (see
-    /// [`project::launcher_path`]), so the files it names do too.
+    /// [`project::launcher_path`]), so the files it names do too; any other
+    /// display reached through a launcher's project goes by its real path.
     pub fn load(path: &Path) -> Result<Self, Error> {
         let real = project::locate(path);
         let text = std::fs::read_to_string(&real).map_err(|e| Error::Io(path.into(), e))?;
         let mut display = Self::parse(&text)?;
-        let launched = display.legacy.then(|| project::launcher_path(path));
-        let path = launched.flatten().unwrap_or_else(|| path.to_path_buf());
+        // A launcher's project is for BOY screens: a `.bob` reached through
+        // one names its files from where it really is.
+        let path = if display.legacy {
+            project::launcher_path(path).unwrap_or_else(|| path.to_path_buf())
+        } else if project::through_launcher(path) {
+            real
+        } else {
+            path.to_path_buf()
+        };
         display.source = Some(Source::File(path));
         Ok(display)
     }

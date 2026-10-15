@@ -125,9 +125,7 @@ mod native {
         }
     }
 
-    /// The `.bob` next to an `.opi` file, which Phoebus opens in its place:
-    /// by its real path when the `.opi` goes through a DLS launcher's
-    /// project, which is for BOY screens only.
+    /// The `.bob` next to an `.opi` file, which Phoebus opens in its place.
     pub(super) fn bob_instead(path: &Path) -> Option<PathBuf> {
         if !path
             .extension()
@@ -136,15 +134,7 @@ mod native {
             return None;
         }
         let bob = path.with_extension("bob");
-        let real = bob::project::locate(&bob);
-        if !real.exists() {
-            return None;
-        }
-        Some(if bob::project::through_launcher(&bob) {
-            real
-        } else {
-            bob
-        })
+        bob::project::locate(&bob).exists().then_some(bob)
     }
 
     pub(super) fn get(url: &str) -> Result<Fetched, Error> {

@@ -178,10 +178,9 @@ fn main() -> eframe::Result {
         // A launcher's links are CS-Studio's, for BOY screens only.
         if bob::project::through_launcher(&project) && !is_opi(path) {
             eprintln!(
-                "{} is not a BOY .opi screen, which is all the {} in {} links",
+                "{}: {} links apply only to BOY .opi screens",
                 path.display(),
-                bob::project::LAUNCHER,
-                dir.display()
+                bob::project::LAUNCHER
             );
             std::process::exit(2);
         }
