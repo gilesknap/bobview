@@ -36,14 +36,18 @@ Open http://HOST:PORT/?display=FILE.bob in a browser (default index.bob).
                          files of the same name in the web build
   --write                let browsers write to PVs (off by default, as in PVWS);
                          every write must carry the write token
-  --write-token TOKEN    the token --write wants (default: a random one,
-                         printed at startup); a page passes it as &token=TOKEN
+  --write-token TOKEN    the token --write wants (default: $BOBVIEW_WRITE_TOKEN,
+                         else a random one printed at startup); a page passes
+                         it as &token=TOKEN. Prefer the variable: arguments
+                         show in `ps`
   --allow-origin ORIGIN  also let pages from ORIGIN connect, e.g.
                          https://host.example.com (may be repeated); other
                          pages than this server's own are refused
   --host NAME            let browsers call this server NAME, as well as an IP
                          address, localhost, this machine's name and the hosts
                          of --allow-origin (may be repeated)
+  --max-per-ip N         most clients at once from one address (default 10;
+                         raise it behind a reverse proxy, which is one address)
   --throttle-ms MS       least time between updates of one PV (default 100)
   -h, --help             show this help
   -V, --version          show the version
@@ -60,13 +64,15 @@ fn main() {
     let mut bind = "127.0.0.1".to_string();
     let mut web = None;
     let mut opi = None;
-    let mut token = None;
+    let mut token = std::env::var("BOBVIEW_WRITE_TOKEN").ok();
     let mut config = pvws::Config {
         write: false,
         write_token: String::new(),
         allow_origins: Vec::new(),
         hosts: Vec::new(),
         throttle: Duration::from_millis(100),
+        max_per_ip: 10,
+        ping: Duration::from_secs(30),
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -79,6 +85,7 @@ fn main() {
             "--write-token" => token = args.next(),
             "--allow-origin" => config.allow_origins.extend(args.next()),
             "--host" => config.hosts.extend(args.next()),
+            "--max-per-ip" => config.max_per_ip = parse(&arg, args.next()),
             "--throttle-ms" => config.throttle = Duration::from_millis(parse(&arg, args.next())),
             "-h" | "--help" => {
                 print!("{USAGE}");
@@ -101,12 +108,14 @@ fn main() {
                 eprintln!("--write-token: the token is empty");
                 std::process::exit(2);
             }
-            None => random_token(),
+            None => {
+                let token = random_token();
+                // Not the log: RUST_LOG=warn would hide it.
+                eprintln!("writes are on; pages must pass &token={token}");
+                token
+            }
         };
-        log::info!(
-            "writes are on; pages must pass &token={} (or the token in --write-token)",
-            config.write_token
-        );
+        log::info!("writes are on, and need the write token");
     } else if token.is_some() {
         log::warn!("--write-token does nothing without --write");
     }
@@ -118,10 +127,10 @@ fn main() {
         );
         std::process::exit(1);
     }
-    let addr: SocketAddr = match format!("{bind}:{port}").parse() {
-        Ok(addr) => addr,
+    let addr = match bind.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
+        Ok(ip) => SocketAddr::new(ip, port),
         Err(e) => {
-            eprintln!("bad address {bind}:{port}: {e}");
+            eprintln!("--bind {bind}: {e}");
             std::process::exit(2);
         }
     };

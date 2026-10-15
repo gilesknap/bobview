@@ -298,7 +298,7 @@ bobview's own CA/PVA client. Run it anywhere `caget` works:
 bobview-server --opi /path/to/displays
 ```
 
-and open `http://HOST:8080/?display=index.bob`. The release tarball includes
+and open `http://localhost:8080/?display=index.bob` (on this machine; from another, start the server with `--bind` and use its name). The release tarball includes
 `bobview-server` and the web build, which it finds in `share/bobview/web`; in
 a checkout, `./scripts/build-web.sh` writes `dist/web` (it needs the
 `wasm-bindgen` CLI matching `Cargo.lock`) and `--web DIR` picks another. Files
@@ -309,7 +309,13 @@ reach it; use `--bind 0.0.0.0` (every interface) or a specific address to serve
 others, ideally behind a firewall or an authenticating reverse proxy, since
 reading PVs needs no login. The server holds at most 100 clients and 50,000
 subscribed PVs, and refuses PV names over 256 characters or with spaces or
-non-ASCII characters.
+non-ASCII characters (so `loc://s("hello world")` is refused). One address
+may hold 10 clients (`--max-per-ip N`), and a client that stops answering
+websocket pings is dropped. Behind a reverse proxy every client has the
+proxy's address, so raise `--max-per-ip` and expect the logs to show the proxy;
+the `Host` the proxy passes on must also be one of the server's names, so give
+a public name with `--host NAME` (the Origin/Host check now applies to read-only
+servers too).
 
 The page also takes `&macros=P=X,R=Y`, `&zoom=F`, `&keypad` and, to use
 another PVWS server, `&pvws=host[:port]` (meaning `wss://host[:port]/pvws/pv`,
@@ -317,8 +323,10 @@ or `ws://` when the page is plain `http:` and the port isn't 443) or a full
 `ws://` or `wss://` URL; `display` may be a URL on another server that allows
 cross-origin requests. Writes are off unless the server has `--write`, since
 they go out as the server's user, and then each write must carry a token:
-`--write-token TOKEN`, or a random one that the server logs at startup; open
-the page with `&token=TOKEN`. Browsers let any page open a websocket, so the
+`--write-token TOKEN` (arguments show in `ps`, so prefer the
+`BOBVIEW_WRITE_TOKEN` environment variable), or a random one that the server
+prints to stderr at startup; open the page with `&token=TOKEN`. The page removes
+the token from its address after reading it, so a reload needs it again. Browsers let any page open a websocket, so the
 server always accepts only pages from itself (by `Origin`), plus
 any named with `--allow-origin https://host.example.com` (repeatable). Those
 pages must also call the server by an IP address, `localhost`, this machine's

@@ -5,10 +5,10 @@
 //! changed. Like PVWS, an update with neither `value` nor `text` means the PV
 //! is not connected.
 
-use std::collections::BTreeMap;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::collections::{BTreeMap, HashMap};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -35,6 +35,11 @@ pub struct Config {
     pub hosts: Vec<String>,
     /// Least time between two rounds of updates to one client.
     pub throttle: Duration,
+    /// Most clients connected at once from one address.
+    pub max_per_ip: usize,
+    /// How often to ping a client; one that has said nothing for two
+    /// intervals is dropped.
+    pub ping: Duration,
 }
 
 /// What every client connection shares.
@@ -44,8 +49,8 @@ pub struct Hub {
     /// Bumped after every PV change.
     changed: watch::Sender<()>,
     started: String,
-    /// Clients connected now.
-    clients: AtomicUsize,
+    /// Clients connected now, by address.
+    clients: Mutex<HashMap<IpAddr, usize>>,
     /// PVs subscribed to by all clients together.
     subscriptions: Arc<AtomicUsize>,
 }
@@ -65,27 +70,43 @@ impl Hub {
             config,
             changed,
             started,
-            clients: AtomicUsize::new(0),
+            clients: Mutex::new(HashMap::new()),
             subscriptions: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
 
 /// Counts a connected client until dropped.
-struct ClientSlot(Arc<Hub>);
+struct ClientSlot(Arc<Hub>, IpAddr);
 
 impl ClientSlot {
-    fn take(hub: &Arc<Hub>) -> Option<Self> {
-        let n = hub.clients.fetch_add(1, Ordering::SeqCst);
-        let slot = Self(hub.clone());
-        // Over the limit: dropping the slot gives the count back.
-        (n < MAX_CLIENTS).then_some(slot)
+    /// A slot for a client at `ip`, or why there is none.
+    fn take(hub: &Arc<Hub>, ip: IpAddr) -> Result<Self, String> {
+        let mut clients = hub.clients.lock().unwrap();
+        if clients.values().sum::<usize>() >= MAX_CLIENTS {
+            return Err(format!("{MAX_CLIENTS} clients already connected"));
+        }
+        let n = clients.entry(ip).or_default();
+        if *n >= hub.config.max_per_ip {
+            return Err(format!(
+                "{} clients already connected from {ip}",
+                hub.config.max_per_ip
+            ));
+        }
+        *n += 1;
+        Ok(Self(hub.clone(), ip))
     }
 }
 
 impl Drop for ClientSlot {
     fn drop(&mut self) {
-        self.0.clients.fetch_sub(1, Ordering::SeqCst);
+        let mut clients = self.0.clients.lock().unwrap();
+        if let Some(n) = clients.get_mut(&self.1) {
+            *n -= 1;
+            if *n == 0 {
+                clients.remove(&self.1);
+            }
+        }
     }
 }
 
@@ -99,6 +120,8 @@ const MAX_CLIENTS: usize = 100;
 const MAX_TOTAL_PVS: usize = 50_000;
 /// The longest PV name accepted.
 const MAX_NAME: usize = 256;
+/// The longest a send to one client may take before it is dropped.
+const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub async fn socket(
     State(hub): State<Arc<Hub>>,
@@ -119,9 +142,12 @@ pub async fn socket(
         );
         return StatusCode::FORBIDDEN.into_response();
     }
-    let Some(slot) = ClientSlot::take(&hub) else {
-        log::warn!("refused PVWS client {peer}: {MAX_CLIENTS} clients already connected");
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    let slot = match ClientSlot::take(&hub, peer.ip()) {
+        Ok(slot) => slot,
+        Err(why) => {
+            log::warn!("refused PVWS client {peer}: {why}");
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
     };
     ws.max_message_size(MAX_MESSAGE)
         .on_upgrade(move |socket| async move {
@@ -278,32 +304,57 @@ async fn serve(hub: &Hub, mut ws: WebSocket, peer: SocketAddr) {
     let mut subs = BTreeMap::new();
     let mut changed = hub.changed.subscribe();
     let mut last_round = Instant::now();
+    // Without pings a client that has vanished (or stopped reading) would
+    // keep its slot for ever.
+    let mut ping = tokio::time::interval(hub.config.ping);
+    let mut heard = Instant::now();
     loop {
         tokio::select! {
-            msg = ws.recv() => match msg {
-                Some(Ok(Message::Text(text))) => {
-                    let replies = handle(hub, &mut subs, &text, peer);
-                    // New subscriptions may already hold a value.
-                    if !send_all(&mut ws, replies).await || !send_updates(hub, &mut ws, &mut subs).await {
-                        break;
+            msg = ws.recv() => {
+                heard = Instant::now();
+                match msg {
+                    Some(Ok(Message::Text(text))) => {
+                        let replies = handle(hub, &mut subs, &text, peer);
+                        // New subscriptions may already hold a value.
+                        if !sent(send_all(&mut ws, replies)).await
+                            || !sent(send_updates(hub, &mut ws, &mut subs)).await
+                        {
+                            break;
+                        }
                     }
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                    Some(Ok(_)) => {}
                 }
-                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
-                Some(Ok(_)) => {}
-            },
+            }
+            _ = ping.tick() => {
+                if heard.elapsed() > hub.config.ping * 2 {
+                    log::info!("dropping PVWS client {peer}: no answer to pings");
+                    break;
+                }
+                if !sent(async { ws.send(Message::Ping(Default::default())).await.is_ok() }).await {
+                    break;
+                }
+            }
             result = changed.changed() => {
                 if result.is_err() {
                     break;
                 }
                 tokio::time::sleep_until((last_round + hub.config.throttle).into()).await;
                 last_round = Instant::now();
-                if !send_updates(hub, &mut ws, &mut subs).await {
+                if !sent(send_updates(hub, &mut ws, &mut subs)).await {
                     break;
                 }
             }
         }
     }
     log::debug!("PVWS client {peer} left with {} PVs", subs.len());
+}
+
+/// Whether a send finished, and in time.
+async fn sent(send: impl std::future::Future<Output = bool>) -> bool {
+    tokio::time::timeout(SEND_TIMEOUT, send)
+        .await
+        .unwrap_or(false)
 }
 
 /// Act on one client message, returning any replies.
@@ -326,6 +377,7 @@ fn handle(
     match msg.get("type").and_then(Json::as_str) {
         Some("subscribe" | "monitor") => {
             let mut refused = 0;
+            let mut refused_total = 0;
             let mut invalid = 0;
             for name in names() {
                 // A repeat subscription gets the full state again.
@@ -346,7 +398,7 @@ fn handle(
                         },
                     );
                 } else {
-                    refused += 1;
+                    refused_total += 1;
                 }
             }
             if invalid > 0 {
@@ -358,8 +410,13 @@ fn handle(
             }
             if refused > 0 {
                 return vec![error(format!(
-                    "Cannot subscribe to {refused} more PVs: at most {MAX_PVS} per client \
-                     and {MAX_TOTAL_PVS} in all"
+                    "Cannot subscribe to {refused} more PVs: at most {MAX_PVS} per client"
+                ))];
+            }
+            if refused_total > 0 {
+                return vec![error(format!(
+                    "Cannot subscribe to {refused_total} more PVs: the server is at its \
+                     limit of {MAX_TOTAL_PVS} PVs for all clients"
                 ))];
             }
             vec![]
@@ -742,6 +799,8 @@ mod tests {
             allow_origins: allow_origins.iter().map(|s| s.to_string()).collect(),
             hosts: hosts.iter().map(|s| s.to_string()).collect(),
             throttle: Duration::ZERO,
+            max_per_ip: 10,
+            ping: Duration::from_secs(30),
         }
     }
 
@@ -816,15 +875,74 @@ mod tests {
         assert_eq!(normalise_origin("https://host:80"), "https://host:80");
     }
 
+    /// A server on a free port with `config`, and its hub.
+    fn start(config: Config) -> (Arc<Hub>, SocketAddr, PvManager) {
+        let manager = PvManager::new();
+        let hub = Arc::new(Hub::new(manager.clone(), config));
+        let app = axum::Router::new()
+            .route("/pvws/pv", axum::routing::get(socket))
+            .with_state(hub.clone())
+            .into_make_service_with_connect_info::<SocketAddr>();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        manager.runtime().spawn(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            axum::serve(listener, app).await.unwrap();
+        });
+        (hub, addr, manager)
+    }
+
+    /// Open a websocket by hand; returns the stream and the status line.
+    async fn upgrade(addr: SocketAddr, origin: Option<&str>) -> (tokio::net::TcpStream, String) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let origin = origin.map_or(String::new(), |o| format!("Origin: {o}\r\n"));
+        let request = format!(
+            "GET /pvws/pv HTTP/1.1\r\nHost: {addr}\r\n{origin}Connection: Upgrade\r\n\
+             Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut status = String::new();
+        BufReader::new(&mut stream)
+            .read_line(&mut status)
+            .await
+            .unwrap();
+        (stream, status)
+    }
+
     #[test]
     fn origin_is_checked_without_writes() {
-        // browser_allowed does not look at `write`.
-        let mut read_only = config(&[], &["server"]);
+        let mut read_only = config(&[], &[]);
         read_only.write = false;
-        let ok = |host, origin| browser_allowed(&headers(host, origin), &read_only);
-        assert!(!ok("evil.example:8080", Some("http://evil.example:8080")));
-        assert!(!ok("server:8080", Some("http://evil:8080")));
-        assert!(ok("server:8080", Some("http://server:8080")));
+        let (_hub, addr, manager) = start(read_only);
+        manager.runtime().block_on(async {
+            let (_s, status) = upgrade(addr, Some("http://evil.example")).await;
+            assert!(status.contains("403"), "{status}");
+            let (_s, status) = upgrade(addr, Some(&format!("http://{addr}"))).await;
+            assert!(status.contains("101"), "{status}");
+        });
+    }
+
+    #[test]
+    fn silent_clients_are_dropped() {
+        let mut quick = config(&[], &[]);
+        quick.ping = Duration::from_millis(50);
+        let (hub, addr, manager) = start(quick);
+        manager.runtime().block_on(async {
+            // Connects, then neither reads nor answers pings.
+            let (stream, status) = upgrade(addr, None).await;
+            assert!(status.contains("101"), "{status}");
+            assert_eq!(hub.clients.lock().unwrap().len(), 1);
+            let mut waited = 0;
+            while !hub.clients.lock().unwrap().is_empty() {
+                assert!(waited < 100, "the silent client kept its slot");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                waited += 1;
+            }
+            drop(stream);
+        });
     }
 
     #[test]
@@ -850,13 +968,23 @@ mod tests {
     #[test]
     fn client_and_subscription_caps() {
         let hub = Arc::new(Hub::new(PvManager::new(), config(&[], &[])));
+        let ip = |n: usize| IpAddr::from([10, 0, (n / 250) as u8, (n % 250) as u8]);
         let slots: Vec<_> = (0..MAX_CLIENTS)
-            .map(|_| ClientSlot::take(&hub).expect("under the cap"))
+            .map(|n| ClientSlot::take(&hub, ip(n)).expect("under the cap"))
             .collect();
-        assert!(ClientSlot::take(&hub).is_none());
+        assert!(ClientSlot::take(&hub, ip(MAX_CLIENTS)).is_err());
         drop(slots);
-        assert_eq!(hub.clients.load(Ordering::SeqCst), 0);
-        assert!(ClientSlot::take(&hub).is_some());
+        assert!(hub.clients.lock().unwrap().is_empty());
+        assert!(ClientSlot::take(&hub, ip(0)).is_ok());
+
+        // One address gets only its share.
+        let mine: Vec<_> = (0..10)
+            .map(|_| ClientSlot::take(&hub, ip(1)).expect("under the per-address cap"))
+            .collect();
+        assert!(ClientSlot::take(&hub, ip(1)).is_err());
+        assert!(ClientSlot::take(&hub, ip(2)).is_ok());
+        drop(mine);
+        assert!(ClientSlot::take(&hub, ip(1)).is_ok());
 
         let total = Arc::new(AtomicUsize::new(MAX_TOTAL_PVS - 1));
         let last = SubSlot::take(&total).expect("one left");
