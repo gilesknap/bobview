@@ -61,6 +61,8 @@ pub struct BobApp {
     keypad: Option<Keypad>,
     /// The PV details dialog, and the window it was asked for in.
     details: Option<(WindowKey, pvmenu::Details)>,
+    /// A write from a display from the web, waiting for the user's say-so.
+    confirm: Option<Confirm>,
     /// The saved layouts, for the toolbar's menus.
     layouts: LayoutList,
     /// Open trend windows, and the id the next one gets.
@@ -81,6 +83,12 @@ struct Launched {
     origin: Origin,
     shown: u64,
     target: Option<Location>,
+}
+
+struct Confirm {
+    window: WindowKey,
+    pv: pv::Pv,
+    value: String,
 }
 
 struct Keypad {
@@ -204,6 +212,7 @@ impl BobApp {
             keypad_mode: false,
             keypad: None,
             details: None,
+            confirm: None,
             layouts: LayoutList::default(),
             trends: Vec::new(),
             next_trend: 0,
@@ -214,6 +223,15 @@ impl BobApp {
             app.main.show(loc);
         }
         app
+    }
+
+    /// Refuse every write to a PV (see [`pv::PvManager::set_read_only`]).
+    #[cfg_attr(
+        target_arch = "wasm32",
+        expect(dead_code, reason = "a browser's PVs come from the server's policy")
+    )]
+    pub fn set_read_only(&mut self, on: bool) {
+        self.pvs.set_read_only(on);
     }
 
     pub fn set_keypad(&mut self, on: bool) {
@@ -1033,11 +1051,15 @@ impl BobApp {
         if self.details.as_ref().is_some_and(|(w, _)| closed(*w)) {
             self.details = None;
         }
+        if self.confirm.as_ref().is_some_and(|c| closed(c.window)) {
+            self.confirm = None;
+        }
         dialogs(
             ui.ctx(),
             WindowKey::Main,
             &mut self.keypad,
             &mut self.details,
+            &mut self.confirm,
         );
         self.save_as_window(ui);
         self.trend_windows(ui);
@@ -1056,6 +1078,10 @@ impl BobApp {
             // already this frame.
             Request::Keypad { pv, text } => {
                 self.keypad = Some(Keypad { window, pv, text });
+                ctx.request_repaint();
+            }
+            Request::ConfirmWrite { pv, value } => {
+                self.confirm = Some(Confirm { window, pv, value });
                 ctx.request_repaint();
             }
             Request::Details(details) => {
@@ -1108,7 +1134,7 @@ impl BobApp {
         // Closed by Exit or Ctrl+W since they were last drawn.
         self.windows.retain(|w| !w.close);
         let (home, keypad, auto_size) = (&self.home, self.keypad_mode, self.chrome.auto_size);
-        let (pad, details) = (&mut self.keypad, &mut self.details);
+        let (pad, details, confirm) = (&mut self.keypad, &mut self.details, &mut self.confirm);
         for w in &mut self.windows {
             let key = WindowKey::Child(w.id);
             let vcx = ViewCx {
@@ -1131,7 +1157,7 @@ impl BobApp {
                     .show(&ctx, |ui| {
                         requests.extend(child_ui(ui, w, home, &vcx, None));
                     });
-                dialogs(&ctx, key, pad, details);
+                dialogs(&ctx, key, pad, details, confirm);
                 w.close |= !open;
                 continue;
             }
@@ -1140,7 +1166,7 @@ impl BobApp {
                 // No native windows after all: a window in this one.
                 let native = (class != egui::ViewportClass::EmbeddedWindow).then_some(auto_size);
                 requests.extend(child_ui(ui, w, home, &vcx, native));
-                dialogs(ui.ctx(), key, pad, details);
+                dialogs(ui.ctx(), key, pad, details, confirm);
                 // Closing the window drops its view, and its PVs with it.
                 if ui.input(|i| i.viewport().close_requested()) {
                     w.close = true;
@@ -1215,12 +1241,47 @@ fn dialogs(
     window: WindowKey,
     keypad: &mut Option<Keypad>,
     details: &mut Option<(WindowKey, pvmenu::Details)>,
+    confirm: &mut Option<Confirm>,
 ) {
+    if confirm.as_ref().is_some_and(|c| c.window == window) {
+        confirm_window(ctx, confirm);
+    }
     if keypad.as_ref().is_some_and(|k| k.window == window) {
         keypad_window(ctx, keypad);
     }
     if details.as_ref().is_some_and(|(w, _)| *w == window) {
         details_window(ctx, details);
+    }
+}
+
+/// Ask whether to write the value a display from the web asked for.
+fn confirm_window(ctx: &egui::Context, confirm: &mut Option<Confirm>) {
+    let Some(c) = confirm.as_ref() else {
+        return;
+    };
+    let mut answer = None;
+    egui::Window::new("Write to PV?")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.label("A display loaded from the web asks to write");
+            ui.monospace(format!("{} = {}", plain_name(c.pv.name()), c.value));
+            ui.horizontal(|ui| {
+                answer = if ui.button("Write").clicked() {
+                    Some(true)
+                } else if ui.button("Cancel").clicked() {
+                    Some(false)
+                } else {
+                    None
+                };
+            });
+        });
+    if let Some(yes) = answer {
+        if yes {
+            c.pv.write(c.value.clone());
+        }
+        *confirm = None;
     }
 }
 

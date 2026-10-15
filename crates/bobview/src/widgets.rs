@@ -31,6 +31,12 @@ pub enum Request {
     Trend(Vec<String>),
     /// Add these PVs to the open trend window with this id.
     TrendAdd(u64, Vec<String>),
+    /// Ask before writing `value` to `pv`, as a `write_pv` action of a
+    /// display from the web asked to.
+    ConfirmWrite {
+        pv: pv::Pv,
+        value: String,
+    },
     /// Close the display: go back to the one before, or close the window.
     Close,
     /// Run a command action of the display at `base` (see
@@ -678,6 +684,12 @@ fn can_write(w: &Widget, s: Option<&PvState>) -> bool {
     !is_disabled(w, s) && s.is_some_and(|s| s.connected)
 }
 
+/// A write action of a display from the web (which anyone may have written)
+/// needs the user's say-so; one of a local file does not.
+fn write_needs_confirmation(base: Option<&Source>) -> bool {
+    base.is_some_and(Source::is_url)
+}
+
 fn write(node: &Node, value: impl Into<String>) {
     if let Some(pv) = &node.pv {
         if can_write(&node.w, Some(&pv.state())) {
@@ -1236,13 +1248,19 @@ pub(crate) fn run_action(node: &Node, action: &Action, cx: &mut Cx) {
         Action::WritePv { pv_name, value, .. } => {
             let name = node.expand(pv_name);
             let value = node.expand(value);
-            match node
+            let pv = match node
                 .action_pvs
                 .iter()
                 .find(|p| p.name().to_string() == pv::PvName::parse(&name).to_string())
             {
-                Some(pv) => pv.write(value),
-                None => cx.pvs.subscribe(&name).write(value),
+                Some(pv) => pv.clone(),
+                None => cx.pvs.subscribe(&name),
+            };
+            if write_needs_confirmation(node.base.as_ref()) && !cx.pvs.read_only() {
+                cx.requests.push(Request::ConfirmWrite { pv, value });
+            } else {
+                // In read-only mode the PV refuses, and says so.
+                pv.write(value);
             }
         }
         Action::OpenWebpage { url, .. } => {
@@ -2068,6 +2086,16 @@ pub(crate) fn alarm_border(painter: &egui::Painter, w: &Widget, s: &PvState, rec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn writes_of_displays_from_the_web_need_confirmation() {
+        let url = Source::parse("https://host/a.bob");
+        assert!(write_needs_confirmation(Some(&url)));
+        assert!(!write_needs_confirmation(Some(&Source::parse(
+            "/tmp/a.bob"
+        ))));
+        assert!(!write_needs_confirmation(None));
+    }
 
     #[test]
     fn only_resize_mode_1_scales_embedded_content() {

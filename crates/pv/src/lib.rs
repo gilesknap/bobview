@@ -27,6 +27,7 @@ mod sim;
 mod value;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -57,8 +58,28 @@ pub(crate) enum Writer {
     Pvws(String),
 }
 
+/// Settings and messages shared by every PV of one [`PvManager`].
+#[derive(Default)]
+pub(crate) struct Control {
+    /// Refuse every write except to `loc://` PVs (which only live here).
+    read_only: AtomicBool,
+    /// The latest message for the user (a refused or failed write), with a
+    /// number that changes with each one.
+    notice: Mutex<(u64, String)>,
+}
+
+impl Control {
+    pub(crate) fn notify(&self, text: String) {
+        log::warn!("{text}");
+        let mut n = self.notice.lock().unwrap();
+        *n = (n.0 + 1, text);
+    }
+}
+
 /// State shared between a [`Pv`] handle and the task serving it.
 pub(crate) struct Shared {
+    ctl: Arc<Control>,
+    name: String,
     state: Mutex<PvState>,
     writer: Mutex<Option<Writer>>,
     notify: Arc<RwLock<Option<Notifier>>>,
@@ -66,8 +87,10 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    fn new(notify: Arc<RwLock<Option<Notifier>>>) -> Arc<Self> {
+    fn new(name: &PvName, notify: Arc<RwLock<Option<Notifier>>>, ctl: Arc<Control>) -> Arc<Self> {
         Arc::new(Self {
+            ctl,
+            name: name.to_string(),
             state: Mutex::new(PvState::default()),
             writer: Mutex::new(None),
             notify,
@@ -97,6 +120,16 @@ impl Shared {
 
     pub(crate) fn snapshot(&self) -> PvState {
         self.state.lock().unwrap().clone()
+    }
+
+    /// A put failed (or worked, with `None`): remember why, and tell the user.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn write_result(&self, text: &str, error: Option<String>) {
+        if let Some(e) = &error {
+            self.ctl
+                .notify(format!("{}: write '{text}' failed: {e}", self.name));
+        }
+        self.update(|s| s.write_error = error);
     }
 
     pub(crate) fn set_writer(&self, writer: Writer) {
@@ -136,7 +169,20 @@ impl Pv {
 
     /// The latest value, alarm and metadata.
     pub fn state(&self) -> PvState {
-        self.0.shared.snapshot()
+        let mut state = self.0.shared.snapshot();
+        if self.refuses_writes() {
+            state.writable = false;
+            state.writable_known = true;
+        }
+        state
+    }
+
+    /// Whether read-only mode (see [`PvManager::set_read_only`]) stops writes
+    /// to this PV: all but local ones, which cannot reach a control system.
+    fn refuses_writes(&self) -> bool {
+        let shared = &self.0.shared;
+        shared.ctl.read_only.load(Ordering::Relaxed)
+            && !matches!(*shared.writer.lock().unwrap(), Some(Writer::Local))
     }
 
     /// Call `listener` with the current state now and with each change
@@ -156,6 +202,13 @@ impl Pv {
     pub fn write(&self, value: impl Into<String>) {
         let value = value.into();
         let shared = &self.0.shared;
+        if self.refuses_writes() {
+            shared.ctl.notify(format!(
+                "{}: not writing '{value}', bobview is read-only",
+                shared.name
+            ));
+            return;
+        }
         match shared.writer.lock().unwrap().as_ref() {
             #[cfg(not(target_arch = "wasm32"))]
             Some(Writer::Channel(tx)) => {
@@ -166,7 +219,9 @@ impl Pv {
             }
             #[cfg(target_arch = "wasm32")]
             Some(Writer::Pvws(name)) => pvws::write(name, &shared.snapshot(), value),
-            None => log::warn!("{} is read-only", self.0.name),
+            None => shared
+                .ctl
+                .notify(format!("{} cannot be written", shared.name)),
         }
     }
 }
@@ -190,6 +245,7 @@ struct Inner {
     #[cfg(not(target_arch = "wasm32"))]
     pva: Arc<std::sync::OnceLock<epics_pva_rs::client::PvaClient>>,
     notify: Arc<RwLock<Option<Notifier>>>,
+    ctl: Arc<Control>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -234,6 +290,7 @@ impl PvManager {
                 entries: Mutex::default(),
                 locals: Mutex::new(HashMap::new()),
                 notify: Arc::new(RwLock::new(None)),
+                ctl: Arc::default(),
             }),
         }
     }
@@ -254,6 +311,7 @@ impl PvManager {
                 ca: Arc::new(tokio::sync::OnceCell::new()),
                 pva: Arc::new(std::sync::OnceLock::new()),
                 notify: Arc::new(RwLock::new(None)),
+                ctl: Arc::default(),
             }),
         }
     }
@@ -261,6 +319,22 @@ impl PvManager {
     /// Register a callback run after every PV change.
     pub fn set_notifier(&self, notifier: Notifier) {
         *self.inner.notify.write().unwrap() = Some(notifier);
+    }
+
+    /// Refuse (or allow again) writes to every PV but `loc://` ones; PVs then
+    /// report themselves not writable, so controls are disabled.
+    pub fn set_read_only(&self, read_only: bool) {
+        self.inner.ctl.read_only.store(read_only, Ordering::Relaxed);
+    }
+
+    pub fn read_only(&self) -> bool {
+        self.inner.ctl.read_only.load(Ordering::Relaxed)
+    }
+
+    /// The latest message for the user about a refused or failed write, and a
+    /// number that changes with each new one (starting at 0 for none).
+    pub fn notice(&self) -> (u64, String) {
+        self.inner.ctl.notice.lock().unwrap().clone()
     }
 
     /// The tokio runtime the PV tasks run on.
@@ -281,7 +355,7 @@ impl PvManager {
         let (shared, task) = match name.scheme {
             Scheme::Loc => (self.local(&name), None),
             _ => {
-                let shared = Shared::new(self.inner.notify.clone());
+                let shared = Shared::new(&name, self.inner.notify.clone(), self.inner.ctl.clone());
                 let task = self.spawn_backend(&name, shared.clone());
                 (shared, task)
             }
@@ -295,7 +369,12 @@ impl PvManager {
         let mut locals = self.inner.locals.lock().unwrap();
         locals
             .entry(name.key())
-            .or_insert_with(|| local::create(name, Shared::new(self.inner.notify.clone())))
+            .or_insert_with(|| {
+                local::create(
+                    name,
+                    Shared::new(name, self.inner.notify.clone(), self.inner.ctl.clone()),
+                )
+            })
             .clone()
     }
 
@@ -360,6 +439,42 @@ mod tests {
         drop(listener);
         pv.write("4");
         assert_eq!(*seen.lock().unwrap(), [Some(1.0), Some(2.0), Some(3.0)]);
+    }
+
+    #[test]
+    fn read_only_refuses_writes_but_not_local_ones() {
+        let pvs = PvManager::new();
+        pvs.set_read_only(true);
+        let sim = pvs.subscribe("sim://sine");
+        let state = sim.state();
+        assert!(!state.writable && state.writable_known);
+        sim.write("1");
+        let (n, text) = pvs.notice();
+        assert_eq!(n, 1);
+        assert!(text.contains("read-only"), "{text}");
+
+        let loc = pvs.subscribe("loc://ro_test(1)");
+        assert!(loc.state().writable);
+        loc.write("5");
+        assert_eq!(loc.state().value.as_f64(), Some(5.0));
+        assert_eq!(pvs.notice().0, 1);
+
+        pvs.set_read_only(false);
+        assert!(!pvs.read_only());
+    }
+
+    #[test]
+    fn a_failed_put_is_remembered_until_one_works() {
+        let pvs = PvManager::new();
+        let pv = pvs.subscribe("sim://sine");
+        let shared = &pv.0.shared;
+        shared.write_result("3", Some("no write access".into()));
+        assert_eq!(pv.state().write_error.as_deref(), Some("no write access"));
+        let (n, text) = pvs.notice();
+        assert_eq!(n, 1);
+        assert!(text.contains("write '3' failed: no write access"), "{text}");
+        shared.write_result("4", None);
+        assert_eq!(pv.state().write_error, None);
     }
 
     #[test]

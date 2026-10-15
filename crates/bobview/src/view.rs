@@ -51,6 +51,9 @@ pub struct ViewCx<'a> {
     pub trends: &'a [(u64, String)],
 }
 
+/// How long a PV write notice stays in the status line.
+const NOTICE_SECONDS: f64 = 8.0;
+
 /// A display shown in a window, with its history and zoom.
 pub struct View {
     pvs: PvManager,
@@ -71,6 +74,9 @@ pub struct View {
     pub open_path: String,
     /// The display at `current`, being fetched and built on a thread.
     loading: Option<Loading>,
+    /// The latest write notice seen (see [`PvManager::notice`]) and the
+    /// time, in egui seconds, it was first shown, to hide it after a while.
+    notice_seen: (u64, f64),
     /// Command actions still being worked out, so a double click runs one.
     pub launching: Vec<LaunchKey>,
     /// Bumped on every `show`, so a launch started on another display is dropped.
@@ -106,6 +112,7 @@ impl View {
             open_path: String::new(),
             loading: None,
             launching: Vec::new(),
+            notice_seen: (0, 0.0),
             shown: 0,
             window_title: String::new(),
         }
@@ -362,8 +369,29 @@ impl View {
         }
     }
 
-    fn status(&self, ui: &mut egui::Ui) {
+    /// The PV write notice to show now, if one is recent: shown for
+    /// [`NOTICE_SECONDS`] from the frame it first appears in.
+    fn notice(&mut self, ui: &egui::Ui) -> Option<String> {
+        let (n, text) = self.pvs.notice();
+        let now = ui.input(|i| i.time);
+        if n != self.notice_seen.0 {
+            self.notice_seen = (n, now);
+        }
+        let left = NOTICE_SECONDS - (now - self.notice_seen.1);
+        if n == 0 || left <= 0.0 {
+            return None;
+        }
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs_f64(left));
+        Some(text)
+    }
+
+    fn status(&mut self, ui: &mut egui::Ui) {
+        let notice = self.notice(ui);
         ui.horizontal(|ui| {
+            if let Some(text) = notice {
+                ui.colored_label(Color32::from_rgb(0xb0, 0x30, 0x00), text);
+            }
             if let Some(e) = &self.error {
                 ui.colored_label(Color32::RED, e);
             } else if self.loading.is_some()
