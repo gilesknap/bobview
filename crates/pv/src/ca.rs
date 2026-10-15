@@ -52,8 +52,6 @@ pub(crate) async fn run(client: &CaClient, pv: &str, shared: Arc<Shared>) {
                 None => return,
             },
             Some(text) = writes.recv() => {
-                let channel = channel.clone();
-                let pv = pv.to_string();
                 // Arrays are typed as they are shown, `[1, 2]` or `["a", "b"]`;
                 // the server converts each string element to the field type.
                 let items: Option<Vec<String>> = match shared.snapshot().value {
@@ -63,16 +61,19 @@ pub(crate) async fn run(client: &CaClient, pv: &str, shared: Arc<Shared>) {
                     Value::StrArray(_) => Some(crate::split_strings(&text)),
                     _ => None,
                 };
-                tokio::spawn(async move {
-                    let result = if let Some(items) = items {
-                        channel.put_string_array(&items).await
-                    } else {
-                        channel.put_string(&text).await
-                    };
-                    if let Err(e) = result {
-                        log::warn!("{pv}: write '{text}' failed: {e}");
-                    }
-                });
+                // Plain CA_PROTO_WRITE, as Phoebus does: a put-callback on a
+                // busy record (areaDetector Acquire) completes only when it
+                // returns to 0, and the IOC queues any later put-callback on
+                // that record behind it, so Stop could never reach it.
+                // Sent here, not on a spawned task, so writes keep their order.
+                let result = if let Some(items) = items {
+                    channel.put_string_array_nowait(&items).await
+                } else {
+                    channel.put_string_nowait(&text).await
+                };
+                if let Err(e) = result {
+                    log::warn!("{pv}: write '{text}' failed: {e}");
+                }
             }
         }
     }
