@@ -12,6 +12,7 @@ use asyn_rs::interfaces::motor::AsynMotor;
 use epics_base_rs::error::{CaError, CaResult};
 use epics_base_rs::server::database::db_access::DbChannel;
 use epics_base_rs::server::device_support::DeviceSupport;
+use epics_base_rs::server::records::busy::BusyRecord;
 use epics_base_rs::server::scan::ScanOwner;
 use epics_ca_rs::server::CaServer;
 use epics_pva_rs::server::native_source::PvDatabaseSource;
@@ -126,6 +127,7 @@ pub async fn build(parts: &[Part], ca_port: Option<u16>, pva_port: Option<u16>) 
         }
     }
     if parts.contains(&Part::Cam) {
+        b = b.register_record_type("busy", || Box::new(BusyRecord::new()));
         b = b.db_string(CAM_DB, &macros(&[("P", CAM_P), ("R", ":DET:")]))?;
         for r in cam::PLUGINS {
             b = b.db_string(PLUGIN_DB, &macros(&[("P", CAM_P), ("R", r)]))?;

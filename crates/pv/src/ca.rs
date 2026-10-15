@@ -63,11 +63,15 @@ pub(crate) async fn run(client: &CaClient, pv: &str, shared: Arc<Shared>) {
                     Value::StrArray(_) => Some(crate::split_strings(&text)),
                     _ => None,
                 };
+                // Plain CA_PROTO_WRITE, as Phoebus does: a put-callback on a
+                // busy record (areaDetector Acquire) completes only when it
+                // returns to 0, and the IOC queues any later put-callback on
+                // that record behind it, so Stop could never reach it.
                 tokio::spawn(async move {
                     let result = if let Some(items) = items {
-                        channel.put_string_array(&items).await
+                        channel.put_string_array_nowait(&items).await
                     } else {
-                        channel.put_string(&text).await
+                        channel.put_string_nowait(&text).await
                     };
                     if let Err(e) = result {
                         log::warn!("{pv}: write '{text}' failed: {e}");

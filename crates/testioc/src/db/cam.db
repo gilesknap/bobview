@@ -1,7 +1,8 @@
 # A cut-down simDetector: the ADBase and NDPluginBase records demo.bob uses.
 # Setpoint _RBV mirrors follow by CP link; the rest are written by cam.rs.
 
-record(bo, "$(P)$(R)Acquire") {
+# busy, as in ADCore: a put-callback on it completes only when acquisition ends.
+record(busy, "$(P)$(R)Acquire") {
     field(ZNAM, "Done")
     field(ONAM, "Acquire")
 }
