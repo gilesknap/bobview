@@ -1,0 +1,443 @@
+//! One display and its navigation: what a window shows.
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::mpsc::{Receiver, TryRecvError};
+use std::time::Duration;
+
+use eframe::egui::{self, Color32, Id, Vec2};
+use pv::PvManager;
+
+use crate::app::Location;
+use crate::screen::{Node, Screen};
+use crate::style;
+use crate::widgets::{self, Cx, Request};
+
+/// The window a view is drawn in, and so the window a widget's request acts
+/// on (Back, Reload and Close act on their own window).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum WindowKey {
+    /// The main window, with the toolbar.
+    Main,
+    /// A display window of its own.
+    Child(egui::ViewportId),
+}
+
+/// Where a request came from: its window, and whether ctrl was held as it
+/// was made (a link then navigates in place in multi-window mode).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Origin {
+    pub window: WindowKey,
+    pub ctrl: bool,
+}
+
+/// What drawing a view gives back.
+pub struct Drawn {
+    /// The status line's height.
+    pub status: f32,
+    pub requests: Vec<(Origin, Request)>,
+    /// The display area behind the widgets, in a display window, for its
+    /// context menu.
+    pub background: Option<egui::Response>,
+}
+
+/// What a view needs from the application to draw: owned or shared, so a
+/// view can be drawn without the rest of the application.
+pub struct ViewCx<'a> {
+    pub window: WindowKey,
+    /// Text entries open the on-screen keypad instead of taking keyboard focus.
+    pub keypad: bool,
+    /// The open trend windows, (id, title), that a PV's context menu can
+    /// add it to.
+    pub trends: &'a [(u64, String)],
+}
+
+/// A display shown in a window, with its history and zoom.
+pub struct View {
+    pvs: PvManager,
+    pub screen: Option<Screen>,
+    pub current: Option<Location>,
+    pub back: Vec<Location>,
+    pub forward: Vec<Location>,
+    pub zoom: f32,
+    pub fit: bool,
+    error: Option<String>,
+    /// The display being loaded is the current one again: keep the window size.
+    reloading: bool,
+    /// A new display (not a reload) was shown, for the window to size itself
+    /// to; also set when one failed to load, so a window stops keeping the
+    /// size a layout gave it.
+    pub new_display: bool,
+    /// The path in the Open panel, following the display shown.
+    pub open_path: String,
+    /// The display at `current`, being fetched and built on a thread.
+    loading: Option<Loading>,
+    /// Command actions still being worked out, so a double click runs one.
+    pub launching: Vec<LaunchKey>,
+    /// Bumped on every `show`, so a launch started on another display is dropped.
+    pub shown: u64,
+    /// The window title last set, the shown display's title.
+    window_title: String,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+type Loading = Receiver<Result<Screen, bob::Error>>;
+/// In a browser, the display's files are fetched first and it is built
+/// once they have all arrived.
+#[cfg(target_arch = "wasm32")]
+struct Loading;
+
+/// What makes two command actions the same: base, directory and command.
+pub type LaunchKey = (Option<String>, Option<String>, String);
+
+impl View {
+    /// An empty view: `zoom` fixed, or fit to the window when None.
+    pub fn new(pvs: &PvManager, zoom: Option<f32>) -> Self {
+        Self {
+            pvs: pvs.clone(),
+            screen: None,
+            current: None,
+            back: Vec::new(),
+            forward: Vec::new(),
+            zoom: zoom.unwrap_or(1.0),
+            fit: zoom.is_none(),
+            error: None,
+            reloading: false,
+            new_display: false,
+            open_path: String::new(),
+            loading: None,
+            launching: Vec::new(),
+            shown: 0,
+            window_title: String::new(),
+        }
+    }
+
+    /// Load and show a display, without touching the history.
+    pub fn show(&mut self, loc: Location) {
+        // Drop the old screen first so its PVs disconnect before the new ones start.
+        self.screen = None;
+        self.shown += 1;
+        self.open_path = loc.source.to_string();
+        #[cfg(target_arch = "wasm32")]
+        set_page_url(&loc);
+        self.loading = None;
+        // In a browser `poll_loading` fetches and builds every display.
+        #[cfg(target_arch = "wasm32")]
+        let fetch_first = true;
+        #[cfg(not(target_arch = "wasm32"))]
+        let fetch_first = loc.source.is_url();
+        if fetch_first {
+            self.loading = Some(self.start_loading(&loc));
+            self.error = None;
+            self.current = Some(loc);
+            return;
+        }
+        let loaded = Screen::load(&loc.source, &loc.macros, &self.pvs);
+        self.current = Some(loc);
+        self.loaded(loaded);
+    }
+
+    /// Build a fetched display on a thread, embedded displays and all, so a
+    /// slow server doesn't freeze the window; `poll_loading` shows it once
+    /// it arrives.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn start_loading(&self, loc: &Location) -> Loading {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (source, macros, pvs) = (loc.source.clone(), loc.macros.clone(), self.pvs.clone());
+        std::thread::spawn(move || {
+            tx.send(Screen::load(&source, &macros, &pvs)).ok();
+        });
+        rx
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn start_loading(&self, _loc: &Location) -> Loading {
+        Loading
+    }
+
+    /// Show a loaded display, or why it could not be loaded.
+    fn loaded(&mut self, loaded: Result<Screen, bob::Error>) {
+        match loaded {
+            Ok(screen) => {
+                self.screen = Some(screen);
+                self.error = None;
+                // A reload keeps the size the user gave the window.
+                if !self.reloading {
+                    self.new_display = true;
+                }
+            }
+            Err(e) => {
+                log::error!("{e}");
+                self.error = Some(e.to_string());
+                if !self.reloading {
+                    self.new_display = true;
+                }
+            }
+        }
+        self.reloading = false;
+    }
+
+    /// Whether a display, or one named by a command action, is still being
+    /// worked out.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn is_loading(&self) -> bool {
+        self.loading.is_some() || !self.launching.is_empty()
+    }
+
+    /// Build the display once its files have arrived, fetching more if
+    /// building it finds it names others.
+    #[cfg(target_arch = "wasm32")]
+    pub fn poll_loading(&mut self, ctx: &egui::Context) {
+        if self.loading.is_none() {
+            return;
+        }
+        if !crate::fetch::pending()
+            && let Some(cur) = &self.current
+        {
+            let loaded = Screen::load(&cur.source, &cur.macros, &self.pvs);
+            if !crate::fetch::pending() {
+                self.loading = None;
+                self.loaded(loaded);
+                return;
+            }
+        }
+        ctx.request_repaint_after(Duration::from_millis(50));
+    }
+
+    /// Show the display being fetched, or its error, once the fetch is done.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn poll_loading(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.loading else { return };
+        match rx.try_recv() {
+            Err(TryRecvError::Empty) => {
+                ctx.request_repaint_after(Duration::from_millis(50));
+            }
+            Ok(loaded) => {
+                self.loading = None;
+                self.loaded(loaded);
+            }
+            Err(TryRecvError::Disconnected) => self.loading = None,
+        }
+    }
+
+    /// Navigate to a display, recording where we came from.
+    pub fn open(&mut self, loc: Location) {
+        if let Some(cur) = self.current.take() {
+            self.back.push(cur);
+        }
+        self.forward.clear();
+        self.show(loc);
+    }
+
+    pub fn go_back(&mut self) {
+        if let Some(loc) = self.back.pop() {
+            if let Some(cur) = self.current.take() {
+                self.forward.push(cur);
+            }
+            self.show(loc);
+        }
+    }
+
+    pub fn go_forward(&mut self) {
+        if let Some(loc) = self.forward.pop() {
+            if let Some(cur) = self.current.take() {
+                self.back.push(cur);
+            }
+            self.show(loc);
+        }
+    }
+
+    pub fn reload(&mut self) {
+        if let Some(cur) = self.current.clone() {
+            crate::fetch::forget();
+            crate::symbol::forget();
+            self.reloading = true;
+            self.show(cur);
+        }
+    }
+
+    pub fn zoom_by(&mut self, factor: f32) {
+        self.fit = false;
+        self.zoom = (self.zoom * factor).clamp(0.2, 5.0);
+    }
+
+    /// Title the window this view is drawn in (or the browser page) after
+    /// its display.
+    pub fn update_title(&mut self, ctx: &egui::Context) {
+        if let Some(s) = &self.screen
+            && s.title != self.window_title
+        {
+            self.window_title = s.title.clone();
+            #[cfg(not(target_arch = "wasm32"))]
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.window_title.clone()));
+            #[cfg(target_arch = "wasm32")]
+            if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+                let _ = ctx;
+                doc.set_title(&self.window_title);
+            }
+        }
+    }
+
+    /// The size in points of the display at 100% (or the fixed zoom), for
+    /// sizing the window to it.
+    pub fn natural_size(&self, ui_zoom: f32) -> Option<Vec2> {
+        let shown = if self.fit { 1.0 } else { self.zoom } / ui_zoom;
+        self.screen
+            .as_ref()
+            .map(|s| Vec2::new(s.width as f32, s.height as f32) * shown)
+    }
+
+    /// Draw the status line and the display, and return the status line's
+    /// height and the requests its widgets made, tagged with where they came
+    /// from.
+    pub fn draw(&mut self, ui: &mut egui::Ui, vcx: &ViewCx) -> Drawn {
+        // Display windows drawn inside the main one (no native windows) must
+        // not share its ids.
+        let id = |name: &str| match vcx.window {
+            WindowKey::Main => Id::new(name),
+            WindowKey::Child(v) => Id::new((name, v)),
+        };
+        let status = egui::Panel::bottom(id("status"))
+            .show(ui, |ui| self.status(ui))
+            .response
+            .rect
+            .height();
+        // The display's zoom is relative to the desktop's scale, not the controls'.
+        let ui_zoom = ui.ctx().zoom_factor();
+
+        let mut requests = Vec::new();
+        let mut background = None;
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(Color32::from_gray(200)))
+            .show(ui, |ui| {
+                // Sensed before the widgets, so that they win a click on them.
+                if let WindowKey::Child(_) = vcx.window {
+                    let rect = ui.max_rect();
+                    background = Some(ui.interact(rect, id("background"), egui::Sense::click()));
+                }
+                let Some(screen) = self.screen.as_mut() else {
+                    return;
+                };
+                let avail = ui.available_size();
+                if self.fit && screen.width > 0.0 {
+                    let fit = (avail.x / screen.width as f32)
+                        .min(avail.y / screen.height.max(1.0) as f32);
+                    self.zoom = (fit * ui_zoom).clamp(0.2, 5.0);
+                }
+                // Pinch to zoom on a touch screen (or ctrl+scroll).
+                let pinch = ui.input(|i| i.zoom_delta());
+                if pinch != 1.0 {
+                    self.fit = false;
+                    self.zoom = (self.zoom * pinch).clamp(0.2, 5.0);
+                }
+                let zoom = self.zoom / ui_zoom;
+                let size = Vec2::new(screen.width as f32, screen.height as f32) * zoom;
+                egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
+                    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                    ui.painter()
+                        .rect_filled(rect, 0.0, style::color(&screen.display.background));
+                    let mut cx = Cx {
+                        view: style::View {
+                            origin: rect.min,
+                            zoom,
+                        },
+                        clip: ui.clip_rect().intersect(rect),
+                        pvs: &self.pvs,
+                        requests: &mut requests,
+                        depth: 0,
+                        keypad: vcx.keypad,
+                        trends: vcx.trends,
+                        window: vcx.window,
+                    };
+                    widgets::draw_screen(ui, screen, &mut cx, id("display"));
+                });
+            });
+        let origin = Origin {
+            window: vcx.window,
+            ctrl: ui.input(|i| i.modifiers.command),
+        };
+        Drawn {
+            status,
+            requests: requests.into_iter().map(|r| (origin, r)).collect(),
+            background,
+        }
+    }
+
+    fn status(&self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if let Some(e) = &self.error {
+                ui.colored_label(Color32::RED, e);
+            } else if self.loading.is_some()
+                && let Some(cur) = &self.current
+            {
+                ui.spinner();
+                ui.label(format!("Loading {}", cur.source));
+            } else if let Some(s) = &self.screen {
+                let (connected, total) = count_pvs(&s.nodes);
+                ui.label(format!("PVs {connected}/{total} connected"));
+                if let Some(cur) = &self.current {
+                    ui.weak(cur.source.to_string());
+                }
+            }
+        });
+    }
+}
+
+/// How many of the distinct PVs that widgets, plots and rules use are
+/// connected, and how many there are.
+fn count_pvs(nodes: &[Node]) -> (usize, usize) {
+    fn walk(nodes: &[Node], seen: &mut std::collections::HashMap<String, bool>) {
+        for n in nodes {
+            let traces = n.traces.iter().flat_map(|t| t.x.iter().chain(&t.y));
+            let rules = n.rules.iter().flat_map(|r| r.pvs());
+            for pv in n.pv.iter().chain(traces).chain(rules) {
+                seen.entry(pv.name().to_string())
+                    .or_insert_with(|| pv.state().connected);
+            }
+            walk(&n.children, seen);
+            n.tabs.iter().for_each(|t| walk(t, seen));
+            if let Some(s) = &n.embedded {
+                walk(&s.nodes, seen);
+            }
+        }
+    }
+    let mut seen = std::collections::HashMap::new();
+    walk(nodes, &mut seen);
+    (seen.values().filter(|c| **c).count(), seen.len())
+}
+
+/// Keep the page's address on the display shown, so a bookmark or a reload
+/// comes back to it: `display` relative to the page when it is beside it,
+/// and `macros`; other parameters (`pvws`, `zoom` …) stay as they were.
+#[cfg(target_arch = "wasm32")]
+fn set_page_url(loc: &Location) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(url) = window
+        .location()
+        .href()
+        .ok()
+        .and_then(|href| web_sys::Url::new(&href).ok())
+    else {
+        return;
+    };
+    let path = url.pathname();
+    let dir = format!("{}{}", url.origin(), &path[..=path.rfind('/').unwrap_or(0)]);
+    let display = loc.source.to_string();
+    let params = url.search_params();
+    params.set("display", display.strip_prefix(&dir).unwrap_or(&display));
+    // Escaped for parse_macros.
+    let macros: Vec<String> = loc
+        .macros
+        .iter()
+        .map(|(k, v)| format!("{k}={}", v.replace('\\', r"\\").replace(',', r"\,")))
+        .collect();
+    if macros.is_empty() {
+        params.delete("macros");
+    } else {
+        params.set("macros", &macros.join(","));
+    }
+    if let Ok(history) = window.history() {
+        let _ = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&url.href()));
+    }
+}

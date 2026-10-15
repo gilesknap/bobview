@@ -9,6 +9,7 @@ mod group_link;
 mod image;
 #[cfg(not(target_arch = "wasm32"))]
 mod launch;
+mod layout;
 mod meter;
 mod plot;
 mod pvmenu;
@@ -19,6 +20,7 @@ mod snapshot;
 mod style;
 mod symbol;
 mod trend;
+mod view;
 mod widgets;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -40,6 +42,10 @@ options:
   -z, --zoom FACTOR      fixed zoom instead of fit-to-window
   -f, --fullscreen       start full screen
   -k, --keypad           edit values with an on-screen keypad (automatic on touch)
+  --multi-window         start in multi-window mode: links open their displays in
+                         windows of their own (ctrl+click opens in place)
+  --layout NAME          restore the saved window layout NAME
+  --no-layout            don't restore the default layout
   --ui-scale F|auto      size of the toolbar and menus relative to the desktop's
                          scale (default auto: smaller on a small high-DPI screen;
                          also set by BOBVIEW_UI_SCALE)
@@ -56,7 +62,9 @@ options:
   -h, --help             show this help
   -V, --version          show the version
 
-With no display, bobview opens index.bob from the bundled displays
+With no display, bobview restores the default window layout when one has
+been saved (in $XDG_CONFIG_HOME/bobview/layouts, by default
+~/.config/bobview/layouts), else opens index.bob from the bundled displays
 (~/.local/share/bobview/displays) when present, else a file chooser.
 A display may also be an http:// or https:// URL; files it names are
 fetched relative to it. CS-Studio BOY .opi displays are translated as
@@ -81,6 +89,9 @@ fn main() -> eframe::Result {
     let mut clicks = Vec::new();
     let mut keypad = false;
     let mut project = None;
+    let mut multi_window = false;
+    let mut layout_name = None;
+    let mut no_layout = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -89,6 +100,15 @@ fn main() -> eframe::Result {
             "-z" | "--zoom" => zoom = args.next().and_then(|z| z.parse().ok()),
             "-f" | "--fullscreen" => fullscreen = true,
             "-k" | "--keypad" => keypad = true,
+            "--multi-window" => multi_window = true,
+            "--layout" => match args.next() {
+                Some(name) => layout_name = Some(name),
+                None => {
+                    eprintln!("--layout needs a layout name");
+                    std::process::exit(2);
+                }
+            },
+            "--no-layout" => no_layout = true,
             "--ui-scale" => {
                 let text = args.next().unwrap_or_default();
                 ui_scale = chrome::UiScale::parse(&text);
@@ -163,8 +183,30 @@ fn main() -> eframe::Result {
     {
         macros = defaults.with(&macros);
     }
+    // The named layout, else the default one unless a display was named.
+    let layout = if snapshot.is_some() {
+        None
+    } else {
+        let default = file.is_none() && !no_layout && layout::exists(layout::DEFAULT);
+        match layout::startup(layout_name, default, layout::load) {
+            Ok(layout) => layout,
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(2);
+            }
+        }
+    };
+    // A layout's main window has a display of its own.
+    let layout_has_main = layout
+        .as_ref()
+        .is_some_and(|(l, _)| l.windows.iter().any(|w| w.main));
     let start = file
-        .or_else(|| default_display().map(Source::File))
+        .or_else(|| {
+            (!layout_has_main)
+                .then(default_display)
+                .flatten()
+                .map(Source::File)
+        })
         .map(|source| app::Location { source, macros });
 
     if let Some(out) = snapshot {
@@ -195,6 +237,14 @@ fn main() -> eframe::Result {
             .with_app_id("bobview")
             .with_inner_size(chrome::DEFAULT_WINDOW)
             .with_fullscreen(fullscreen),
+        // No vsync: each window's buffer swap would wait for a screen
+        // refresh, and every window is drawn in the main one's frame, so a
+        // frame took a refresh per window (~120 ms with 7 windows). We only
+        // repaint on change, so this doesn't spin.
+        glow_options: eframe::egui_glow::GlowConfiguration {
+            vsync: false,
+            ..Default::default()
+        },
         ..Default::default()
     };
     eframe::run_native(
@@ -203,6 +253,11 @@ fn main() -> eframe::Result {
         Box::new(move |cc| {
             let mut app = app::BobApp::new(&cc.egui_ctx, start, zoom, ui_scale);
             app.set_keypad(keypad);
+            app.set_multi_window(multi_window);
+            if let Some((mut layout, name)) = layout {
+                layout.multi_window |= multi_window;
+                app.restore_layout(layout, Some(name));
+            }
             Ok(Box::new(app))
         }),
     )
