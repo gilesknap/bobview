@@ -145,6 +145,9 @@ pub struct PvState {
     pub labels: Vec<String>,
     pub display_range: Option<(f64, f64)>,
     pub control_range: Option<(f64, f64)>,
+    /// Alarm (LOLO, HIHI) and warning (LOW, HIGH) limits.
+    pub alarm_range: Option<(f64, f64)>,
+    pub warning_range: Option<(f64, f64)>,
     pub writable: bool,
     /// Why the PV cannot connect, if the backend knows.
     pub error: Option<String>,

@@ -11,6 +11,7 @@ use crate::chrome::{self, Chrome, UiScale};
 use crate::pvmenu;
 use crate::screen::{Node, Screen};
 use crate::style::{self, View};
+use crate::trend::Trend;
 use crate::widgets::{self, Cx, Request};
 
 #[derive(Clone, Debug)]
@@ -37,9 +38,33 @@ pub struct BobApp {
     keypad_mode: bool,
     keypad: Option<Keypad>,
     details: Option<pvmenu::Details>,
+    /// Open trend windows, and the id the next one gets.
+    trends: Vec<Trend>,
+    next_trend: u64,
     /// The display at `current`, being fetched and built on a thread.
     loading: Option<std::sync::mpsc::Receiver<Result<Screen, bob::Error>>>,
+    /// Displays named by command actions, worked out on threads.
+    launched: (
+        std::sync::mpsc::Sender<Launched>,
+        std::sync::mpsc::Receiver<Launched>,
+    ),
+    /// Command actions still being worked out, so a double click runs one.
+    launching: Vec<LaunchKey>,
+    /// Bumped on every `show`, so a launch started on another display is dropped.
+    shown: u64,
     chrome: Chrome,
+    /// The window title last set, the shown display's title.
+    window_title: String,
+}
+
+/// What makes two command actions the same: base, directory and command.
+type LaunchKey = (Option<String>, Option<String>, String);
+
+/// A command action's result, tagged with the display it was started on.
+struct Launched {
+    key: LaunchKey,
+    shown: u64,
+    target: Option<Location>,
 }
 
 struct Keypad {
@@ -81,8 +106,14 @@ impl BobApp {
             keypad_mode: false,
             keypad: None,
             details: None,
+            trends: Vec::new(),
+            next_trend: 0,
             loading: None,
+            launched: std::sync::mpsc::channel(),
+            launching: Vec::new(),
+            shown: 0,
             chrome: Chrome::new(ui_scale),
+            window_title: String::new(),
             open_path: start
                 .as_ref()
                 .map(|l| l.source.to_string())
@@ -102,6 +133,7 @@ impl BobApp {
     fn show(&mut self, loc: Location) {
         // Drop the old screen first so its PVs disconnect before the new ones start.
         self.screen = None;
+        self.shown += 1;
         self.open_path = loc.source.to_string();
         self.loading = None;
         if loc.source.is_url() {
@@ -142,9 +174,10 @@ impl BobApp {
         self.reloading = false;
     }
 
-    /// Whether a display is still being fetched.
+    /// Whether a display, or one named by a command action, is still being
+    /// worked out.
     pub fn is_loading(&self) -> bool {
-        self.loading.is_some()
+        self.loading.is_some() || !self.launching.is_empty()
     }
 
     /// Show the display being fetched, or its error, once the fetch is done.
@@ -159,6 +192,56 @@ impl BobApp {
                 self.loaded(loaded);
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => self.loading = None,
+        }
+    }
+
+    /// Run a command action on a thread, so a slow launcher script or file
+    /// system doesn't freeze the window, and open the display it names. A
+    /// command already in flight is ignored.
+    fn launch(
+        &mut self,
+        ctx: &egui::Context,
+        base: Option<Source>,
+        dir: Option<Source>,
+        cmd: String,
+    ) {
+        let key = (
+            base.as_ref().map(|s| s.to_string()),
+            dir.as_ref().map(|s| s.to_string()),
+            cmd.clone(),
+        );
+        if self.launching.contains(&key) {
+            return;
+        }
+        self.launching.push(key.clone());
+        let (tx, ctx, shown) = (self.launched.0.clone(), ctx.clone(), self.shown);
+        std::thread::spawn(move || {
+            let target = match crate::launch::command_target(base.as_ref(), dir, &cmd) {
+                Some((file, macros)) => {
+                    let source = Source::File(file);
+                    log::info!("open {source} (window) from '{cmd}'");
+                    Some(Location { source, macros })
+                }
+                None => {
+                    log::warn!("command '{cmd}' is not supported");
+                    None
+                }
+            };
+            tx.send(Launched { key, shown, target }).ok();
+            ctx.request_repaint();
+        });
+    }
+
+    /// Open the displays named by finished command actions, unless the user
+    /// has since moved to another display.
+    fn poll_launched(&mut self) {
+        while let Ok(done) = self.launched.1.try_recv() {
+            self.launching.retain(|k| *k != done.key);
+            match done.target {
+                Some(loc) if done.shown == self.shown => self.open(loc),
+                Some(loc) => log::info!("drop {}: the display has changed", loc.source),
+                None => {}
+            }
         }
     }
 
@@ -283,8 +366,8 @@ impl BobApp {
                 }
             }
             if let Some(s) = &self.screen {
-                ui.add(egui::Label::new(egui::RichText::new(&s.display.name).strong()).truncate())
-                    .on_hover_text(&s.display.name);
+                ui.add(egui::Label::new(egui::RichText::new(&s.title).strong()).truncate())
+                    .on_hover_text(&s.title);
             }
         });
     }
@@ -325,7 +408,7 @@ impl BobApp {
         // Nothing to list for a URL (an empty path lists nothing).
         let dir = match Source::parse(&self.open_path) {
             Source::Url(_) => PathBuf::new(),
-            Source::File(path) if path.is_dir() => path,
+            Source::File(path) if bob::project::locate(&path).is_dir() => path,
             Source::File(path) => path
                 .parent()
                 .map(Path::to_path_buf)
@@ -390,44 +473,56 @@ impl BobApp {
     }
 }
 
-/// `.bob` files and subdirectories of `dir`, directories first.
+/// Display files (`.bob`, `.opi`) and subdirectories of `dir`, directories
+/// first. The linked folders of an Eclipse project in `dir` are listed as
+/// directories, and those are listed as if they were where they are linked.
 fn list_dir(dir: &Path) -> Vec<(PathBuf, bool)> {
-    let mut out: Vec<(PathBuf, bool)> = std::fs::read_dir(dir)
+    let real = bob::project::locate(dir);
+    let mut out: Vec<(PathBuf, bool)> = std::fs::read_dir(&real)
         .map(|rd| {
             rd.filter_map(Result::ok)
-                .map(|e| (e.path(), e.path().is_dir()))
+                .map(|e| (dir.join(e.file_name()), e.path().is_dir()))
                 .filter(|(p, d)| {
                     let hidden = p
                         .file_name()
                         .is_some_and(|n| n.to_string_lossy().starts_with('.'));
-                    !hidden && (*d || p.extension().is_some_and(|x| x == "bob"))
+                    let display = p.extension().is_some_and(|x| x == "bob" || x == "opi");
+                    !hidden && (*d || display)
                 })
                 .collect()
         })
         .unwrap_or_default();
+    for (name, _) in bob::project::links(&real).unwrap_or_default() {
+        let link = dir.join(name);
+        if !out.iter().any(|(p, _)| *p == link) {
+            out.push((link, true));
+        }
+    }
     out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     out
 }
 
+/// How many of the distinct PVs that widgets, plots and rules use are
+/// connected, and how many there are.
 fn count_pvs(nodes: &[Node]) -> (usize, usize) {
-    let mut acc = (0, 0);
-    for n in nodes {
-        let traces = n.traces.iter().flat_map(|t| t.x.iter().chain(&t.y));
-        for pv in n.pv.iter().chain(traces) {
-            acc.1 += 1;
-            if pv.state().connected {
-                acc.0 += 1;
+    fn walk(nodes: &[Node], seen: &mut std::collections::HashMap<String, bool>) {
+        for n in nodes {
+            let traces = n.traces.iter().flat_map(|t| t.x.iter().chain(&t.y));
+            let rules = n.rules.iter().flat_map(|r| r.pvs());
+            for pv in n.pv.iter().chain(traces).chain(rules) {
+                seen.entry(pv.name().to_string())
+                    .or_insert_with(|| pv.state().connected);
+            }
+            walk(&n.children, seen);
+            n.tabs.iter().for_each(|t| walk(t, seen));
+            if let Some(s) = &n.embedded {
+                walk(&s.nodes, seen);
             }
         }
-        for (c, t) in std::iter::once(count_pvs(&n.children))
-            .chain(n.tabs.iter().map(|t| count_pvs(t)))
-            .chain(n.embedded.iter().map(|s| count_pvs(&s.nodes)))
-        {
-            acc.0 += c;
-            acc.1 += t;
-        }
     }
-    acc
+    let mut seen = std::collections::HashMap::new();
+    walk(nodes, &mut seen);
+    (seen.values().filter(|c| **c).count(), seen.len())
 }
 
 impl eframe::App for BobApp {
@@ -439,11 +534,19 @@ impl eframe::App for BobApp {
 impl BobApp {
     pub fn draw(&mut self, ui: &mut egui::Ui) {
         self.poll_loading(ui.ctx());
+        self.poll_launched();
         if !self.keypad_mode && ui.input(|i| i.any_touches()) {
             self.keypad_mode = true;
         }
         widgets::touch_targets(ui.ctx(), self.keypad_mode);
         self.chrome.begin(ui.ctx());
+        if let Some(s) = &self.screen
+            && s.title != self.window_title
+        {
+            self.window_title = s.title.clone();
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::Title(self.window_title.clone()));
+        }
         let toolbar = egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
         self.chrome.toolbar = toolbar.response.rect.height();
         let mut panels = self.chrome.toolbar;
@@ -523,6 +626,19 @@ impl BobApp {
                 }
                 Request::Keypad { pv, text } => self.keypad = Some(Keypad { pv, text }),
                 Request::Details(details) => self.details = Some(details),
+                Request::Trend(names) => {
+                    log::info!("trend {}", names.join(", "));
+                    self.trends
+                        .push(Trend::new(self.next_trend, &names, &self.pvs));
+                    self.next_trend += 1;
+                }
+                Request::Command {
+                    base,
+                    directory,
+                    command,
+                } => self.launch(ui.ctx(), base, directory, command),
+                Request::Close if !self.back.is_empty() => self.go_back(),
+                Request::Close => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
                 Request::Webpage(url) => {
                     if let Err(e) = std::process::Command::new("xdg-open").arg(&url).spawn() {
                         log::warn!("cannot open {url}: {e}");
@@ -532,6 +648,27 @@ impl BobApp {
         }
         self.keypad_window(ui);
         self.details_window(ui);
+        self.trend_windows(ui);
+    }
+
+    /// Each trend in its own window, until it is closed.
+    fn trend_windows(&mut self, ui: &mut egui::Ui) {
+        let pvs = &self.pvs;
+        let screen = ui.ctx().content_rect();
+        self.trends.retain_mut(|trend| {
+            let mut open = true;
+            // Each new window a little below and right of the one before.
+            let step = (trend.id % 8) as f32 * 24.0;
+            let size = Vec2::new(640.0, 420.0).min(screen.size() * 0.9);
+            egui::Window::new(trend.title())
+                .id(Id::new(("trend", trend.id)))
+                .open(&mut open)
+                .collapsible(false)
+                .default_pos(screen.left_top() + Vec2::new(40.0, 60.0) + Vec2::splat(step))
+                .default_size(size)
+                .show(ui.ctx(), |ui| trend.ui(ui, pvs));
+            open
+        });
     }
 
     fn details_window(&mut self, ui: &mut egui::Ui) {
@@ -636,6 +773,76 @@ pub(crate) fn plain_name(name: &pv::PvName) -> String {
 mod tests {
     use super::plain_name;
     use pv::PvName;
+
+    #[test]
+    fn lists_displays_and_project_links() {
+        let tmp = std::env::temp_dir().join(format!("bobview-list-{}", std::process::id()));
+        let (real, proj) = (tmp.join("real"), tmp.join("proj"));
+        std::fs::create_dir_all(real.join("sub")).unwrap();
+        std::fs::create_dir_all(&proj).unwrap();
+        for f in ["a.opi", "b.bob", "c.txt"] {
+            std::fs::write(real.join(f), "").unwrap();
+        }
+        std::fs::write(
+            proj.join(".project"),
+            format!(
+                "<projectDescription><linkedResources><link><name>m</name><location>{}</location></link></linkedResources></projectDescription>",
+                real.display()
+            ),
+        )
+        .unwrap();
+        let names = |dir: &std::path::Path| -> Vec<(String, bool)> {
+            super::list_dir(dir)
+                .into_iter()
+                .map(|(p, d)| (p.strip_prefix(&tmp).unwrap().display().to_string(), d))
+                .collect()
+        };
+        assert_eq!(names(&proj), [("proj/m".to_string(), true)]);
+        assert_eq!(
+            names(&proj.join("m")),
+            [
+                ("proj/m/sub".to_string(), true),
+                ("proj/m/a.opi".to_string(), false),
+                ("proj/m/b.bob".to_string(), false)
+            ]
+        );
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn launches_once_and_drops_stale_results() {
+        use super::{BobApp, Launched, Location};
+        let ctx = eframe::egui::Context::default();
+        let mut app = BobApp::new(&ctx, None, Some(1.0), crate::chrome::UiScale::Auto);
+        // A double click runs the command once, and counts as loading.
+        app.launch(&ctx, None, None, "no-such-launcher".into());
+        app.launch(&ctx, None, None, "no-such-launcher".into());
+        assert_eq!(app.launching.len(), 1);
+        assert!(app.is_loading());
+        while app.is_loading() {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            app.poll_launched();
+        }
+        // A result from before the display changed is dropped.
+        let loc = Location {
+            source: bob::Source::File("/no/such.bob".into()),
+            macros: Default::default(),
+        };
+        let key = (None, None, "x".to_string());
+        app.launching.push(key.clone());
+        let stale = app.shown;
+        app.shown += 1;
+        app.launched
+            .0
+            .send(Launched {
+                key,
+                shown: stale,
+                target: Some(loc),
+            })
+            .unwrap();
+        app.poll_launched();
+        assert!(app.current.is_none() && !app.is_loading());
+    }
 
     #[test]
     fn keypad_title_is_the_plain_name() {

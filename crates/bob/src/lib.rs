@@ -1,4 +1,5 @@
-//! Parser for Phoebus Display Builder `.bob` files.
+//! Parser for Phoebus Display Builder `.bob` files, and for CS-Studio BOY
+//! `.opi` files, which are translated into the same form (see [`opi`]).
 //!
 //! A display is kept close to the XML: each [`Widget`] holds its property
 //! elements as they were written, and typed accessors read them with the
@@ -6,18 +7,24 @@
 //! display, because their values depend on where a widget sits.
 
 mod element;
+mod group_link;
 mod macros;
 mod model;
+mod opi;
+pub mod project;
 mod source;
+mod trend;
 
 use std::path::{Path, PathBuf};
 
 pub use element::Element;
+pub use group_link::{GroupLink, LinkSets, group_device, group_frame};
 pub use macros::{Macros, expand};
 pub use model::{Action, Color, Font, FontStyle, Rule, RuleExpr, named_color};
 pub use source::Source;
+pub use trend::{databrowser_pvs, strip_tool_pvs};
 
-/// A parsed `.bob` display.
+/// A parsed `.bob` (or translated `.opi`) display.
 #[derive(Clone, Debug)]
 pub struct Display {
     pub name: String,
@@ -28,6 +35,9 @@ pub struct Display {
     pub widgets: Vec<Widget>,
     /// The file or URL it was read from, used to resolve relative paths.
     pub source: Option<Source>,
+    /// Translated from a BOY `.opi` file. BOY clipped widgets to the
+    /// declared size, where Phoebus grows the display to show them.
+    pub legacy: bool,
 }
 
 /// One widget: its type, property elements and child widgets.
@@ -61,8 +71,11 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 impl Display {
+    /// Read the display file at `path`, which may lie in an Eclipse
+    /// project's linked folder (see [`project`]).
     pub fn load(path: &Path) -> Result<Self, Error> {
-        let text = std::fs::read_to_string(path).map_err(|e| Error::Io(path.into(), e))?;
+        let real = project::locate(path);
+        let text = std::fs::read_to_string(&real).map_err(|e| Error::Io(path.into(), e))?;
         let mut display = Self::parse(&text)?;
         display.source = Some(Source::File(path.to_path_buf()));
         Ok(display)
@@ -70,9 +83,13 @@ impl Display {
 
     pub fn parse(xml: &str) -> Result<Self, Error> {
         let doc = roxmltree::Document::parse(xml).map_err(Error::Xml)?;
-        let root = Element::from_node(doc.root_element());
+        let mut root = Element::from_node(doc.root_element());
         if root.name != "display" {
             return Err(Error::NotADisplay(root.name));
+        }
+        let legacy = opi::is_opi(&root);
+        if legacy {
+            root = opi::translate(root);
         }
         let (props, widgets) = split_widgets(root);
         let as_widget = Widget {
@@ -90,6 +107,7 @@ impl Display {
             macros: as_widget.macros(),
             widgets,
             source: None,
+            legacy,
         })
     }
 

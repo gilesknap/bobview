@@ -43,6 +43,17 @@ pub fn menu(ui: &mut Ui, node: &Node, state: Option<&PvState>, requests: &mut Ve
     }
     if let Some(pv) = &node.pv {
         ui.separator();
+        if ui.button("Trend").clicked() {
+            requests.push(Request::Trend(vec![name.to_string()]));
+        }
+        let all = trend_names(node);
+        if all.len() > 1
+            && ui
+                .button(format!("Trend with rule PVs ({})", all.len()))
+                .clicked()
+        {
+            requests.push(Request::Trend(all));
+        }
         if ui.button("PV details…").clicked() {
             requests.push(Request::Details(Details {
                 pv: pv.clone(),
@@ -51,6 +62,19 @@ pub fn menu(ui: &mut Ui, node: &Node, state: Option<&PvState>, requests: &mut Ve
             }));
         }
     }
+}
+
+/// The widget's PV and the other PVs its rules read, each once.
+fn trend_names(node: &Node) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let rules = node.rules.iter().flat_map(|r| r.pvs());
+    for pv in node.pv.iter().chain(rules) {
+        let name = pv.name().to_string();
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
 }
 
 /// The body of the PV details window.

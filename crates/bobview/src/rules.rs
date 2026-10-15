@@ -1,8 +1,9 @@
 //! Phoebus rules: expressions over a widget's rule PVs that override one property.
 //!
 //! The expression language covers what rule editors produce: `pv0`, `pvStr0`,
-//! `pvInt0`, `pvSev0`, numbers, strings, `true`/`false`, comparison,
-//! arithmetic, `&&`/`and`, `||`/`or`, `!`/`not` and parentheses.
+//! `pvInt0`, `pvSev0`, `pvLegacySev0` (BOY's numbering), numbers, strings, `true`/`false`, comparison,
+//! arithmetic, bitwise `&`, `|` and `^`, `&&`/`and`, `||`/`or`, `!`/`not`
+//! and parentheses.
 
 use bob::{Element, Rule};
 use pv::{Pv, PvManager};
@@ -10,7 +11,9 @@ use pv::{Pv, PvManager};
 pub struct CompiledRule {
     pub prop_id: String,
     out_exp: bool,
-    exprs: Vec<(Option<Expr>, Element)>,
+    /// Each condition, the value it sets, and for an output expression
+    /// rule that value parsed as an expression.
+    exprs: Vec<(Option<Expr>, Element, Option<Expr>)>,
     pvs: Vec<Pv>,
 }
 
@@ -24,6 +27,11 @@ pub enum Outcome {
 }
 
 impl CompiledRule {
+    /// The PVs the rule reads.
+    pub fn pvs(&self) -> &[Pv] {
+        &self.pvs
+    }
+
     pub fn new(rule: &Rule, expand: &dyn Fn(&str) -> String, pvs: &PvManager) -> Self {
         let exprs = rule
             .exprs
@@ -33,7 +41,11 @@ impl CompiledRule {
                 if parsed.is_none() {
                     log::warn!("rule '{}': cannot parse '{}'", rule.name, e.condition);
                 }
-                (parsed, e.value.clone())
+                let out = rule.out_exp.then(|| parse(&e.value.text)).flatten();
+                if rule.out_exp && out.is_none() {
+                    log::warn!("rule '{}': cannot parse '{}'", rule.name, e.value.text);
+                }
+                (parsed, e.value.clone(), out)
             })
             .collect();
         Self {
@@ -55,40 +67,51 @@ impl CompiledRule {
             return Outcome::Keep;
         }
         let env = Env { states: &states };
-        for (expr, value) in &self.exprs {
+        for (expr, value, out) in &self.exprs {
             let Some(expr) = expr else { continue };
+            if !eval(expr, &env).truthy() {
+                continue;
+            }
             if self.out_exp {
-                let v = eval(expr, &env);
+                // The value is an expression, giving the property's value.
+                let Some(out) = out else { continue };
                 return Outcome::Set(Element {
                     name: self.prop_id.clone(),
-                    text: v.to_text(),
+                    text: eval(out, &env).to_text(),
                     ..Default::default()
                 });
             }
-            if eval(expr, &env).truthy() {
-                let mut el = value.clone();
-                el.name = self.prop_id.clone();
-                return Outcome::Set(el);
-            }
+            let mut el = value.clone();
+            el.name = self.prop_id.clone();
+            return Outcome::Set(el);
         }
         Outcome::Keep
     }
 }
 
 /// Apply rule outcomes to a widget's properties. A property such as
-/// `symbols[1]` names one item of a list property.
+/// `symbols[1]` names one item of a list property, and `traces[0].visible`
+/// a property of one item.
 pub fn apply(props: &mut Element, outcomes: &[(String, Outcome)]) {
     for (prop, outcome) in outcomes {
         if let Outcome::Set(el) = outcome {
-            if let Some((list, index)) = list_item(prop) {
+            if let Some((list, index, sub)) = list_item(prop) {
                 let item = props
                     .children
                     .iter_mut()
                     .find(|c| c.name == list)
                     .and_then(|l| l.children.get_mut(index));
-                match item {
-                    Some(item) => item.text = el.text.clone(),
-                    None => log::warn!("rule sets '{prop}', which the widget does not have"),
+                match (item, sub) {
+                    (Some(item), None) => item.text = el.text.clone(),
+                    (Some(item), Some(sub)) => {
+                        let mut el = el.clone();
+                        el.name = sub.to_string();
+                        match item.children.iter_mut().find(|c| c.name == sub) {
+                            Some(existing) => *existing = el,
+                            None => item.children.push(el),
+                        }
+                    }
+                    (None, _) => log::warn!("rule sets '{prop}', which the widget does not have"),
                 }
                 continue;
             }
@@ -100,11 +123,16 @@ pub fn apply(props: &mut Element, outcomes: &[(String, Outcome)]) {
     }
 }
 
-/// `symbols[1]` as the list `symbols` and index 1.
-fn list_item(prop: &str) -> Option<(&str, usize)> {
+/// `symbols[1]` as the list `symbols` and index 1; `traces[0].visible`
+/// also names the item's property `visible`.
+fn list_item(prop: &str) -> Option<(&str, usize, Option<&str>)> {
     let (list, rest) = prop.split_once('[')?;
-    let index = rest.strip_suffix(']')?.parse().ok()?;
-    Some((list, index))
+    let (index, sub) = rest.split_once(']')?;
+    let sub = match sub {
+        "" => None,
+        s => Some(s.strip_prefix('.')?),
+    };
+    Some((list, index.parse().ok()?, sub))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -170,9 +198,20 @@ impl Env<'_> {
             },
             "pvInt" => Val::Num(s.value.as_i64().unwrap_or(0) as f64),
             "pvStr" => Val::Str(s.format(None, false)),
-            "pvSev" | "pvLegacySev" => Val::Num(s.severity as i32 as f64),
+            "pvSev" => Val::Num(s.severity as i32 as f64),
+            "pvLegacySev" => Val::Num(legacy_severity(s.severity)),
             _ => Val::Num(0.0),
         }
+    }
+}
+
+/// A severity as BOY numbered it: 0 none, 1 major, 2 minor, -1 invalid.
+fn legacy_severity(s: pv::Severity) -> f64 {
+    match s {
+        pv::Severity::NoAlarm => 0.0,
+        pv::Severity::Major => 1.0,
+        pv::Severity::Minor => 2.0,
+        pv::Severity::Invalid => -1.0,
     }
 }
 
@@ -207,6 +246,10 @@ fn eval(e: &Expr, env: &Env) -> Val {
                 "*" => Val::Num(a.num() * b.num()),
                 "/" => Val::Num(a.num() / b.num()),
                 "%" => Val::Num(a.num() % b.num()),
+                // Bitwise, on the integer parts as JavaScript does.
+                "&" => Val::Num((a.num() as i64 & b.num() as i64) as f64),
+                "|" => Val::Num((a.num() as i64 | b.num() as i64) as f64),
+                "^" => Val::Num((a.num() as i64 ^ b.num() as i64) as f64),
                 _ => Val::Bool(false),
             }
         }
@@ -272,7 +315,7 @@ fn tokenize(s: &str) -> Option<Vec<Tok>> {
             if ["==", "!=", "<=", ">=", "&&", "||"].contains(&two.as_str()) {
                 out.push(Tok::Op(two));
                 i += 2;
-            } else if "<>!+-*/%".contains(c) {
+            } else if "<>!+-*/%&|^".contains(c) {
                 out.push(Tok::Op(c.to_string()));
                 i += 1;
             } else {
@@ -298,6 +341,9 @@ struct Parser {
 const LEVELS: &[&[&str]] = &[
     &["||"],
     &["&&"],
+    &["|"],
+    &["^"],
+    &["&"],
     &["==", "!="],
     &["<", ">", "<=", ">="],
     &["+", "-"],
@@ -372,6 +418,68 @@ mod tests {
         assert!(run("!(pv0 - 1.5e-1 <= 0)", &[Double(1.0)]).truthy());
         assert_eq!(run("pv0 * 2 + 1", &[Long(3)]), Val::Num(7.0));
         assert!(run("pvSev0 == 0", &[Long(0)]).truthy());
+        assert!(run("(pv0 & 4)==4", &[Long(6)]).truthy());
+        assert!(!run("(pv0 & 1)!=0", &[Long(6)]).truthy());
+        assert_eq!(run("pv0 | 1 ^ 3", &[Long(4)]), Val::Num(6.0));
+    }
+
+    #[test]
+    fn legacy_severities_use_boy_numbers() {
+        let state = |severity| pv::PvState {
+            connected: true,
+            severity,
+            ..Default::default()
+        };
+        let states = [state(pv::Severity::Major), state(pv::Severity::Invalid)];
+        let env = Env { states: &states };
+        let ev = |e: &str| eval(&parse(e).unwrap(), &env);
+        assert_eq!(ev("pvLegacySev0"), Val::Num(1.0));
+        assert_eq!(ev("pvSev0"), Val::Num(2.0));
+        assert!(ev("pvLegacySev1 == -1").truthy());
+    }
+
+    #[test]
+    fn output_expressions_set_the_value_where_the_condition_holds() {
+        let rule = |out_exp: bool| bob::Rule {
+            name: "r".into(),
+            prop_id: "image_index".into(),
+            out_exp,
+            exprs: [("pv0 < 1", "pv0 + 5"), ("true", "0")]
+                .iter()
+                .map(|(c, v)| bob::RuleExpr {
+                    condition: c.to_string(),
+                    value: Element {
+                        name: "value".into(),
+                        text: v.to_string(),
+                        ..Default::default()
+                    },
+                })
+                .collect(),
+            pv_names: vec!["loc://rule_out(0.5)".into()],
+        };
+        let pvs = PvManager::new();
+        let compiled = CompiledRule::new(&rule(true), &|t| t.to_string(), &pvs);
+        let start = std::time::Instant::now();
+        while !compiled.pvs[0].state().connected && start.elapsed().as_secs() < 2 {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let Outcome::Set(el) = compiled.evaluate() else {
+            panic!("no outcome")
+        };
+        assert_eq!(el.text, "5.5");
+        compiled.pvs[0].write("3");
+        let start = std::time::Instant::now();
+        while compiled.pvs[0].state().value.as_f64() != Some(3.0) && start.elapsed().as_secs() < 2 {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            compiled.evaluate(),
+            Outcome::Set(Element {
+                name: "image_index".into(),
+                text: "0".into(),
+                ..Default::default()
+            })
+        );
     }
 
     #[test]
@@ -422,5 +530,36 @@ mod tests {
         assert_eq!(items, ["a.svg", "c.svg"]);
         assert_eq!(props.children[0].children[1].name, "symbol");
         assert_eq!(props.children.len(), 1);
+    }
+
+    #[test]
+    fn sets_a_property_of_one_list_item() {
+        let el = |name: &str, text: &str| Element {
+            name: name.into(),
+            text: text.into(),
+            ..Default::default()
+        };
+        let trace = |visible| Element {
+            name: "trace".into(),
+            children: vec![el("visible", visible)],
+            ..Default::default()
+        };
+        let mut props = Element {
+            children: vec![Element {
+                name: "traces".into(),
+                children: vec![trace("true"), trace("true")],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let prop = "traces[1].visible";
+        apply(
+            &mut props,
+            &[(prop.into(), Outcome::Set(el(prop, "false")))],
+        );
+        let traces = &props.children[0].children;
+        assert_eq!(traces[0].child_text("visible"), Some("true"));
+        assert_eq!(traces[1].child_text("visible"), Some("false"));
+        assert_eq!(traces[1].children.len(), 1);
     }
 }

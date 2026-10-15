@@ -114,6 +114,11 @@ fn apply(s: &mut PvState, field: &PvField) {
     {
         s.control_range = Some((lo, hi));
     }
+    if let Some(PvField::Structure(a)) = st.get_field("valueAlarm") {
+        let pair = |lo: &str, hi: &str| float(a.get_field(lo)).zip(float(a.get_field(hi)));
+        s.alarm_range = pair("lowAlarmLimit", "highAlarmLimit");
+        s.warning_range = pair("lowWarningLimit", "highWarningLimit");
+    }
     s.writable = true;
 }
 

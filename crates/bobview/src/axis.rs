@@ -68,11 +68,27 @@ pub fn label(v: f64, step: f64) -> String {
     let decimals = if step > 0.0 {
         (-step.log10().floor()).max(0.0) as usize
     } else {
-        // A lone tick: just enough to show the value.
+        // A lone tick or a log decade: just enough to show the value, small
+        // ones (pressures in mbar) in exponent form.
         let s = format!("{v}");
-        return if s.len() > 8 { format!("{v:.3}") } else { s };
+        return match s.len() {
+            0..=8 => s,
+            _ if v != 0.0 && v.abs() < 1e-3 => exponent(v),
+            _ => format!("{v:.3}"),
+        };
     };
     format!("{v:.decimals$}")
+}
+
+/// `v` as `1.5e-9`, with no trailing zeros.
+fn exponent(v: f64) -> String {
+    let s = format!("{v:.2e}");
+    match s.split_once('e') {
+        Some((m, e)) if m.contains('.') => {
+            format!("{}e{e}", m.trim_end_matches('0').trim_end_matches('.'))
+        }
+        _ => s,
+    }
 }
 
 /// Maps values to positions along a scale.
@@ -150,6 +166,10 @@ mod tests {
         assert_eq!(label(-0.4, 0.2), "-0.4");
         assert_eq!(label(0.25, 0.05), "0.25");
         assert_eq!(label(2e6, 1e6), "2e6");
+        // Log decades have no step.
+        assert_eq!(label(1e-9, 0.0), "1e-9");
+        assert_eq!(label(2.5e-7, 0.0), "2.5e-7");
+        assert_eq!(label(100.0, 0.0), "100");
     }
 
     #[test]

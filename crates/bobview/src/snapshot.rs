@@ -15,6 +15,10 @@ use crate::chrome::{self, UiScale};
 /// at the desktop scale.
 const MONITOR: Vec2 = Vec2::new(1920.0, 1080.0);
 
+/// Longest a snapshot waits, after `wait`, for displays and images to load
+/// and clicks to settle; after that it renders what it has.
+const DEADLINE: Duration = Duration::from_secs(60);
+
 /// What to render and how.
 pub struct Options {
     /// Size in pixels, or `None` to start at the default window size and
@@ -28,6 +32,9 @@ pub struct Options {
     pub wait: Duration,
     /// Pixels to click and the button to use, in order, once `wait` has passed.
     pub clicks: Vec<(Pos2, egui::PointerButton)>,
+    /// Time after the last click before the snapshot, for what it opened
+    /// (such as a trend window) to fill.
+    pub settle: Duration,
     pub keypad: bool,
 }
 
@@ -110,13 +117,30 @@ pub fn run(start: Location, opts: &Options, out: &Path) -> Result<(), String> {
             }
         }
         output.textures_delta.clear();
+        if begin.elapsed() > opts.wait + DEADLINE {
+            log::warn!(
+                "snapshot taken after {DEADLINE:?} with {}{}{} clicks not made",
+                if app.is_loading() {
+                    "a display still loading, "
+                } else {
+                    ""
+                },
+                if crate::symbol::loading() {
+                    "images still loading, "
+                } else {
+                    ""
+                },
+                pending.len().div_ceil(6),
+            );
+            break output;
+        }
         if started && pending.is_empty() {
             let until = *settle_until.get_or_insert_with(|| {
                 begin.elapsed()
                     + if opts.clicks.is_empty() {
                         Duration::ZERO
                     } else {
-                        Duration::from_secs(1)
+                        opts.settle
                     }
             });
             if begin.elapsed() >= until && !app.is_loading() && !images_loading() {
@@ -320,6 +344,7 @@ mod tests {
                 zoom: Some(0.5),
                 wait: Duration::ZERO,
                 clicks: Vec::new(),
+                settle: Duration::ZERO,
                 keypad: false,
             };
             run(start, &opts, &out).unwrap();
@@ -358,6 +383,7 @@ mod tests {
                 zoom: None,
                 wait: Duration::ZERO,
                 clicks: Vec::new(),
+                settle: Duration::ZERO,
                 keypad: false,
             };
             let start = Location {

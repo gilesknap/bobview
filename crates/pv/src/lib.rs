@@ -29,6 +29,11 @@ pub use value::{Image, ImageData, PvState, Severity, Value, split_array, split_s
 /// Called whenever any PV changes, so a UI can schedule a repaint.
 pub type Notifier = Arc<dyn Fn() + Send + Sync>;
 
+/// Called with a PV's new state on each change, from the thread making it,
+/// for as long as the caller keeps the `Arc` (see [`Pv::listen`]).
+pub type Listener = Arc<ListenFn>;
+pub type ListenFn = dyn Fn(&PvState) + Send + Sync;
+
 /// Where writes to a PV go.
 pub(crate) enum Writer {
     /// To the backend task, which converts and sends them.
@@ -42,6 +47,7 @@ pub(crate) struct Shared {
     state: Mutex<PvState>,
     writer: Mutex<Option<Writer>>,
     notify: Arc<RwLock<Option<Notifier>>>,
+    listeners: Mutex<Vec<Weak<ListenFn>>>,
 }
 
 impl Shared {
@@ -50,12 +56,25 @@ impl Shared {
             state: Mutex::new(PvState::default()),
             writer: Mutex::new(None),
             notify,
+            listeners: Mutex::new(Vec::new()),
         })
     }
 
     /// Change the state and tell the UI about it.
     pub(crate) fn update(&self, f: impl FnOnce(&mut PvState)) {
-        f(&mut self.state.lock().unwrap());
+        {
+            let mut state = self.state.lock().unwrap();
+            f(&mut state);
+            // Under the state lock, so listeners see changes in order.
+            let mut listeners = self.listeners.lock().unwrap();
+            listeners.retain(|l| match l.upgrade() {
+                Some(l) => {
+                    l(&state);
+                    true
+                }
+                None => false,
+            });
+        }
         if let Some(n) = self.notify.read().unwrap().as_ref() {
             n();
         }
@@ -97,6 +116,19 @@ impl Pv {
     /// The latest value, alarm and metadata.
     pub fn state(&self) -> PvState {
         self.0.shared.snapshot()
+    }
+
+    /// Call `listener` with the current state now and with each change
+    /// after, until the caller drops it: unlike [`Pv::state`] read once a
+    /// frame, this sees every monitor update.
+    pub fn listen(&self, listener: &Listener) {
+        let shared = &self.0.shared;
+        let state = shared.state.lock().unwrap();
+        listener(&state);
+        let mut listeners = shared.listeners.lock().unwrap();
+        // Drop dead ones here too: a PV that never changes is never updated.
+        listeners.retain(|l| l.strong_count() > 0);
+        listeners.push(Arc::downgrade(listener));
     }
 
     /// Write a value given as text; the backend converts it to the PV's type.
@@ -241,5 +273,38 @@ impl PvManager {
             }
             Scheme::Loc => unreachable!("local PVs have no task"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn listeners_see_each_change_until_dropped() {
+        let pvs = PvManager::new();
+        let pv = pvs.subscribe("loc://listen_test(1)");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s = seen.clone();
+        let listener: Listener = Arc::new(move |st: &PvState| {
+            s.lock().unwrap().push(st.value.as_f64());
+        });
+        pv.listen(&listener);
+        pv.write("2");
+        pv.write("3");
+        drop(listener);
+        pv.write("4");
+        assert_eq!(*seen.lock().unwrap(), [Some(1.0), Some(2.0), Some(3.0)]);
+    }
+
+    #[test]
+    fn listen_drops_dead_listeners() {
+        let pvs = PvManager::new();
+        let pv = pvs.subscribe("loc://listen_prune(1)");
+        for _ in 0..3 {
+            let listener: Listener = Arc::new(|_: &PvState| {});
+            pv.listen(&listener);
+        }
+        assert_eq!(pv.0.shared.listeners.lock().unwrap().len(), 1);
     }
 }
