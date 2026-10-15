@@ -63,8 +63,10 @@ full screen, `--snapshot out.png` renders headless and exits (with `--size WxH`
 or `--size auto`, `--scale-factor F` to render as on a high-DPI screen,
 `--wait SECONDS`, and `--click X,Y` or `--right-click X,Y` to interact
 first), `BOBVIEW_LOG=debug` gives more output. The window opens at the size
-of the first display (when the screen has room) and follows the display while
-you leave its size alone. The toolbar, menus and keypad are scaled down on a
+of the first display (when the screen has room). With Auto-size (🗖 in the
+toolbar, on by default) it is resized to each display you open, unless it
+is maximised or full screen; turn it off to keep the window's size and scale
+each display to fit. The toolbar, menus and keypad are scaled down on a
 small high-DPI screen so that they take a small share of it; `--ui-scale F`
 (or `BOBVIEW_UI_SCALE=F`) fixes their size, 1 being the desktop's own scale. Hover over a widget to see its
 PV and value; right-click it (long-press on a touch screen) to copy the PV

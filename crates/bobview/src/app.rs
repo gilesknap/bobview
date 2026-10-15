@@ -228,6 +228,12 @@ impl BobApp {
                     if ui.button("− Zoom out").clicked() {
                         self.zoom_by(1.0 / 1.25);
                     }
+                    if ui
+                        .selectable_label(self.chrome.auto_size, "🗖 Auto-size window")
+                        .clicked()
+                    {
+                        self.toggle_auto_size();
+                    }
                     if ui.selectable_label(self.keypad_mode, "⌨ Keypad").clicked() {
                         self.keypad_mode = !self.keypad_mode;
                     }
@@ -250,6 +256,13 @@ impl BobApp {
                     self.zoom_by(1.25);
                 }
                 ui.label(format!("{:.0}%", self.zoom * 100.0));
+                if ui
+                    .selectable_label(self.chrome.auto_size, "🗖")
+                    .on_hover_text("Auto-size: resize the window to fit each display opened")
+                    .clicked()
+                {
+                    self.toggle_auto_size();
+                }
                 ui.separator();
                 if ui
                     .selectable_label(self.keypad_mode, "⌨")
@@ -267,6 +280,15 @@ impl BobApp {
                     .on_hover_text(&s.display.name);
             }
         });
+    }
+
+    /// Turn Auto-size on or off; turning it on sizes the window to the
+    /// current display straight away.
+    fn toggle_auto_size(&mut self) {
+        self.chrome.auto_size = !self.chrome.auto_size;
+        if self.chrome.auto_size {
+            self.chrome.display_changed();
+        }
     }
 
     fn reload(&mut self) {

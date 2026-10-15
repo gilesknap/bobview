@@ -177,7 +177,14 @@ pub enum Action {
         url: String,
         description: String,
     },
-    /// Anything else (scripts, commands, …): shown but does nothing.
+    /// Run a script: `file` names it, and an embedded one (`EmbeddedJs`,
+    /// `EmbeddedPy`) has its source in `text`.
+    Execute {
+        file: String,
+        text: String,
+        description: String,
+    },
+    /// Anything else (commands, …): shown but does nothing.
     Unsupported {
         kind: String,
         description: String,
@@ -207,6 +214,20 @@ impl Action {
                 url: text("url"),
                 description,
             },
+            "execute" => {
+                let script = el.child("script");
+                Action::Execute {
+                    file: script
+                        .and_then(|s| s.attr("file"))
+                        .unwrap_or("")
+                        .to_string(),
+                    text: script
+                        .and_then(|s| s.child_text("text"))
+                        .unwrap_or("")
+                        .to_string(),
+                    description,
+                }
+            }
             other => Action::Unsupported {
                 kind: other.to_string(),
                 description,
@@ -219,6 +240,7 @@ impl Action {
             Action::OpenDisplay { description, .. }
             | Action::WritePv { description, .. }
             | Action::OpenWebpage { description, .. }
+            | Action::Execute { description, .. }
             | Action::Unsupported { description, .. } => description,
         }
     }

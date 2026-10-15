@@ -69,6 +69,11 @@ impl Node {
         expand_for(&self.w, &self.macros, text)
     }
 
+    /// Expand macros with `macros` in place of the widget's own.
+    pub fn expand_with(&self, macros: &Macros, text: &str) -> String {
+        expand_for(&self.w, macros, text)
+    }
+
     /// An expanded simple property.
     pub fn prop(&self, name: &str) -> String {
         self.w

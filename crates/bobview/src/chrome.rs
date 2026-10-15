@@ -135,11 +135,10 @@ pub struct Chrome {
     settled: bool,
     /// A display was shown: size the window to it if allowed.
     resize: bool,
-    /// The size, in physical pixels, the window was last given; `None` before
-    /// the first display, and after the user (or window manager) chose another.
-    sized_px: Option<Vec2>,
-    /// The window has not been sized yet (only the first display may size it
-    /// when `sized_px` is `None`).
+    /// Size the window to every display shown, not only the first; the
+    /// toolbar's Auto-size toggle.
+    pub auto_size: bool,
+    /// The window has not been sized yet.
     first: bool,
 }
 
@@ -152,7 +151,7 @@ impl Chrome {
             panels: 56.0,
             settled: false,
             resize: false,
-            sized_px: None,
+            auto_size: true,
             first: true,
         }
     }
@@ -188,7 +187,6 @@ impl Chrome {
             self.resize = false;
             return;
         };
-        let ppp = ctx.pixels_per_point();
         let (info, inner) = ctx.input(|i| (i.viewport().clone(), i.content_rect().size()));
         // Wait for the window to know its monitor, so as never to size a
         // window larger than the screen.
@@ -196,20 +194,15 @@ impl Chrome {
             return;
         }
         self.resize = false;
-        let follow = match self.sized_px {
-            Some(px) => (inner * ppp - px).length() < 4.0,
-            None => self.first,
-        };
+        let follow = self.first || self.auto_size;
         self.first = false;
         if !follow || !can_resize(&info, ctx.zoom_factor()) {
-            self.sized_px = None;
             return;
         }
         let size = window_size(display, self.panels, info.monitor_size);
         if (size - inner).length() >= 1.0 {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
         }
-        self.sized_px = Some(size * ppp);
     }
 }
 
