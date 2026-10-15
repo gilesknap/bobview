@@ -13,4 +13,5 @@ bob = { path = "../bob" }
 pv = { path = "../pv" }
 png = "0.18.1"
 ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
+libc = "0.2.190"
 resvg = { version = "0.48.1", default-features = false, features = ["raster-images"] }

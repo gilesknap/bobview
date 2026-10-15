@@ -43,6 +43,11 @@ pub struct BobApp {
     next_trend: u64,
     /// The display at `current`, being fetched and built on a thread.
     loading: Option<std::sync::mpsc::Receiver<Result<Screen, bob::Error>>>,
+    /// Displays named by command actions, worked out on threads.
+    launched: (
+        std::sync::mpsc::Sender<Location>,
+        std::sync::mpsc::Receiver<Location>,
+    ),
     chrome: Chrome,
     /// The window title last set, the shown display's title.
     window_title: String,
@@ -90,6 +95,7 @@ impl BobApp {
             trends: Vec::new(),
             next_trend: 0,
             loading: None,
+            launched: std::sync::mpsc::channel(),
             chrome: Chrome::new(ui_scale),
             window_title: String::new(),
             open_path: start
@@ -169,6 +175,23 @@ impl BobApp {
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => self.loading = None,
         }
+    }
+
+    /// Run a command action on a thread, so a slow launcher script or file
+    /// system doesn't freeze the window, and open the display it names.
+    fn launch(&self, ctx: &egui::Context, base: Option<Source>, dir: Option<Source>, cmd: String) {
+        let (tx, ctx) = (self.launched.0.clone(), ctx.clone());
+        std::thread::spawn(
+            move || match crate::launch::command_target(base.as_ref(), dir, &cmd) {
+                Some((file, macros)) => {
+                    let source = Source::File(file);
+                    log::info!("open {source} (window) from '{cmd}'");
+                    tx.send(Location { source, macros }).ok();
+                    ctx.request_repaint();
+                }
+                None => log::warn!("command '{cmd}' is not supported"),
+            },
+        );
     }
 
     /// Navigate to a display, recording where we came from.
@@ -460,6 +483,9 @@ impl eframe::App for BobApp {
 impl BobApp {
     pub fn draw(&mut self, ui: &mut egui::Ui) {
         self.poll_loading(ui.ctx());
+        while let Ok(loc) = self.launched.1.try_recv() {
+            self.open(loc);
+        }
         if !self.keypad_mode && ui.input(|i| i.any_touches()) {
             self.keypad_mode = true;
         }
@@ -557,6 +583,11 @@ impl BobApp {
                         .push(Trend::new(self.next_trend, &names, &self.pvs));
                     self.next_trend += 1;
                 }
+                Request::Command {
+                    base,
+                    directory,
+                    command,
+                } => self.launch(ui.ctx(), base, directory, command),
                 Request::Close if !self.back.is_empty() => self.go_back(),
                 Request::Close => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
                 Request::Webpage(url) => {

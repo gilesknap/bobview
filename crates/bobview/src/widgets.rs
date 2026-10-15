@@ -30,6 +30,13 @@ pub enum Request {
     Trend(Vec<String>),
     /// Close the display: go back to the one before, or close the window.
     Close,
+    /// Run a command action of the display at `base` (see
+    /// [`crate::launch::command_target`]) and open the display it names.
+    Command {
+        base: Option<Source>,
+        directory: Option<Source>,
+        command: String,
+    },
 }
 
 /// Per-frame drawing context.
@@ -1263,15 +1270,13 @@ pub(crate) fn run_action(node: &Node, action: &Action, cx: &mut Cx) {
             }
             let directory = node.expand(directory);
             let directory = (!directory.trim().is_empty()).then(|| node.resolve(&directory));
-            // Only DLS launcher scripts of local displays, which open a display.
-            match crate::launch::command_target(node.base.as_ref(), directory, &command) {
-                Some((file, macros)) => cx.requests.push(Request::Open {
-                    source: Source::File(file),
-                    macros,
-                    target: "window".into(),
-                }),
-                None => log::warn!("command '{command}' is not supported"),
-            }
+            // Only DLS launcher scripts of local displays, which open a
+            // display; run on a thread, as a script may take seconds.
+            cx.requests.push(Request::Command {
+                base: node.base.clone(),
+                directory,
+                command,
+            });
         }
         Action::CloseDisplay { .. } => cx.requests.push(Request::Close),
         Action::Trend { pv_names, .. } => trend(node, pv_names, cx),
@@ -2085,7 +2090,20 @@ mod tests {
                 assert!(matches!(a, Action::Command { .. }));
                 run_action(node, &a, &mut cx);
             }
-            assert!(requests.is_empty(), "{dir}");
+            // The command is run on a thread, where it is refused.
+            assert_eq!(requests.len(), 1, "{dir}");
+            for r in requests {
+                let Request::Command {
+                    base,
+                    directory,
+                    command,
+                } = r
+                else {
+                    panic!("not a command: {dir}");
+                };
+                let target = crate::launch::command_target(base.as_ref(), directory, &command);
+                assert!(target.is_none(), "{dir}");
+            }
         }
     }
 

@@ -9,8 +9,10 @@
 //!
 //! Nothing is run for a display fetched over HTTP, nor any script that does
 //! not lie beside or under the display or in a linked folder of its Eclipse
-//! project (after macros and `..` are resolved).
+//! project (after macros and `..` are resolved), nor one that other users may
+//! change (writable by others, or in a folder that is).
 
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -48,13 +50,19 @@ pub fn command_target(
             return None;
         }
     };
-    target(&display_dir, &dir, command)
+    target(&display_dir, &dir, command, Instant::now() + TIMEOUT)
 }
 
 /// The display (a path) and macros that `command`, run in `dir` for a
 /// display in `display_dir`, would open CS-Studio with; `None` if it is not
-/// a launcher script in the display's folders (see [`allowed`]).
-fn target(display_dir: &Path, dir: &Path, command: &str) -> Option<(PathBuf, Macros)> {
+/// a launcher script in the display's folders (see [`allowed`]). The script
+/// is stopped if it is still running at `deadline`.
+fn target(
+    display_dir: &Path,
+    dir: &Path,
+    command: &str,
+    deadline: Instant,
+) -> Option<(PathBuf, Macros)> {
     let words: Vec<&str> = command.split_whitespace().collect();
     let (program, args) = words.split_first()?;
     // Only a script named by a path, as `./srCellVacuum`, not one on $PATH.
@@ -66,11 +74,17 @@ fn target(display_dir: &Path, dir: &Path, command: &str) -> Option<(PathBuf, Mac
         log::warn!("not running '{command}': outside the display's folders");
         return None;
     }
-    let text = std::fs::read(bob::project::locate(&script)).ok()?;
+    let real = bob::project::locate(&script);
+    if others_may_write(&real) {
+        log::warn!("not running '{command}': other users may change it");
+        return None;
+    }
+    let text = std::fs::read(&real).ok()?;
     if text.len() > 1 << 20 || !text.starts_with(b"#!") || !contains(&text, b"runcss.sh") {
         return None;
     }
-    let args = run(&text, args)?;
+    log::info!("running launcher '{command}' ({})", real.display());
+    let args = run(&text, args, deadline)?;
     let (display, rest) = args.split_first()?;
     let macros = rest
         .windows(2)
@@ -89,6 +103,15 @@ fn allowed(display_dir: &Path, path: &Path) -> bool {
         return false;
     };
     roots(display_dir).iter().any(|root| real.starts_with(root))
+}
+
+/// Whether users other than the owner may write to `file` or the folder
+/// holding it, and so could have planted a launcher there.
+fn others_may_write(file: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let writable = |p: &Path| std::fs::metadata(p).map_or(true, |m| m.mode() & 0o002 != 0);
+    let dir = file.parent().filter(|d| !d.as_os_str().is_empty());
+    writable(file) || writable(dir.unwrap_or(Path::new(".")))
 }
 
 /// The real directories a display in `display_dir` may run scripts from:
@@ -134,9 +157,20 @@ fn without_cur_dir(path: &Path) -> PathBuf {
 /// one named `<stem>.sh` first, with no arguments and with each number in
 /// the file name, bare and with an `r` (`srCellVacuum 05`, `05r` for
 /// `SR05C_rack.opi`), and takes the first that opens `file`.
+///
+/// This runs scripts the user did not click, so only for a display in an
+/// Eclipse project (a CS-Studio workspace, as DLS screens are opened), not
+/// for any `.opi` file lying around.
 pub fn defaults(file: &Path) -> Option<Macros> {
     let file = without_cur_dir(file);
     let dir = parent(&file);
+    if !in_project(&dir) {
+        log::info!(
+            "not trying launcher scripts for {}: it is not in an Eclipse project",
+            file.display()
+        );
+        return None;
+    }
     let name = file.file_name()?.to_str()?;
     let stem = name.rsplit_once('.').map_or(name, |(s, _)| s);
     let mut scripts: Vec<String> = std::fs::read_dir(bob::project::locate(&dir))
@@ -151,16 +185,16 @@ pub fn defaults(file: &Path) -> Option<Macros> {
         args.push(format!("{n}r"));
         args.push(n);
     }
-    let start = Instant::now();
+    let end = Instant::now() + SEARCH_TIME;
     for script in scripts.iter().take(20) {
         for arg in &args {
-            if start.elapsed() > SEARCH_TIME {
+            if Instant::now() >= end {
                 log::warn!("gave up looking for the launcher of {}", file.display());
                 return None;
             }
             let command = format!("./{script} {arg}");
-            log::debug!("trying {command}");
-            if let Some((target, macros)) = target(&dir, &dir, &command)
+            let deadline = end.min(Instant::now() + TIMEOUT);
+            if let Some((target, macros)) = target(&dir, &dir, &command, deadline)
                 && without_cur_dir(&target) == file
             {
                 log::info!("macros from {command}: {macros:?}");
@@ -169,6 +203,17 @@ pub fn defaults(file: &Path) -> Option<Macros> {
         }
     }
     None
+}
+
+/// Whether `dir` (as written, or where it really is) is in an Eclipse
+/// project: a folder above it has a `.project`.
+fn in_project(dir: &Path) -> bool {
+    let dir = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let dir = bob::project::normalize(&dir);
+    let real = std::fs::canonicalize(bob::project::locate(&dir)).ok();
+    std::iter::once(dir)
+        .chain(real)
+        .any(|d| d.ancestors().any(|a| a.join(".project").is_file()))
 }
 
 /// The runs of digits in `text`, with a `-N` suffix kept (`02-1`).
@@ -192,14 +237,14 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 
 /// Run a copy of `script` with `args` beside the stand-in `runcss.sh`, and
 /// return the arguments it passed that.
-fn run(script: &[u8], args: &[&str]) -> Option<Vec<String>> {
+fn run(script: &[u8], args: &[&str], deadline: Instant) -> Option<Vec<String>> {
     // The temp dir is often mounted noexec (as on RHEL hosts), so try places
     // that usually allow running files first.
     for parent in run_dirs() {
         let Some(dir) = private_dir(&parent) else {
             continue;
         };
-        let result = run_in(&dir, script, args);
+        let result = run_in(&dir, script, args, deadline);
         let _ = std::fs::remove_dir_all(&dir);
         match result {
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -238,25 +283,42 @@ fn run_dirs() -> Vec<PathBuf> {
 
 /// [`run`] in `dir`: an error if the launcher cannot be started, `Ok(None)`
 /// if it did not pass `runcss.sh` anything.
-fn run_in(dir: &Path, script: &[u8], args: &[&str]) -> std::io::Result<Option<Vec<String>>> {
+fn run_in(
+    dir: &Path,
+    script: &[u8],
+    args: &[&str],
+    deadline: Instant,
+) -> std::io::Result<Option<Vec<String>>> {
     let launcher = dir.join("launcher");
     write_executable(&launcher, script)?;
     write_executable(&dir.join("runcss.sh"), STUB.as_bytes())?;
+    // The stand-in first on the PATH, so a bare `runcss.sh` finds it too.
+    let mut path = std::ffi::OsString::from(dir);
+    if let Some(p) = std::env::var_os("PATH").filter(|p| !p.is_empty()) {
+        path.push(":");
+        path.push(p);
+    }
     let mut child = Command::new(&launcher)
         .args(args)
         .current_dir(dir)
+        .env("PATH", path)
+        // Its own process group, so that it can be stopped with whatever
+        // it started.
+        .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
-    let start = Instant::now();
     loop {
         match child.try_wait()? {
             Some(_) => break,
-            None if start.elapsed() > TIMEOUT => {
-                // Not waited for: a process stuck on a hung file system
-                // ignores even SIGKILL.
-                let _ = child.kill();
+            None if Instant::now() >= deadline => {
+                // SAFETY: kill(2) on the group this child leads; it is not
+                // yet reaped, so the group id cannot have been reused.
+                unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
+                // Reaped on a thread: a process stuck on a hung file
+                // system ignores even SIGKILL until the file system answers.
+                std::thread::spawn(move || child.wait());
                 log::warn!("launcher script took too long");
                 return Ok(None);
             }
@@ -358,10 +420,63 @@ exec "${SRC}/runcss.sh" $OPI -m $MACROS "$@"
         assert!(target("./other 04").is_none());
         assert!(target("ls").is_none());
         assert!(target("./missing").is_none());
-        // A display opened directly gets the macros its launcher gives it.
+        // A display opened directly gets the macros its launcher gives it,
+        // only in an Eclipse project.
+        assert!(defaults(&dir.join("srCell04Vacuum.opi")).is_none());
+        std::fs::write(dir.join(".project"), "<projectDescription/>").unwrap();
         let macros = defaults(&dir.join("srCell04Vacuum.opi")).unwrap();
         assert_eq!(macros.get("pcell"), Some("03"));
         assert!(defaults(&dir.join("srCell05Vacuum.opi")).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_bare_runcss_finds_the_stand_in() {
+        let dir = tmp("bare");
+        let script = "#!/bin/sh\nrunCSS=runcss.sh\nexec $runCSS a.opi -m x=1\n";
+        write_executable(&dir.join("go"), script.as_bytes()).unwrap();
+        let display = Source::File(dir.join("x.opi"));
+        let (file, macros) = command_target(Some(&display), None, "./go").unwrap();
+        assert_eq!((file, macros.get("x")), (dir.join("a.opi"), Some("1")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn runs_no_script_others_may_change() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp("writable");
+        let marker = dir.join("ran");
+        marking_launcher(&dir, &marker);
+        let display = Source::File(dir.join("x.opi"));
+        let mode = |p: &Path, m| std::fs::set_permissions(p, PermissionsExt::from_mode(m));
+        mode(&dir.join("launch"), 0o777).unwrap();
+        assert!(command_target(Some(&display), None, "./launch").is_none());
+        mode(&dir.join("launch"), 0o700).unwrap();
+        mode(&dir, 0o777).unwrap();
+        assert!(command_target(Some(&display), None, "./launch").is_none());
+        assert!(!marker.exists());
+        mode(&dir, 0o755).unwrap();
+        assert!(command_target(Some(&display), None, "./launch").is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn stops_a_slow_launcher_and_what_it_started() {
+        let dir = tmp("slow");
+        let marker = dir.join("late");
+        let script = format!(
+            "#!/bin/sh\n(sleep 1; touch '{}') &\nsleep 10\nruncss.sh x.opi\n",
+            marker.display()
+        );
+        let start = Instant::now();
+        let deadline = start + Duration::from_millis(300);
+        assert_eq!(run(script.as_bytes(), &[], deadline), None);
+        assert!(start.elapsed() < Duration::from_secs(2));
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(
+            !marker.exists(),
+            "the script's background job was not stopped"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

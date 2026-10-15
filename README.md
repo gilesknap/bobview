@@ -193,10 +193,14 @@ No command is ever run for a display fetched over http(s), nor in a
 `command_directory` on the web. Only a launcher script that resolves (after
 macros, `..` and project links) to a local file beside or under the display,
 or in a linked folder of its Eclipse project, is run; anything else, such as
-an absolute path elsewhere or a `../..` escape, is refused and logged.
+an absolute path elsewhere or a `../..` escape, is refused and logged, as is
+a script that any user may change (world-writable, or in a world-writable
+folder). Each script run is logged.
 
 A screen that needs such macros can be opened directly: for an `.opi` given
-on the command line, bobview tries the launcher scripts in its directory
+on the command line in an Eclipse project (through its project path or with
+`--project`, so not for any `.opi` file lying around), bobview tries the
+launcher scripts in its directory
 (the one named `<screen>.sh` first) with no arguments and with each number
 in the file name, bare and with an `r`, and uses the macros of the first
 that opens this screen. So `linacVacuum.opi` gets `dom=LI` from
