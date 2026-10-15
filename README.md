@@ -138,7 +138,10 @@ or `ws://` when the page is plain `http:` and the port isn't 443) or a full
 cross-origin requests. Writes are off unless the server has `--write`, since
 they go out as the server's user. Browsers let any page open a websocket, so
 with `--write` the server accepts only pages from itself (by `Origin`), plus
-any named with `--allow-origin https://host.example.com` (repeatable).
+any named with `--allow-origin https://host.example.com` (repeatable). Those
+pages must also call the server by an IP address, `localhost`, this machine's
+name, the host of an `--allow-origin` or a name given with `--host NAME`
+(repeatable), so a page cannot reach it through a DNS name of its own.
 Images from PVA are not sent over PVWS yet.
 
 ## Build

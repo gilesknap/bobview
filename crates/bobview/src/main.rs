@@ -172,12 +172,42 @@ fn main() -> eframe::Result {
     )
 }
 
-/// Parse `P=X,R=Y` into macros.
+/// Parse `P=X,R=Y` into macros; `\,` and `\\` in a value stand for `,`
+/// and `\`.
 fn parse_macros(text: &str) -> Macros {
-    Macros::from_pairs(text.split(',').filter_map(|kv| {
+    // Split on unescaped commas, keeping escapes for now.
+    let mut pairs = vec![String::new()];
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            ',' => pairs.push(String::new()),
+            '\\' => {
+                let last = pairs.last_mut().expect("a pair");
+                last.push(c);
+                last.extend(chars.next());
+            }
+            _ => pairs.last_mut().expect("a pair").push(c),
+        }
+    }
+    Macros::from_pairs(pairs.iter().filter_map(|kv| {
         let (k, v) = kv.split_once('=')?;
-        Some((k.trim().to_string(), v.trim().to_string()))
+        Some((k.trim().to_string(), unescape_macro(v.trim())))
     }))
+}
+
+fn unescape_macro(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match (c, chars.clone().next()) {
+            ('\\', Some(next @ (',' | '\\'))) => {
+                out.push(next);
+                chars.next();
+            }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// The browser build: the page's query string names the display, its
@@ -295,5 +325,15 @@ mod tests {
         let m = super::parse_macros("P=BL01T, R=:DET:");
         assert_eq!(m.get("P"), Some("BL01T"));
         assert_eq!(m.get("R"), Some(":DET:"));
+    }
+
+    #[test]
+    fn parses_escaped_macros() {
+        let m = super::parse_macros(r"LIST=a\,b,P=X");
+        assert_eq!(m.get("LIST"), Some("a,b"));
+        assert_eq!(m.get("P"), Some("X"));
+        let m = super::parse_macros(r"D=C:\\dir\\,E=a\b");
+        assert_eq!(m.get("D"), Some(r"C:\dir\"));
+        assert_eq!(m.get("E"), Some(r"a\b"));
     }
 }

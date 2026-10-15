@@ -38,6 +38,9 @@ Open http://HOST:PORT/?display=FILE.bob in a browser (default index.bob).
                          only pages from this server may then connect
   --allow-origin ORIGIN  with --write, also let pages from ORIGIN connect, e.g.
                          https://host.example.com (may be repeated)
+  --host NAME            with --write, let browsers call this server NAME, as
+                         well as an IP address, localhost, this machine's name
+                         and the hosts of --allow-origin (may be repeated)
   --throttle-ms MS       least time between updates of one PV (default 100)
   -h, --help             show this help
   -V, --version          show the version
@@ -57,6 +60,7 @@ fn main() {
     let mut config = pvws::Config {
         write: false,
         allow_origins: Vec::new(),
+        hosts: Vec::new(),
         throttle: Duration::from_millis(100),
     };
     let mut args = std::env::args().skip(1);
@@ -68,6 +72,7 @@ fn main() {
             "--opi" => opi = args.next().map(PathBuf::from),
             "--write" => config.write = true,
             "--allow-origin" => config.allow_origins.extend(args.next()),
+            "--host" => config.hosts.extend(args.next()),
             "--throttle-ms" => config.throttle = Duration::from_millis(parse(&arg, args.next())),
             "-h" | "--help" => {
                 print!("{USAGE}");
@@ -82,6 +87,9 @@ fn main() {
                 std::process::exit(2);
             }
         }
+    }
+    if !config.write && !(config.allow_origins.is_empty() && config.hosts.is_empty()) {
+        log::warn!("--allow-origin and --host do nothing without --write");
     }
     let web = web.unwrap_or_else(default_web);
     if !web.join("index.html").is_file() {
@@ -141,15 +149,21 @@ fn default_web() -> PathBuf {
 
 /// Hide dot-files and dot-dirs, such as `.git` when `--opi` is a checkout.
 async fn hide_dot_files(request: Request, next: Next) -> Response {
-    let hidden =
-        request.uri().path().split('/').any(|segment| {
-            segment.starts_with('.') || segment.to_ascii_lowercase().starts_with("%2e")
-        });
-    if hidden {
+    if is_hidden(request.uri().path()) {
         StatusCode::NOT_FOUND.into_response()
     } else {
         next.run(request).await
     }
+}
+
+/// Whether a path names a dot-file or something in a dot-dir. ServeDir
+/// decodes the whole path before splitting it, so this does too: `%2F` is
+/// a separator to it.
+fn is_hidden(path: &str) -> bool {
+    percent_encoding::percent_decode_str(path)
+        .decode_utf8_lossy()
+        .split('/')
+        .any(|segment| segment.starts_with('.'))
 }
 
 fn parse<T: std::str::FromStr>(flag: &str, value: Option<String>) -> T {
@@ -159,5 +173,22 @@ fn parse<T: std::str::FromStr>(flag: &str, value: Option<String>) -> T {
             eprintln!("{flag}: expected a number, not {value:?}");
             std::process::exit(2);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_hidden;
+
+    #[test]
+    fn hides_dot_files() {
+        assert!(is_hidden("/.git/config"));
+        assert!(is_hidden("/%2egit/config"));
+        assert!(is_hidden("/%2Egit/config"));
+        assert!(is_hidden("/sub%2F.git%2Fconfig"));
+        assert!(is_hidden("/a/.env"));
+        assert!(!is_hidden("/a/b.bob"));
+        assert!(!is_hidden("/a..b/c.bob"));
+        assert!(!is_hidden("/"));
     }
 }

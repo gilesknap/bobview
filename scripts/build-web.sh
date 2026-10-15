@@ -18,6 +18,11 @@ if [[ "$(pwd)/" == "${out}/"* ]]; then
     echo "will not replace ${out}, which holds the source" >&2
     exit 1
 fi
+# It is replaced, so it must be empty or an earlier build.
+if [[ -n "$(ls -A "${out}")" && ! -e "${out}/bobview.js" && ! -e "${out}/index.html" ]]; then
+    echo "will not replace ${out}, which is not empty and not a web build" >&2
+    exit 1
+fi
 
 want=$(sed -n '/^name = "wasm-bindgen"$/{n;s/^version = "\(.*\)"$/\1/p;}' Cargo.lock)
 have=$(wasm-bindgen --version 2>/dev/null | awk '{print $2}' || true)

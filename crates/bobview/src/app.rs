@@ -702,7 +702,12 @@ fn set_page_url(loc: &Location) {
     let display = loc.source.to_string();
     let params = url.search_params();
     params.set("display", display.strip_prefix(&dir).unwrap_or(&display));
-    let macros: Vec<String> = loc.macros.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    // Escaped for parse_macros.
+    let macros: Vec<String> = loc
+        .macros
+        .iter()
+        .map(|(k, v)| format!("{k}={}", v.replace('\\', r"\\").replace(',', r"\,")))
+        .collect();
     if macros.is_empty() {
         params.delete("macros");
     } else {

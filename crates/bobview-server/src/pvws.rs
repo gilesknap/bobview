@@ -6,7 +6,8 @@
 //! is not connected.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::net::{Ipv4Addr, Ipv6Addr};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use axum::extract::State;
@@ -25,6 +26,10 @@ pub struct Config {
     /// Origins other than the server's own whose pages may connect when
     /// writes are on, e.g. `https://host.example.com`.
     pub allow_origins: Vec<String>,
+    /// Names browsers may use for this server when writes are on, besides
+    /// IP addresses, `localhost`, this machine's name and the hosts of
+    /// `allow_origins`; checked against `Host` to stop DNS rebinding.
+    pub hosts: Vec<String>,
     /// Least time between two rounds of updates to one client.
     pub throttle: Duration,
 }
@@ -68,31 +73,119 @@ pub async fn socket(
     ws: WebSocketUpgrade,
 ) -> Response {
     // Browsers let any page open a websocket to any server, so with writes
-    // on, only pages from here (or allowed origins) may.
-    if hub.config.write && !origin_allowed(&headers, &hub.config.allow_origins) {
+    // on, only pages from here (or allowed origins) may. A page can also
+    // reach here by a name of its own that resolves to this server (DNS
+    // rebinding), so the name it used must be one of ours too.
+    if hub.config.write && !browser_allowed(&headers, &hub.config) {
         let origin = headers.get(ORIGIN).and_then(|o| o.to_str().ok());
-        log::warn!("refused a PVWS client from origin {origin:?} (see --allow-origin)");
+        let host = headers.get(HOST).and_then(|h| h.to_str().ok());
+        log::warn!(
+            "refused a PVWS client from origin {origin:?} to host {host:?} \
+             (see --allow-origin and --host)"
+        );
         return StatusCode::FORBIDDEN.into_response();
     }
     ws.max_message_size(MAX_MESSAGE)
         .on_upgrade(move |socket| serve(hub, socket))
 }
 
-/// Whether a request's `Origin` is this server or one of `allowed`; a
-/// request without one is not from a browser page.
-fn origin_allowed(headers: &HeaderMap, allowed: &[String]) -> bool {
+/// Whether a request comes from a page of this server or an allowed
+/// origin, by a name of this server; a request without an `Origin` is not
+/// from a browser page.
+fn browser_allowed(headers: &HeaderMap, config: &Config) -> bool {
     let Some(origin) = headers.get(ORIGIN) else {
         return true;
     };
     let Ok(origin) = origin.to_str() else {
         return false;
     };
-    if allowed.iter().any(|a| a.trim_end_matches('/') == origin) {
+    let Some(host) = headers.get(HOST).and_then(|h| h.to_str().ok()) else {
+        return false;
+    };
+    let host = host.to_ascii_lowercase();
+    if !host_allowed(host_name(&host), config) {
+        return false;
+    }
+    let origin = normalise_origin(origin);
+    if config
+        .allow_origins
+        .iter()
+        .any(|a| normalise_origin(a) == origin)
+    {
         return true;
     }
-    let host = headers.get(HOST).and_then(|h| h.to_str().ok());
-    let origin_host = origin.split_once("://").map(|(_, host)| host);
-    host.is_some_and(|h| origin_host.is_some_and(|o| o.eq_ignore_ascii_case(h)))
+    // The page's own server, with any default port left out of both.
+    let (scheme, origin_host) = origin.split_once("://").unwrap_or_default();
+    origin_host == strip_default_port(scheme, &host)
+}
+
+/// Whether browsers may call this server `host` (lowercase, no port).
+fn host_allowed(host: &str, config: &Config) -> bool {
+    if host.parse::<Ipv4Addr>().is_ok()
+        || host
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .is_some_and(|h| h.parse::<Ipv6Addr>().is_ok())
+        || host == "localhost"
+    {
+        return true;
+    }
+    let short = |name: &str| name.split('.').next().unwrap_or_default().to_string();
+    let ours = machine_names().iter().any(|name| {
+        let short = short(name);
+        host == name
+            || host == short
+            || host
+                .strip_prefix(&short)
+                .is_some_and(|d| d.starts_with('.'))
+    });
+    ours || config.hosts.iter().any(|h| h.eq_ignore_ascii_case(host))
+        || config.allow_origins.iter().any(|a| {
+            let origin = normalise_origin(a);
+            let host_port = origin.split_once("://").map_or(&*origin, |(_, h)| h);
+            host_name(host_port) == host
+        })
+}
+
+/// The host of a `host[:port]`, keeping the brackets of an IPv6 address.
+fn host_name(host_port: &str) -> &str {
+    match host_port.find(']') {
+        Some(end) if host_port.starts_with('[') => &host_port[..=end],
+        _ => host_port.split(':').next().unwrap_or_default(),
+    }
+}
+
+/// An origin in one spelling: lowercase, no trailing `/`, no default port.
+fn normalise_origin(origin: &str) -> String {
+    let origin = origin.trim_end_matches('/').to_ascii_lowercase();
+    match origin.split_once("://") {
+        Some((scheme, host)) => format!("{scheme}://{}", strip_default_port(scheme, host)),
+        None => origin,
+    }
+}
+
+fn strip_default_port<'a>(scheme: &str, host: &'a str) -> &'a str {
+    let port = match scheme {
+        "http" | "ws" => ":80",
+        "https" | "wss" => ":443",
+        _ => return host,
+    };
+    host.strip_suffix(port).unwrap_or(host)
+}
+
+/// This machine's names, as the kernel and /etc/hostname have them.
+fn machine_names() -> &'static [String] {
+    static NAMES: OnceLock<Vec<String>> = OnceLock::new();
+    NAMES.get_or_init(|| {
+        let mut names: Vec<String> = ["/proc/sys/kernel/hostname", "/etc/hostname"]
+            .iter()
+            .filter_map(|f| std::fs::read_to_string(f).ok())
+            .map(|n| n.trim().to_ascii_lowercase())
+            .filter(|n| !n.is_empty())
+            .collect();
+        names.dedup();
+        names
+    })
 }
 
 pub async fn info(State(hub): State<Arc<Hub>>) -> axum::Json<Json> {
@@ -540,24 +633,84 @@ mod tests {
         assert_eq!(bytes, [1, 0, 0, 0, 0xfe, 0xff, 0xff, 0xff]);
     }
 
+    fn config(allow_origins: &[&str], hosts: &[&str]) -> Config {
+        Config {
+            write: true,
+            allow_origins: allow_origins.iter().map(|s| s.to_string()).collect(),
+            hosts: hosts.iter().map(|s| s.to_string()).collect(),
+            throttle: Duration::ZERO,
+        }
+    }
+
+    fn headers(host: &str, origin: Option<&str>) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(HOST, host.parse().unwrap());
+        if let Some(o) = origin {
+            h.insert(ORIGIN, o.parse().unwrap());
+        }
+        h
+    }
+
     #[test]
     fn origins() {
-        let headers = |origin: Option<&str>| {
-            let mut h = HeaderMap::new();
-            h.insert(HOST, "server:8080".parse().unwrap());
-            if let Some(o) = origin {
-                h.insert(ORIGIN, o.parse().unwrap());
-            }
-            h
+        let none = config(&[], &["server"]);
+        let allowed = config(&["https://Other.example.com:443/"], &["server"]);
+        let ok = |host, origin, config: &Config| browser_allowed(&headers(host, origin), config);
+        assert!(ok("server:8080", None, &none));
+        assert!(ok("server:8080", Some("http://server:8080"), &none));
+        assert!(ok("Server:8080", Some("http://server:8080"), &none));
+        assert!(!ok("server:8080", Some("http://evil:8080"), &none));
+        assert!(!ok("server:8080", Some("http://server"), &none));
+        assert!(ok("server", Some("http://server"), &none));
+        assert!(ok("server:80", Some("http://server"), &none));
+        assert!(!ok("server:8080", Some("https://other.example.com"), &none));
+        assert!(ok(
+            "server:8080",
+            Some("https://other.example.com"),
+            &allowed
+        ));
+        // DNS rebinding: the attacker's name for this server.
+        assert!(!ok(
+            "evil.example:8080",
+            Some("http://evil.example:8080"),
+            &none
+        ));
+        // But no Origin is not a browser.
+        assert!(ok("evil.example:8080", None, &none));
+        assert!(ok("127.0.0.1:8080", Some("http://127.0.0.1:8080"), &none));
+        assert!(ok("[::1]:8080", Some("http://[::1]:8080"), &none));
+        assert!(ok("localhost:8080", Some("http://localhost:8080"), &none));
+        assert!(!ok("[evil]:8080", Some("http://[evil]:8080"), &none));
+        // The host of an allowed origin is one of ours.
+        assert!(ok(
+            "other.example.com",
+            Some("http://other.example.com"),
+            &allowed
+        ));
+    }
+
+    #[test]
+    fn machine_names_are_hosts() {
+        let Some(name) = machine_names().first() else {
+            return;
         };
-        let allowed = ["https://other.example.com".to_string()];
-        assert!(origin_allowed(&headers(None), &[]));
-        assert!(origin_allowed(&headers(Some("http://server:8080")), &[]));
-        assert!(!origin_allowed(&headers(Some("http://evil:8080")), &[]));
-        assert!(!origin_allowed(&headers(Some("http://server")), &[]));
-        let other = headers(Some("https://other.example.com"));
-        assert!(!origin_allowed(&other, &[]));
-        assert!(origin_allowed(&other, &allowed));
+        let short = name.split('.').next().unwrap();
+        let config = config(&[], &[]);
+        assert!(host_allowed(name, &config));
+        assert!(host_allowed(short, &config));
+        assert!(host_allowed(&format!("{short}.some.domain"), &config));
+        assert!(!host_allowed(&format!("{short}x.some.domain"), &config));
+    }
+
+    #[test]
+    fn normalised_origins() {
+        assert_eq!(
+            normalise_origin("HTTPS://Host.Example:443/"),
+            "https://host.example"
+        );
+        assert_eq!(normalise_origin("http://host:80"), "http://host");
+        assert_eq!(normalise_origin("http://host:8080"), "http://host:8080");
+        assert_eq!(normalise_origin("https://host:80"), "https://host:80");
     }
 
     #[test]
