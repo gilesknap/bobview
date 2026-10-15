@@ -71,14 +71,14 @@ pub fn links(dir: &Path) -> Option<Links> {
         return Some(links.clone());
     }
     let text = std::fs::read_to_string(dir.join(".project")).ok()?;
-    let links = parse(&text);
+    let links = parse(&text, dir);
     projects.insert(dir.to_path_buf(), links.clone());
     Some(links)
 }
 
-/// `<link><name>…</name><location>…</location></link>` entries of a
-/// `.project` (or `<locationURI>file:…`).
-fn parse(text: &str) -> Links {
+/// `<link><name>…</name><location>…</location></link>` entries of the
+/// `.project` in `dir` (or `<locationURI>`), resolved by [`location`].
+fn parse(text: &str, dir: &Path) -> Links {
     let Ok(doc) = roxmltree::Document::parse(text) else {
         return Vec::new();
     };
@@ -92,17 +92,71 @@ fn parse(text: &str) -> Links {
                     .map(str::trim)
             };
             let name = child("name")?;
-            let location = child("location").or_else(|| {
-                let uri = child("locationURI")?;
-                Some(
-                    uri.strip_prefix("file://")
-                        .or(uri.strip_prefix("file:"))
-                        .unwrap_or(uri),
-                )
-            })?;
-            Some((name.to_string(), PathBuf::from(location)))
+            let location = child("location").or_else(|| child("locationURI"))?;
+            Some((name.to_string(), location_path(location, dir)?))
         })
         .collect()
+}
+
+/// The directory a link's location (or location URI) names, for the project
+/// in `dir`: an absolute path, a `file:` URI, or one relative to the project
+/// as `PROJECT_LOC/x` or `PARENT-2-PROJECT_LOC/x`. `None` for anything else
+/// (`virtual:`, other variables or a bare relative path), which would
+/// otherwise be taken relative to the working directory.
+fn location_path(location: &str, dir: &Path) -> Option<PathBuf> {
+    let project_relative = |rest: &str| {
+        let (n, rest) = match rest.strip_prefix("PARENT-") {
+            Some(r) => {
+                let (n, r) = r.split_once("-PROJECT_LOC")?;
+                (n.parse::<usize>().ok()?, r)
+            }
+            None => (0, rest.strip_prefix("PROJECT_LOC")?),
+        };
+        let rest = rest.strip_prefix('/').or(rest.is_empty().then_some(rest))?;
+        let mut base = std::path::absolute(dir).ok()?;
+        for _ in 0..n {
+            base = base.parent()?.to_path_buf();
+        }
+        Some(base.join(percent_decode(rest)))
+    };
+    let path = if let Some(uri) = location.strip_prefix("file:") {
+        // file:/x, file:///x, or file://localhost/x.
+        let path = match uri.strip_prefix("//") {
+            Some(rest) => &rest[rest.find('/')?..],
+            None => uri,
+        };
+        PathBuf::from(percent_decode(path))
+    } else if let Some(path) = project_relative(location) {
+        path
+    } else {
+        PathBuf::from(location)
+    };
+    path.is_absolute().then_some(path)
+}
+
+/// `text` with `%xx` escapes decoded, as in a URI.
+fn percent_decode(text: &str) -> std::ffi::OsString {
+    use std::os::unix::ffi::OsStringExt;
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = bytes
+            .get(i + 1..i + 3)
+            .filter(|h| bytes[i] == b'%' && h.iter().all(u8::is_ascii_hexdigit))
+            .and_then(|h| u8::from_str_radix(std::str::from_utf8(h).ok()?, 16).ok());
+        match hex {
+            Some(b) => {
+                out.push(b);
+                i += 3;
+            }
+            None => {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    std::ffi::OsString::from_vec(out)
 }
 
 /// `path` with `.` and `..` removed, without looking at the file system.
@@ -176,6 +230,29 @@ mod tests {
         )
         .unwrap();
         assert_eq!(locate(&proj.join("a/x.opi")), proj.join("a/x.opi"));
+    }
+
+    #[test]
+    fn link_locations_resolve_against_the_project() {
+        let dir = Path::new("/w/proj");
+        let loc = |l: &str| location_path(l, dir);
+        assert_eq!(loc("/abs/opi"), Some(PathBuf::from("/abs/opi")));
+        assert_eq!(loc("file:/a%20b/opi"), Some(PathBuf::from("/a b/opi")));
+        assert_eq!(loc("file:///a/opi"), Some(PathBuf::from("/a/opi")));
+        assert_eq!(loc("file://localhost/a"), Some(PathBuf::from("/a")));
+        assert_eq!(loc("PROJECT_LOC/sub"), Some(PathBuf::from("/w/proj/sub")));
+        assert_eq!(
+            loc("PARENT-1-PROJECT_LOC/other%20x"),
+            Some(PathBuf::from("/w/other x"))
+        );
+        for bad in [
+            "virtual:/virtual",
+            "WORKSPACE_LOC/x",
+            "rel/dir",
+            "PARENT-9-PROJECT_LOC/x",
+        ] {
+            assert_eq!(loc(bad), None, "{bad}");
+        }
     }
 
     #[test]

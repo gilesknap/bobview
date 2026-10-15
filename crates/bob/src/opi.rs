@@ -246,12 +246,28 @@ fn remove(el: &mut Element, names: &[&str]) {
     el.children.retain(|c| !names.contains(&c.name.as_str()));
 }
 
-/// Rename property `from` to `to`, replacing any `to` there was.
+/// Rename property `from` to `to`, replacing any `to` there was; rules
+/// that set it follow.
 fn rename(el: &mut Element, from: &str, to: &str) {
     if let Some(mut c) = el.take_child(from) {
         el.take_child(to);
         c.name = to.to_string();
         el.children.push(c);
+    }
+    rename_rules(el, from, to);
+}
+
+/// Rules that set property `from` set `to` instead, whether or not the
+/// widget sets `from` itself.
+fn rename_rules(el: &mut Element, from: &str, to: &str) {
+    for rule in el
+        .child_mut("rules")
+        .into_iter()
+        .flat_map(|r| &mut r.children)
+    {
+        if rule.name == "rule" && rule.attr("prop_id") == Some(from) {
+            rule.set_attr("prop_id", to);
+        }
     }
 }
 
@@ -261,7 +277,7 @@ fn add(el: &mut Element, name: &str, d: f64) {
     set(el, name, v);
 }
 
-/// Properties renamed for a widget kind; rules that set them follow.
+/// Properties renamed for a widget kind (see [`rename`]).
 fn renames(short: &str, kind: &str) -> &'static [(&'static str, &'static str)] {
     match (short, kind) {
         ("polyline", _) => &[("background_color", "line_color")],
@@ -401,11 +417,10 @@ fn widget(mut el: Element) -> Vec<Element> {
     let mut children: Vec<Element> = kids.into_iter().flat_map(widget).collect();
 
     let kind = kind(&short, &el);
-    let renames = renames(&short, &kind);
-    for (from, to) in renames {
+    for (from, to) in renames(&short, &kind) {
         rename(&mut el, from, to);
     }
-    rules(&mut el, renames);
+    rules(&mut el);
     actions(&mut el, &kind);
     if pv_less(&kind)
         && let Some(pv) = el.take_child("pv_name")
@@ -517,7 +532,7 @@ fn widget(mut el: Element) -> Vec<Element> {
             set(&mut el, "items_from_pv", from_pv);
         }
         (_, "embedded") => {
-            if let Some(wrapper) = embedded(&mut el, children.clone()) {
+            if let Some(wrapper) = embedded(&mut el, &mut children) {
                 return vec![wrapper];
             }
         }
@@ -584,6 +599,10 @@ fn widget(mut el: Element) -> Vec<Element> {
     all
 }
 
+/// The most axes, traces or LED states a widget may have: more than BOY
+/// offers.
+const MAX_COUNT: f64 = 64.0;
+
 /// An XY graph: BOY's numbered `axis_N_*` and `trace_N_*` properties as
 /// Phoebus' `x_axis`, `y_axes` and `traces`. Axis 0 is the x axis; further
 /// x axes are dropped.
@@ -619,7 +638,8 @@ fn xy_graph(el: &mut Element) {
         ("point_size", "point_size"),
         ("visible", "visible"),
     ];
-    let axes = num(el, "axis_count").unwrap_or(2.0).max(1.0) as usize;
+    // Counts are bounded (NaN is 0 as usize), so a bad file can't hang us.
+    let axes = num(el, "axis_count").unwrap_or(2.0).clamp(1.0, MAX_COUNT) as usize;
     let mut x_axis = Element::new("x_axis");
     x_axis.children = take(el, "axis_0_", AXIS);
     // BOY axis index -> Phoebus y axis index.
@@ -637,7 +657,7 @@ fn xy_graph(el: &mut Element) {
             y_axes.children.push(axis);
         }
     }
-    let count = num(el, "trace_count").unwrap_or(1.0).max(0.0) as usize;
+    let count = num(el, "trace_count").unwrap_or(1.0).clamp(0.0, MAX_COUNT) as usize;
     let mut traces = Element::new("traces");
     for i in 0..count {
         let p = format!("trace_{i}_");
@@ -681,12 +701,7 @@ fn xy_graph(el: &mut Element) {
     el.children
         .retain(|c| !(c.name.starts_with("axis_") || c.name.starts_with("trace_")));
     el.children.extend([x_axis, y_axes, traces]);
-    if let Some(bg) = el.take_child("plot_area_background_color") {
-        el.set_child(Element {
-            name: "background_color".into(),
-            ..bg
-        });
-    }
+    rename(el, "plot_area_background_color", "background_color");
     // `$(trace_0_y_pv)` and rules on `trace_0_visible` name one trace.
     let trace_ref = |t: &str| trace_refs(t, TRACE);
     for trace in el
@@ -936,10 +951,7 @@ fn outline(el: &mut Element) {
     if num(el, "line_width").unwrap_or(0.0) > bw {
         return;
     }
-    if let Some(mut c) = el.take_child("border_color") {
-        c.name = "line_color".into();
-        el.set_child(c);
-    }
+    rename(el, "border_color", "line_color");
     set(el, "line_width", bw);
     let dash = match style {
         8 => Some(2),
@@ -996,22 +1008,11 @@ fn rotation(el: &mut Element) {
     set(el, "rotation_step", step);
 }
 
-/// BOY `format_type` and `precision_from_pv` as Phoebus `format` and `precision`.
+/// BOY `format_type` and `precision_from_pv` as Phoebus `format` and
+/// `precision`; rules that set the format type set the format.
 fn format(el: &mut Element) {
     if let Some(f) = el.take_child("format_type") {
-        let (format, precision) = match f.text.trim() {
-            "1" => (1, None),
-            "2" => (2, None),
-            "3" => (4, Some(8)),
-            "4" => (6, None),
-            "5" => (4, Some(16)),
-            "6" => (5, None),
-            "7" => (3, None),
-            "8" => (7, None),
-            "9" => (8, None),
-            "10" => (9, None),
-            _ => (0, None),
-        };
+        let (format, precision) = format_code(&f.text);
         set(el, "format", format);
         if let Some(p) = precision {
             set(el, "precision", p);
@@ -1019,6 +1020,44 @@ fn format(el: &mut Element) {
     }
     if flag(el, "precision_from_pv") == Some(true) {
         set(el, "precision", -1);
+    }
+    for rule in el
+        .child_mut("rules")
+        .into_iter()
+        .flat_map(|r| &mut r.children)
+    {
+        if rule.name != "rule" || rule.attr("prop_id") != Some("format_type") {
+            continue;
+        }
+        rule.set_attr("prop_id", "format");
+        if rule.attr("out_exp") == Some("true") {
+            continue;
+        }
+        for value in rule
+            .children
+            .iter_mut()
+            .filter(|c| c.name == "exp")
+            .flat_map(|e| e.children.iter_mut().filter(|v| v.name == "value"))
+        {
+            value.text = format_code(&value.text).0.to_string();
+        }
+    }
+}
+
+/// A BOY `format_type` as a Phoebus `format`, and the precision it implies.
+fn format_code(format_type: &str) -> (i64, Option<i64>) {
+    match format_type.trim() {
+        "1" => (1, None),
+        "2" => (2, None),
+        "3" => (4, Some(8)),
+        "4" => (6, None),
+        "5" => (4, Some(16)),
+        "6" => (5, None),
+        "7" => (3, None),
+        "8" => (7, None),
+        "9" => (8, None),
+        "10" => (9, None),
+        _ => (0, None),
     }
 }
 
@@ -1056,6 +1095,7 @@ fn group(el: &mut Element) {
         Some(_) => 2,
     };
     set(el, "style", style);
+    rename_rules(el, "border_color", "line_color");
     if let Some(c) = el.child("border_color").cloned() {
         el.set_child(Element {
             name: "line_color".into(),
@@ -1080,8 +1120,9 @@ fn group(el: &mut Element) {
 }
 
 /// A linking container: `opi_file`, `resize_behaviour` and a border, which
-/// for a title bar or group box becomes a group around it (returned).
-fn embedded(el: &mut Element, children: Vec<Element>) -> Option<Element> {
+/// for a title bar or group box becomes a group around it (returned, with
+/// `children` moved into it).
+fn embedded(el: &mut Element, children: &mut Vec<Element>) -> Option<Element> {
     if el.child("file").is_none() {
         rename(el, "opi_file", "file");
     }
@@ -1144,7 +1185,7 @@ fn embedded(el: &mut Element, children: Vec<Element>) -> Option<Element> {
     add(el, "height", -dy);
     let mut inner = Element::new("widget").with_attr("type", "embedded");
     inner.children = std::mem::take(&mut el.children);
-    inner.children.extend(children);
+    inner.children.append(children);
     group.children.push(inner);
     Some(group)
 }
@@ -1185,7 +1226,7 @@ fn led_border(el: &mut Element) {
 
 /// A BOY multi-state LED's numbered state properties as Phoebus `<states>`.
 fn led_states(el: &mut Element) {
-    let n = num(el, "state_count").unwrap_or(0.0).max(0.0) as usize;
+    let n = num(el, "state_count").unwrap_or(0.0).clamp(0.0, MAX_COUNT) as usize;
     let mut states = Element::new("states");
     for i in 0..n {
         let value = el.take_child(&format!("state_value_{i}"));
@@ -1320,21 +1361,13 @@ fn closes_display(a: &Element) -> bool {
 /// BOY rules as `.bob` rules: `<pv>` is `<pv_name>`, BOY severities are
 /// `pvLegacySev` (as Phoebus patches them), the widget's own value
 /// (`widget.getValue()`) is its PV as one more rule PV (or 0 if it has
-/// none), and renamed
-/// properties follow.
-fn rules(el: &mut Element, renames: &[(&str, &str)]) {
+/// none). Rules on renamed properties follow them (see [`rename`]).
+fn rules(el: &mut Element) {
     let has_pv = text(el, "pv_name").is_some_and(|p| !p.is_empty());
     let Some(rules) = el.child_mut("rules") else {
         return;
     };
     for rule in rules.children.iter_mut().filter(|r| r.name == "rule") {
-        if let Some(to) = rule
-            .attr("prop_id")
-            .and_then(|p| renames.iter().find(|(from, _)| *from == p))
-            .map(|(_, to)| *to)
-        {
-            rule.set_attr("prop_id", to);
-        }
         let own = format!(
             "pv{}",
             rule.children.iter().filter(|c| c.name == "pv").count()
@@ -1671,6 +1704,62 @@ menumap {
         assert_eq!(w.bool("multi_line"), Some(true));
         assert_eq!(w.color("background_color").unwrap().a, 0);
         assert_eq!(one("TextInput", "<text>t</text>").kind, "label");
+    }
+
+    /// A rule setting `prop` to `value` when PV `Y` is 1.
+    fn rule(prop: &str, value: &str) -> String {
+        format!(
+            r#"<rules><rule name="r" prop_id="{prop}" out_exp="false"><exp bool_exp="pv0==1">
+            <value>{value}</value></exp><pv trig="true">Y</pv></rule></rules>"#
+        )
+    }
+
+    #[test]
+    fn rules_follow_renamed_properties() {
+        let prop = |w: &Widget| {
+            let r = &w.rules()[0];
+            (r.prop_id.clone(), r.exprs[0].value.text.clone())
+        };
+        // As in dlsPLC's NX102 screens: the format type, as a format.
+        let w = one(
+            "TextUpdate",
+            &format!("<pv_name>X</pv_name>{}", rule("format_type", "4")),
+        );
+        assert_eq!(prop(&w), ("format".into(), "6".into()));
+        let w = one("linkingContainer", &rule("opi_file", "b.opi"));
+        assert_eq!(prop(&w).0, "file");
+        let menu = r#"<actions_from_pv>false</actions_from_pv><actions>
+            <action type="OPEN_DISPLAY"><path>a.opi</path></action></actions>"#;
+        let w = one("MenuButton", &format!("{menu}{}", rule("label", "L")));
+        assert_eq!(prop(&w).0, "text");
+        let w = one("groupingContainer", &rule("border_color", ""));
+        assert_eq!(prop(&w).0, "line_color");
+        let w = one(
+            "Rectangle",
+            &format!(
+                "<border_style>1</border_style><border_width>2</border_width>{}",
+                rule("border_color", "")
+            ),
+        );
+        assert_eq!(prop(&w).0, "line_color");
+        let w = one("xyGraph", &rule("plot_area_background_color", ""));
+        assert_eq!(prop(&w).0, "background_color");
+    }
+
+    #[test]
+    fn counts_are_bounded() {
+        let w = one(
+            "xyGraph",
+            "<axis_count>1e9</axis_count><trace_count>1e9</trace_count>",
+        );
+        assert_eq!(w.get("traces").unwrap().children.len(), 64);
+        let w = one(
+            "xyGraph",
+            "<axis_count>NaN</axis_count><trace_count>-3</trace_count>",
+        );
+        assert!(w.get("traces").unwrap().children.is_empty());
+        let w = one("LED", "<state_count>1e12</state_count>");
+        assert_eq!(w.get("states").unwrap().children.len(), 64);
     }
 
     #[test]
