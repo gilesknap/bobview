@@ -50,6 +50,8 @@ pub struct Node {
     pub symbol: crate::symbol::State,
     /// The x and y PVs of each trace of an XY plot.
     pub traces: Vec<crate::plot::TracePvs>,
+    /// The samples of each trace of a strip chart.
+    pub series: Vec<Option<crate::trend::Series>>,
 }
 
 pub struct Builder<'a> {
@@ -293,6 +295,7 @@ impl Builder<'_> {
             image: None,
             symbol: Default::default(),
             traces: Vec::new(),
+            series: Vec::new(),
         };
 
         match w.kind.as_str() {
@@ -341,6 +344,15 @@ impl Builder<'_> {
             "xyplot" => {
                 node.traces =
                     crate::plot::subscribe(w, &|t| expand_for(w, &node.macros, t), self.pvs);
+            }
+            "stripchart" => {
+                node.traces =
+                    crate::plot::subscribe(w, &|t| expand_for(w, &node.macros, t), self.pvs);
+                node.series = node
+                    .traces
+                    .iter()
+                    .map(|t| t.y.clone().map(crate::trend::Series::new))
+                    .collect();
             }
             "navtabs" => {
                 node.active_tab = w.i64("active_tab").unwrap_or(0).max(0) as usize;

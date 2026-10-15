@@ -12,6 +12,7 @@ mod model;
 mod opi;
 pub mod project;
 mod source;
+mod trend;
 
 use std::path::{Path, PathBuf};
 
@@ -19,6 +20,7 @@ pub use element::Element;
 pub use macros::{Macros, expand};
 pub use model::{Action, Color, Font, FontStyle, Rule, RuleExpr, named_color};
 pub use source::Source;
+pub use trend::{databrowser_pvs, strip_tool_pvs};
 
 /// A parsed `.bob` (or translated `.opi`) display.
 #[derive(Clone, Debug)]

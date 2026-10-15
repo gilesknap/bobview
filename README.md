@@ -73,7 +73,7 @@ Options: `-z ZOOM` fixes the zoom instead of fitting the window, `-f` starts
 full screen, `--snapshot out.png` renders headless and exits (with `--size WxH`
 or `--size auto`, `--scale-factor F` to render as on a high-DPI screen,
 `--wait SECONDS`, and `--click X,Y` or `--right-click X,Y` to interact
-first), `BOBVIEW_LOG=debug` gives more output. The window opens at the size
+first, with `--settle SECONDS` after the last click), `BOBVIEW_LOG=debug` gives more output. The window opens at the size
 of the first display (when the screen has room). With Auto-size (🗖 in the
 toolbar, on by default) it is resized to each display you open, unless it
 is maximised or full screen; turn it off to keep the window's size and scale
@@ -81,7 +81,7 @@ each display to fit. The toolbar, menus and keypad are scaled down on a
 small high-DPI screen so that they take a small share of it; `--ui-scale F`
 (or `BOBVIEW_UI_SCALE=F`) fixes their size, 1 being the desktop's own scale. Hover over a widget to see its
 PV and value; right-click it (long-press on a touch screen) to copy the PV
-name or value, or open the PV details. On a touch screen, pinch to zoom.
+name or value, open the PV details, or trend it (see [Trends](#trends)). On a touch screen, pinch to zoom.
 
 ## What it draws
 
@@ -95,6 +95,7 @@ name or value, or open the PV details. On a touch screen, pinch to zoom.
 | meter | a dial: scale (linear or `log_scale`), warning regions from the levels (the PV's alarm limits with `limits_from_pv`), needle |
 | progressbar, tank, thermometer | drawn as bars for now |
 | xyplot | line, step and bar traces with markers against index or an x PV; several y axes, autoscale, log scale, grid, legend |
+| stripchart | its traces' PVs over the last `time_range`, sampled from when the display opened, on the first y axis (autoscale or fixed, log scale, grid), legend |
 | rectangle, ellipse, arc, polyline, polygon | dashed and dotted `line_style` for rectangles and polylines |
 | group, tabs, embedded, navtabs | macros pass down; embedded resize modes 0–2 and 4 (crop) |
 | image | PVA NTNDArray (uncompressed, mono or RGB1) or a CA array shaped by `data_width`/`data_height`; Phoebus colour maps, autoscale or fixed range, `unsigned`, colour bar with a scale; toolbar to zoom, pan and place a crosshair that reads out the pixel value |
@@ -110,7 +111,7 @@ forward navigation, `loc://` and `sim://` PVs. The display name, with macros
 expanded (or the file name if it has none), is the window title.
 
 Not yet: compressed (codec) images, image axes, ROIs and cursor PVs, the XY plot
-`markers`, error bars and toolbar, strip chart widgets (drawn as placeholders), GIF and JPEG
+`markers`, error bars and toolbar, the strip chart's toolbar and second y axes, GIF and JPEG
 images (symbols and pictures show their fallback or a placeholder), text inside
 SVG images, and scripts: an `execute` action logs that it is not supported,
 except the "toggle the widget's PV" script that techui-builder puts in
@@ -147,7 +148,11 @@ Rules keep BOY's severity numbers (`pvSev0` becomes `pvLegacySev0`) and
 LED with a BOY click hook runs its actions. Scripts and JavaScript or Python
 actions are not run, except that the EDM "Exit" button's script
 (`ScriptUtil.closeAssociatedOPI`) goes back to the previous display, or
-closes the window. A disconnected EDM symbol shows its first frame inside
+closes the window, and a script that opens a Data Browser on some PVs
+(`ScriptUtil.executeEclipseCommand` of
+`org.csstudio.trends.databrowser2.newWindow` with `['pvnames', 'A,B']`, as
+the DLS vacuum "Graph" buttons do) opens a [trend](#trends) of them. Other scripts
+are ignored. A disconnected EDM symbol shows its first frame inside
 the disconnected border, without Phoebus' overlay.
 
 An `.opi` keeps its declared width and height, and widgets outside them are
@@ -170,7 +175,11 @@ DLS screens open others with command actions that run a launcher script,
 such as `./srCellVacuum 04`, which ends by running `runcss.sh DISPLAY -m
 MACROS` to start CS-Studio. For a local display, bobview runs a copy of such a
 script beside a stand-in `runcss.sh` that only records its arguments, and
-opens that display with those macros. Other commands are not run.
+opens that display with those macros. A command that starts StripTool
+(`strip.py`, `strip.sh` or `buildStripToolconfig.sh` and the PV names, as
+in the DLS vacuum, gauge and RGA screens) opens a [trend](#trends) of those
+PVs instead; a last word without a `:`, such as `log_mbar`, is ignored.
+Other commands are not run.
 
 No command is ever run for a display fetched over http(s), nor in a
 `command_directory` on the web. Only a launcher script that resolves (after
@@ -187,6 +196,23 @@ that opens this screen. So `linacVacuum.opi` gets `dom=LI` from
 from `srCellVacuum 05` and `srCellVacuum 05r`. Macros given with `-m`
 override these. Screens with no number in their name (`srInjCellVacuum.opi`
 is cell 01) need `-m`, or opening from the overview.
+
+## Trends
+
+A trend window plots one or more PVs against time. Open one from a widget's
+right-click menu (Trend: its PV; Trend with rule PVs: the PVs its rules
+read too), or with a BOY button that would open a Data Browser or StripTool
+(see [BOY `.opi` displays](#boy-opi-displays)). Several may be open at once,
+each in its own window over the display, and they stay open as you move
+between displays.
+
+A trend is live only: each PV gets a sample on every update from when the
+window opened (up to 100 000 samples, and a day, per PV), with no archived
+history. The window shows the last 10 minutes by default (1 minute to 1 day
+from its menu), with a value axis that fits the data and a Log scale
+switch; each value holds until the next, and a gap marks where a PV was
+disconnected. Below the plot a legend gives each PV's colour, name and
+current value, or Disconnected; ✖ removes a PV, and Add PV adds one.
 
 ## Build
 

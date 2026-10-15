@@ -11,6 +11,7 @@ use crate::chrome::{self, Chrome, UiScale};
 use crate::pvmenu;
 use crate::screen::{Node, Screen};
 use crate::style::{self, View};
+use crate::trend::Trend;
 use crate::widgets::{self, Cx, Request};
 
 #[derive(Clone, Debug)]
@@ -37,6 +38,9 @@ pub struct BobApp {
     keypad_mode: bool,
     keypad: Option<Keypad>,
     details: Option<pvmenu::Details>,
+    /// Open trend windows, and the id the next one gets.
+    trends: Vec<Trend>,
+    next_trend: u64,
     /// The display at `current`, being fetched and built on a thread.
     loading: Option<std::sync::mpsc::Receiver<Result<Screen, bob::Error>>>,
     chrome: Chrome,
@@ -83,6 +87,8 @@ impl BobApp {
             keypad_mode: false,
             keypad: None,
             details: None,
+            trends: Vec::new(),
+            next_trend: 0,
             loading: None,
             chrome: Chrome::new(ui_scale),
             window_title: String::new(),
@@ -545,6 +551,12 @@ impl BobApp {
                 }
                 Request::Keypad { pv, text } => self.keypad = Some(Keypad { pv, text }),
                 Request::Details(details) => self.details = Some(details),
+                Request::Trend(names) => {
+                    log::info!("trend {}", names.join(", "));
+                    self.trends
+                        .push(Trend::new(self.next_trend, &names, &self.pvs));
+                    self.next_trend += 1;
+                }
                 Request::Close if !self.back.is_empty() => self.go_back(),
                 Request::Close => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
                 Request::Webpage(url) => {
@@ -556,6 +568,27 @@ impl BobApp {
         }
         self.keypad_window(ui);
         self.details_window(ui);
+        self.trend_windows(ui);
+    }
+
+    /// Each trend in its own window, until it is closed.
+    fn trend_windows(&mut self, ui: &mut egui::Ui) {
+        let pvs = &self.pvs;
+        let screen = ui.ctx().content_rect();
+        self.trends.retain_mut(|trend| {
+            let mut open = true;
+            // Each new window a little below and right of the one before.
+            let step = (trend.id % 8) as f32 * 24.0;
+            let size = Vec2::new(640.0, 420.0).min(screen.size() * 0.9);
+            egui::Window::new(trend.title())
+                .id(Id::new(("trend", trend.id)))
+                .open(&mut open)
+                .collapsible(false)
+                .default_pos(screen.left_top() + Vec2::new(40.0, 60.0) + Vec2::splat(step))
+                .default_size(size)
+                .show(ui.ctx(), |ui| trend.ui(ui, pvs));
+            open
+        });
     }
 
     fn details_window(&mut self, ui: &mut egui::Ui) {

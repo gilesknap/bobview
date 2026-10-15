@@ -195,6 +195,12 @@ pub enum Action {
     CloseDisplay {
         description: String,
     },
+    /// Open a trend of `pv_names`, as BOY scripts that open a Data Browser
+    /// do: type `trend`, bobview's own, with a `<pv_name>` for each PV.
+    Trend {
+        pv_names: Vec<String>,
+        description: String,
+    },
     /// Anything else (other scripts, …): shown but does nothing.
     Unsupported {
         kind: String,
@@ -245,6 +251,15 @@ impl Action {
                 description,
             },
             "close_display" => Action::CloseDisplay { description },
+            "trend" => Action::Trend {
+                pv_names: el
+                    .children
+                    .iter()
+                    .filter(|c| c.name == "pv_name")
+                    .map(|c| c.text.clone())
+                    .collect(),
+                description,
+            },
             other => Action::Unsupported {
                 kind: other.to_string(),
                 description,
@@ -260,6 +275,7 @@ impl Action {
             | Action::Execute { description, .. }
             | Action::Command { description, .. }
             | Action::CloseDisplay { description }
+            | Action::Trend { description, .. }
             | Action::Unsupported { description, .. } => description,
         }
     }

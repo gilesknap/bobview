@@ -32,6 +32,9 @@ pub struct Options {
     pub wait: Duration,
     /// Pixels to click and the button to use, in order, once `wait` has passed.
     pub clicks: Vec<(Pos2, egui::PointerButton)>,
+    /// Time after the last click before the snapshot, for what it opened
+    /// (such as a trend window) to fill.
+    pub settle: Duration,
     pub keypad: bool,
 }
 
@@ -137,7 +140,7 @@ pub fn run(start: Location, opts: &Options, out: &Path) -> Result<(), String> {
                     + if opts.clicks.is_empty() {
                         Duration::ZERO
                     } else {
-                        Duration::from_secs(1)
+                        opts.settle
                     }
             });
             if begin.elapsed() >= until && !app.is_loading() && !images_loading() {
@@ -341,6 +344,7 @@ mod tests {
                 zoom: Some(0.5),
                 wait: Duration::ZERO,
                 clicks: Vec::new(),
+                settle: Duration::ZERO,
                 keypad: false,
             };
             run(start, &opts, &out).unwrap();
@@ -379,6 +383,7 @@ mod tests {
                 zoom: None,
                 wait: Duration::ZERO,
                 clicks: Vec::new(),
+                settle: Duration::ZERO,
                 keypad: false,
             };
             let start = Location {

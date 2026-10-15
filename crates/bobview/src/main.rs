@@ -15,6 +15,7 @@ mod screen;
 mod snapshot;
 mod style;
 mod symbol;
+mod trend;
 mod widgets;
 
 use std::path::PathBuf;
@@ -45,6 +46,7 @@ options:
   --wait SECONDS         time for PVs to connect before a snapshot (default 2)
   --click X,Y            click here before the snapshot (repeatable)
   --right-click X,Y      right-click here before the snapshot (repeatable)
+  --settle SECONDS       time after the last click before the snapshot (default 1)
   -h, --help             show this help
   -V, --version          show the version
 
@@ -68,6 +70,7 @@ fn main() -> eframe::Result {
     let mut scale_factor = 1.0;
     let mut ui_scale = None;
     let mut wait = 2.0;
+    let mut settle = 1.0;
     let mut clicks = Vec::new();
     let mut keypad = false;
     let mut project = None;
@@ -119,6 +122,7 @@ fn main() -> eframe::Result {
                 None => {}
             },
             "--wait" => wait = args.next().and_then(|w| w.parse().ok()).unwrap_or(wait),
+            "--settle" => settle = args.next().and_then(|w| w.parse().ok()).unwrap_or(settle),
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return Ok(());
@@ -168,6 +172,7 @@ fn main() -> eframe::Result {
             zoom,
             wait: std::time::Duration::from_secs_f64(wait),
             clicks,
+            settle: std::time::Duration::from_secs_f64(settle),
             keypad,
         };
         if let Err(e) = snapshot::run(start, &opts, &out) {

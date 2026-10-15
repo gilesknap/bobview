@@ -5,7 +5,7 @@
 //! properties are renamed and converted as Phoebus's own legacy import does
 //! it (in its widgets' `CustomConfigurator`s), so nothing downstream needs to
 //! know where a display came from. Scripts are not translated; script actions
-//! stay as unsupported actions.
+//! stay as unsupported actions unless [`action`] recognises them.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -1282,6 +1282,14 @@ fn action(a: &Element) -> Element {
             "open_webpage".to_string()
         }
         "EXECUTE_JAVASCRIPT" if closes_display(a) => "close_display".to_string(),
+        "EXECUTE_JAVASCRIPT" | "EXECUTE_PYTHONSCRIPT"
+            if let Some(pvs) = text(a, "scriptText").and_then(crate::databrowser_pvs) =>
+        {
+            for pv in pvs {
+                push("pv_name", Some(Element::with_text("pv_name", pv)));
+            }
+            "trend".to_string()
+        }
         other => other.to_ascii_lowercase(),
     };
     push("description", child("description"));
@@ -1756,6 +1764,26 @@ menumap {
               <embedded>true</embedded><description></description></action></actions>"#,
         );
         assert!(matches!(&exit.actions()[0], Action::CloseDisplay { .. }));
+        // A "Graph" button's script opens a Data Browser: a trend here.
+        let graph = one(
+            "ActionButton",
+            r#"<actions hook="false" hook_all="false"><action type="EXECUTE_PYTHONSCRIPT"><path></path>
+              <scriptText><![CDATA[from org.csstudio.opibuilder.scriptUtil import ScriptUtil
+
+command_id="org.csstudio.trends.databrowser2.newWindow"
+ScriptUtil.executeEclipseCommand(command_id, ['pvnames', '$(dom)-VA-GAUGE-01:PLOG,$(dom)-VA-IMG-01:PLOG'])]]></scriptText>
+              <embedded>true</embedded><description>Graph</description></action></actions>"#,
+        );
+        assert_eq!(
+            graph.actions()[0],
+            Action::Trend {
+                pv_names: vec![
+                    "$(dom)-VA-GAUGE-01:PLOG".into(),
+                    "$(dom)-VA-IMG-01:PLOG".into()
+                ],
+                description: "Graph".into(),
+            }
+        );
         // Buttons ignore click hooks.
         assert!(w.get("run_actions_on_mouse_click").is_none());
     }

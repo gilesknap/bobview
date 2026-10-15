@@ -100,20 +100,20 @@ fn points(x: Option<&[f64]>, y: &[f64]) -> Vec<(f64, f64)> {
 }
 
 /// One axis' settings, with the Phoebus defaults.
-struct AxisCfg {
-    title: String,
-    autoscale: bool,
-    log: bool,
-    range: (f64, f64),
-    grid: bool,
-    visible: bool,
-    on_right: bool,
-    color: Color32,
-    title_font: FontId,
-    scale_font: FontId,
+pub(crate) struct AxisCfg {
+    pub title: String,
+    pub autoscale: bool,
+    pub log: bool,
+    pub range: (f64, f64),
+    pub grid: bool,
+    pub visible: bool,
+    pub on_right: bool,
+    pub color: Color32,
+    pub title_font: FontId,
+    pub scale_font: FontId,
 }
 
-fn axis_cfg(el: Option<&Element>, title: &str, node: &Node, z: f32) -> AxisCfg {
+pub(crate) fn axis_cfg(el: Option<&Element>, title: &str, node: &Node, z: f32) -> AxisCfg {
     let w = Widget::from_element(el.cloned().unwrap_or_default());
     let font = |k: &str, bold: bool| {
         let f = w.font(k).unwrap_or_else(|| bob::Font {
@@ -151,16 +151,29 @@ fn axis_cfg(el: Option<&Element>, title: &str, node: &Node, z: f32) -> AxisCfg {
 
 /// The range an axis shows: its own limits, or the data's when autoscaling.
 fn axis_range(cfg: &AxisCfg, data: impl Iterator<Item = f64>, nice: bool) -> (f64, f64) {
-    let ok = |v: &f64| v.is_finite() && (!cfg.log || *v > 0.0);
+    if !cfg.autoscale {
+        return cfg.range;
+    }
+    autoscale(cfg.log, data, nice).unwrap_or(cfg.range)
+}
+
+/// The range that shows `data`: whole decades on a log scale, else rounded
+/// out to whole ticks when `nice`. `None` when there is nothing to show.
+pub(crate) fn autoscale(
+    log: bool,
+    data: impl Iterator<Item = f64>,
+    nice: bool,
+) -> Option<(f64, f64)> {
+    let ok = |v: &f64| v.is_finite() && (!log || *v > 0.0);
     let (lo, hi) = data
         .filter(ok)
         .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), v| {
             (a.min(v), b.max(v))
         });
-    if !cfg.autoscale || lo > hi {
-        return cfg.range;
+    if lo > hi {
+        return None;
     }
-    if cfg.log {
+    Some(if log {
         let (a, b) = (
             lo.log10().floor(),
             hi.log10().ceil().max(lo.log10().floor() + 1.0),
@@ -170,23 +183,24 @@ fn axis_range(cfg: &AxisCfg, data: impl Iterator<Item = f64>, nice: bool) -> (f6
         axis::nice_range(lo, hi, 8)
     } else {
         (lo, hi)
-    }
+    })
 }
 
-struct Trace {
-    name: String,
-    axis: usize,
-    kind: i64,
-    color: Color32,
-    width: f32,
-    line_style: i64,
-    point: i64,
-    point_size: f32,
-    visible: bool,
-    points: Vec<(f64, f64)>,
+pub(crate) struct Trace {
+    pub name: String,
+    pub axis: usize,
+    pub kind: i64,
+    pub color: Color32,
+    pub width: f32,
+    pub line_style: i64,
+    pub point: i64,
+    pub point_size: f32,
+    pub visible: bool,
+    pub points: Vec<(f64, f64)>,
 }
 
-fn traces(node: &Node, z: f32) -> Vec<Trace> {
+/// Each trace's settings, and its points from its PVs' arrays.
+pub(crate) fn traces(node: &Node, z: f32) -> Vec<Trace> {
     trace_elements(&node.w)
         .iter()
         .enumerate()
@@ -222,7 +236,7 @@ fn traces(node: &Node, z: f32) -> Vec<Trace> {
 }
 
 /// The worst state of the plot's PVs, for the alarm border.
-fn worst_state(node: &Node) -> Option<PvState> {
+pub(crate) fn worst_state(node: &Node) -> Option<PvState> {
     let states: Vec<PvState> = node
         .traces
         .iter()
@@ -236,7 +250,7 @@ fn worst_state(node: &Node) -> Option<PvState> {
         .cloned()
 }
 
-fn text_size(painter: &egui::Painter, text: &str, font: &FontId) -> Vec2 {
+pub(crate) fn text_size(painter: &egui::Painter, text: &str, font: &FontId) -> Vec2 {
     painter
         .layout_no_wrap(text.to_string(), font.clone(), Color32::BLACK)
         .size()
@@ -274,11 +288,47 @@ fn fit_ticks(
 }
 
 /// Text turned to read upwards, centred on `center`.
-fn vertical_text(painter: &egui::Painter, center: Pos2, text: &str, font: FontId, c: Color32) {
+pub(crate) fn vertical_text(
+    painter: &egui::Painter,
+    center: Pos2,
+    text: &str,
+    font: FontId,
+    c: Color32,
+) {
     let galley = painter.layout_no_wrap(text.to_string(), font, c);
     let size = galley.size();
     let pos = Pos2::new(center.x - size.y / 2.0, center.y + size.x / 2.0);
     painter.add(epaint::TextShape::new(pos, galley, c).with_angle(-FRAC_PI_2));
+}
+
+/// The plot's title across the top, if it has one; returns where the rest
+/// of the plot starts.
+pub(crate) fn title(painter: &egui::Painter, node: &Node, rect: Rect, fg: Color32, z: f32) -> f32 {
+    let pad = 4.0 * z;
+    let top = rect.top() + pad;
+    let title = node
+        .w
+        .text("title")
+        .map(|t| expand(node, t))
+        .unwrap_or_default();
+    if title.is_empty() {
+        return top;
+    }
+    let f = node.w.font("title_font").unwrap_or(bob::Font {
+        style: bob::FontStyle::Bold,
+        size: 18.0,
+        ..Default::default()
+    });
+    let f = style::font_id(&f, z);
+    let h = text_size(painter, &title, &f).y;
+    painter.text(
+        Pos2::new(rect.center().x, top),
+        Align2::CENTER_TOP,
+        &title,
+        f,
+        fg,
+    );
+    top + h + pad
 }
 
 pub fn draw(outer: &egui::Painter, node: &Node, rect: Rect, z: f32) {
@@ -297,30 +347,7 @@ pub fn draw(outer: &egui::Painter, node: &Node, rect: Rect, z: f32) {
     let tick = 5.0 * z;
     let traces = traces(node, z);
 
-    // Title across the top.
-    let mut top = rect.top() + pad;
-    let title = node
-        .w
-        .text("title")
-        .map(|t| expand(node, t))
-        .unwrap_or_default();
-    if !title.is_empty() {
-        let f = w.font("title_font").unwrap_or(bob::Font {
-            style: bob::FontStyle::Bold,
-            size: 18.0,
-            ..Default::default()
-        });
-        let f = style::font_id(&f, z);
-        let h = text_size(painter, &title, &f).y;
-        painter.text(
-            Pos2::new(rect.center().x, top),
-            Align2::CENTER_TOP,
-            &title,
-            f,
-            fg,
-        );
-        top += h + pad;
-    }
+    let top = title(painter, node, rect, fg, z);
 
     // Legend along the bottom.
     let legend_font = style::font_id(&w.font("legend_font").unwrap_or_default(), z);
@@ -548,7 +575,7 @@ pub fn draw(outer: &egui::Painter, node: &Node, rect: Rect, z: f32) {
 
 /// Trace names with a sample of their line, centred along the bottom.
 #[allow(clippy::too_many_arguments)]
-fn legend(
+pub(crate) fn legend(
     painter: &egui::Painter,
     shown: &[&Trace],
     rect: Rect,
@@ -646,7 +673,7 @@ fn draw_trace(outer: &egui::Painter, t: &Trace, xs: &Scale, ys: &Scale, plot: Re
 
 /// Thin a line with many points per pixel column to the first, lowest,
 /// highest and last point of each column, which draws the same.
-fn decimate(run: Vec<Pos2>) -> Vec<Pos2> {
+pub(crate) fn decimate(run: Vec<Pos2>) -> Vec<Pos2> {
     if run.len() < 4096 {
         return run;
     }

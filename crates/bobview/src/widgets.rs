@@ -26,6 +26,8 @@ pub enum Request {
     },
     /// Show the details of a widget's PV, from its context menu.
     Details(crate::pvmenu::Details),
+    /// Open a trend window of these PVs.
+    Trend(Vec<String>),
     /// Close the display: go back to the one before, or close the window.
     Close,
 }
@@ -162,6 +164,10 @@ fn draw_node(ui: &mut Ui, node: &mut Node, cx: &mut Cx, id: Id) {
         }
         "xyplot" => {
             crate::plot::draw(&painter, node, rect, z);
+            None
+        }
+        "stripchart" => {
+            crate::trend::draw_stripchart(&painter, node, rect, z);
             None
         }
         "meter" => {
@@ -1232,7 +1238,9 @@ pub(crate) fn run_action(node: &Node, action: &Action, cx: &mut Cx) {
         Action::Execute {
             text, description, ..
         } => {
-            if is_toggle_script(text) {
+            if let Some(names) = bob::databrowser_pvs(text) {
+                trend(node, &names, cx);
+            } else if is_toggle_script(text) {
                 if let Some(s) = node.state() {
                     // As `(PVUtil.getDouble(pv) == 0) ? 1 : 0`: a value
                     // that is not a number is NaN there, so it writes 0.
@@ -1247,6 +1255,11 @@ pub(crate) fn run_action(node: &Node, action: &Action, cx: &mut Cx) {
             command, directory, ..
         } => {
             let command = node.expand(command);
+            // A StripTool launcher is shown as a trend, and not run.
+            if let Some(names) = bob::strip_tool_pvs(&command) {
+                cx.requests.push(Request::Trend(names));
+                return;
+            }
             let directory = node.expand(directory);
             let directory = (!directory.trim().is_empty()).then(|| node.resolve(&directory));
             // Only DLS launcher scripts of local displays, which open a display.
@@ -1260,8 +1273,15 @@ pub(crate) fn run_action(node: &Node, action: &Action, cx: &mut Cx) {
             }
         }
         Action::CloseDisplay { .. } => cx.requests.push(Request::Close),
+        Action::Trend { pv_names, .. } => trend(node, pv_names, cx),
         Action::Unsupported { kind, .. } => log::warn!("action '{kind}' is not supported"),
     }
+}
+
+/// Open a trend of PVs named by a widget's action, macros expanded.
+fn trend(node: &Node, names: &[String], cx: &mut Cx) {
+    let names = names.iter().map(|n| node.expand(n)).collect();
+    cx.requests.push(Request::Trend(names));
 }
 
 /// Whether `script` is the toggle that techui-builder embeds in synoptic
@@ -2376,6 +2396,50 @@ mod tests {
         };
         assert_eq!(*source, Source::parse("../sub/ioc/BL01C-MO-01.bob"));
         assert_eq!(macros.get("P"), Some("BL01C-MO-01"));
+    }
+
+    #[test]
+    fn trend_actions_and_strip_tool_commands_open_trends() {
+        let xml = r#"<display><macros><dom>BL01T</dom></macros>
+            <widget type="action_button"><actions>
+            <action type="trend"><pv_name>$(dom)-VA-GAUGE-01:PLOG</pv_name><pv_name>$(dom)-VA-IMG-01:PLOG</pv_name></action>
+            <action type="command"><command>strip.py $(dom)-VA-GAUGE-02:PLOG log_mbar</command></action>
+            <action type="execute"><script file="EmbeddedPy"><text>ScriptUtil.executeEclipseCommand("org.csstudio.trends.databrowser2.newWindow", ['pvnames', '$(dom):X'])</text></script></action>
+            </actions></widget></display>"#;
+        let pvs = PvManager::new();
+        let display = bob::Display::parse(xml).unwrap();
+        let screen = Builder { pvs: &pvs }.screen(display, &Macros::default(), None, 0);
+        let node = &screen.nodes[0];
+        let mut requests = Vec::new();
+        let mut cx = Cx {
+            view: View {
+                origin: Pos2::ZERO,
+                zoom: 1.0,
+            },
+            clip: Rect::EVERYTHING,
+            pvs: &pvs,
+            requests: &mut requests,
+            depth: 0,
+            keypad: false,
+        };
+        for a in node.w.actions() {
+            run_action(node, &a, &mut cx);
+        }
+        let trends: Vec<&Vec<String>> = requests
+            .iter()
+            .filter_map(|r| match r {
+                Request::Trend(names) => Some(names),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            trends,
+            [
+                &vec!["BL01T-VA-GAUGE-01:PLOG", "BL01T-VA-IMG-01:PLOG"],
+                &vec!["BL01T-VA-GAUGE-02:PLOG"],
+                &vec!["BL01T:X"]
+            ]
+        );
     }
 
     #[test]
