@@ -69,6 +69,9 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-zigbuild
+      - name: Take the version from the release tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: sed -i "0,/^version = .*/s//version = \"${GITHUB_REF_NAME#v}\"/" Cargo.toml
       - run: cargo zigbuild --release --workspace --target ${TARGET}.${GLIBC}
       - name: Check the glibc requirement
         run: |
@@ -82,7 +85,10 @@ jobs:
           EPICS_CA_ADDR_LIST: 127.0.0.1
           EPICS_CA_AUTO_ADDR_LIST: "NO"
         run: |
-          ${TARGET_DIR}/bobview --version
+          ${TARGET_DIR}/bobview --version | tee version.txt
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            grep -qx "bobview ${GITHUB_REF_NAME#v}" version.txt
+          fi
           ${TARGET_DIR}/bobview-testioc &
           ${TARGET_DIR}/bobview-probe --seconds 3 bl01t:SUM BL01T-MO-SIMC-01:M1.RBV | tee probe.txt
           grep -q "bl01t:SUM .*5" probe.txt
@@ -116,9 +122,16 @@ jobs:
         with:
           pattern: bobview-*-linux
           merge-multiple: true
-      - name: Create release
+      - name: Create the release, or add the binaries to an existing one
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" bobview-*-linux.tar.gz \
-            --repo "${GITHUB_REPOSITORY}" --title "${GITHUB_REF_NAME}" --generate-notes
+          # a release made in the GitHub UI creates the tag too, so the
+          # release may already exist when this tag build runs
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" > /dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" bobview-*-linux.tar.gz \
+              --repo "${GITHUB_REPOSITORY}" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" bobview-*-linux.tar.gz \
+              --repo "${GITHUB_REPOSITORY}" --title "${GITHUB_REF_NAME}" --generate-notes
+          fi
