@@ -40,6 +40,9 @@ pub struct Node {
     pub edit: Option<String>,
     /// Problems to show on the widget, such as a missing embedded file.
     pub error: Option<String>,
+    /// The embedded display is still being fetched (in a browser), so
+    /// should be loaded again once it is.
+    pub loading: bool,
     /// The display file or URL this node came from, to resolve relative paths.
     pub base: Option<Source>,
     /// The image widget's texture and the frame it shows.
@@ -247,6 +250,7 @@ impl Builder<'_> {
             action_pvs,
             edit: None,
             error: None,
+            loading: false,
             base: base.cloned(),
             image: None,
             symbol: Default::default(),
@@ -314,6 +318,7 @@ impl Builder<'_> {
     pub fn embed(&self, node: &mut Node, file: &str, macros: &Macros, group: &str, depth: u32) {
         node.embedded = None;
         node.error = None;
+        node.loading = false;
         if file.is_empty() {
             return;
         }
@@ -324,6 +329,11 @@ impl Builder<'_> {
         let source = node.resolve(file);
         match crate::fetch::load(&source) {
             Ok(d) => node.embedded = Some(Box::new(self.screen(d, macros, Some(group), depth + 1))),
+            #[cfg(target_arch = "wasm32")]
+            Err(bob::Error::Fetch(_, why)) if why == crate::fetch::LOADING => {
+                node.loading = true;
+                node.error = Some(format!("Loading {source}"));
+            }
             Err(e) => {
                 log::warn!("{e}");
                 node.error = Some(match e {

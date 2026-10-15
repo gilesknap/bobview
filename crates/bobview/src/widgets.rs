@@ -1794,6 +1794,16 @@ fn navtabs(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut Cx, id: Id) {
     if let Some(i) = clicked {
         Builder { pvs: cx.pvs }.select_navtab(node, i, cx.depth);
     }
+    // A tab fetched in the background (in a browser) is shown once it arrives.
+    #[cfg(target_arch = "wasm32")]
+    if node.loading {
+        if crate::fetch::pending() {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(50));
+        } else {
+            Builder { pvs: cx.pvs }.select_navtab(node, node.active_tab, cx.depth);
+        }
+    }
     let body = if vertical {
         Rect::from_min_max(rect.min + Vec2::new(tw + gap, 0.0), rect.max)
     } else {

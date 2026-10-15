@@ -11,16 +11,20 @@ mod plot;
 mod pvmenu;
 mod rules;
 mod screen;
+#[cfg(not(target_arch = "wasm32"))]
 mod snapshot;
 mod style;
 mod symbol;
 mod widgets;
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 
 use bob::{Macros, Source};
+#[cfg(not(target_arch = "wasm32"))]
 use eframe::egui;
 
+#[cfg(not(target_arch = "wasm32"))]
 const USAGE: &str = "\
 usage: bobview [options] [display.bob | http(s)://host/display.bob]
 
@@ -51,6 +55,7 @@ fetched relative to it.
 PVs without a prefix use Channel Access; EPICS_CA_ADDR_LIST and
 EPICS_CA_NAME_SERVERS select the IOCs. Set BOBVIEW_LOG=debug for more output.";
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
     init_logging();
     let mut file = None;
@@ -175,7 +180,58 @@ fn parse_macros(text: &str) -> Macros {
     }))
 }
 
+/// The browser build: the page's query string names the display, its
+/// macros and the PV Web Socket, e.g.
+/// `?display=https://host/opi/index.bob&macros=P=X&pvws=pvws.host:443`
+/// (and `zoom=1.5`, `keypad`).
+/// A relative display is found next to the page; the default is `index.bob`.
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    use wasm_bindgen::JsCast;
+
+    init_logging();
+    let window = web_sys::window().expect("a browser window");
+    let location = window.location();
+    let query = web_sys::UrlSearchParams::new_with_str(&location.search().unwrap_or_default())
+        .expect("a query string");
+    let page = Source::Url(location.href().unwrap_or_default());
+    let display = query.get("display").unwrap_or_else(|| "index.bob".into());
+    let start = app::Location {
+        source: page.resolve(&display),
+        macros: parse_macros(&query.get("macros").unwrap_or_default()),
+    };
+    if let Some(pvws) = query.get("pvws") {
+        pv::set_pvws(&pvws);
+    }
+    let zoom = query.get("zoom").and_then(|z| z.parse().ok());
+    let keypad = query.has("keypad");
+
+    let canvas = window
+        .document()
+        .and_then(|d| d.get_element_by_id("bobview"))
+        .and_then(|c| c.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+        .expect("a <canvas id=\"bobview\"> on the page");
+    wasm_bindgen_futures::spawn_local(async move {
+        let started = eframe::WebRunner::new()
+            .start(
+                canvas,
+                eframe::WebOptions::default(),
+                Box::new(move |cc| {
+                    let ui_scale = chrome::UiScale::from_env();
+                    let mut app = app::BobApp::new(&cc.egui_ctx, Some(start), zoom, ui_scale);
+                    app.set_keypad(keypad);
+                    Ok(Box::new(app))
+                }),
+            )
+            .await;
+        if let Err(e) = started {
+            log::error!("cannot start: {e:?}");
+        }
+    });
+}
+
 /// The bundled index display, next to the binary or in ~/.local/share.
+#[cfg(not(target_arch = "wasm32"))]
 fn default_display() -> Option<PathBuf> {
     let mut candidates = Vec::new();
     if let Ok(exe) = std::env::current_exe()
@@ -208,7 +264,10 @@ impl log::Log for Logger {
 
     fn log(&self, r: &log::Record) {
         if self.enabled(r.metadata()) {
+            #[cfg(not(target_arch = "wasm32"))]
             eprintln!("{:<5} {}", r.level(), r.args());
+            #[cfg(target_arch = "wasm32")]
+            web_sys::console::log_1(&format!("{:<5} {}", r.level(), r.args()).into());
         }
     }
 

@@ -109,6 +109,25 @@ SVG images, and scripts: an `execute` action logs that it is not supported,
 except the "toggle the widget's PV" script that techui-builder puts in
 synoptic symbols, which bobview recognises and runs itself.
 
+## In a browser
+
+The same app also builds for the browser (WebAssembly, drawn with WebGL),
+with PVs coming over a [PV Web Socket](https://github.com/ornl-epics/pvws)
+(PVWS) as in Daedalus. `bobview-server` serves the lot from one port: the web
+build, `.bob` files and a PVWS at `/pvws/pv` that reaches PVs through
+bobview's own CA/PVA client. Run it anywhere `caget` works:
+
+```bash
+./scripts/build-web.sh                 # writes dist/web (needs wasm-bindgen-cli)
+bobview-server --web dist/web --opi /path/to/displays
+```
+
+and open `http://HOST:8080/?display=index.bob`. The page also takes
+`&macros=P=X,R=Y`, `&zoom=F`, `&keypad` and, to use another PVWS server,
+`&pvws=host[:port]`; `display` may be a URL on another server that allows
+cross-origin requests. Writes are off unless the server has `--write`, since
+they go out as the server's user. Images from PVA are not sent over PVWS yet.
+
 ## Build
 
 ```bash

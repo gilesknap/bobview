@@ -11,5 +11,17 @@ log = "0.4.34"
 bob = { path = "../bob" }
 pv = { path = "../pv" }
 png = "0.18.1"
-ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
 resvg = { version = "0.48.1", default-features = false, features = ["raster-images"] }
+web-time = "1.1.0"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
+
+# The browser build: see web/index.html.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3.106"
+wasm-bindgen = "0.2.129"
+wasm-bindgen-futures = "0.4.79"
+web-sys = { version = "0.3.106", features = [
+    "console", "Document", "HtmlCanvasElement", "Location", "Response", "UrlSearchParams", "Window",
+] }

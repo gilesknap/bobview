@@ -1,7 +1,9 @@
 //! `sim://` PVs, following the Phoebus simulated PV names.
 
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
+
+use web_time::SystemTime;
 
 use crate::name::split_args;
 use crate::{PvName, Severity, Shared, Value};
@@ -87,9 +89,17 @@ pub(crate) async fn run(name: PvName, shared: Arc<Shared>) {
 
     let mut n = 0u64;
     let period = Duration::from_secs_f64(period.max(0.01));
+    #[cfg(not(target_arch = "wasm32"))]
     let mut ticker = tokio::time::interval(period);
+    #[cfg(target_arch = "wasm32")]
+    let mut first = true;
     loop {
+        #[cfg(not(target_arch = "wasm32"))]
         ticker.tick().await;
+        #[cfg(target_arch = "wasm32")]
+        if !std::mem::take(&mut first) {
+            gloo_timers::future::sleep(period).await;
+        }
         let value = next(n);
         shared.update(|s| {
             s.value = value;
