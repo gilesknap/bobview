@@ -101,7 +101,7 @@ pub const DRAWN: &[&str] = &[
 /// What a display asks for that bobview does not do.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Compat {
-    /// Widgets with Jython/JavaScript scripts, which are ignored.
+    /// Widgets with Jython/JavaScript scripts (not scripts), which are ignored.
     pub scripts: usize,
     /// Widgets of a type bobview does not draw: a placeholder is shown.
     pub placeholders: usize,
@@ -137,11 +137,11 @@ impl Compat {
         let mut parts = Vec::new();
         if self.scripts > 0 {
             let s = if self.scripts == 1 {
-                "script"
+                "widget"
             } else {
-                "scripts"
+                "widgets"
             };
-            parts.push(format!("{} {s} ignored", self.scripts));
+            parts.push(format!("{} {s} with scripts ignored", self.scripts));
         }
         if self.placeholders > 0 {
             let s = if self.placeholders == 1 {
@@ -584,9 +584,35 @@ mod tests {
         );
         assert_eq!(
             c.text().as_deref(),
-            Some("2 scripts ignored, 2 unsupported widgets")
+            Some("2 widgets with scripts ignored, 2 unsupported widgets")
         );
         assert_eq!(Compat::default().text(), None);
+    }
+
+    #[test]
+    fn counts_singular_and_through_embedded_and_tabs() {
+        let one = |xml: &str| {
+            let d = Display::parse(&format!("<display>{xml}</display>")).unwrap();
+            let pvs = PvManager::new();
+            Builder { pvs: &pvs }.screen(d, &Macros::default(), None, 0)
+        };
+        let s = one(r#"<widget type="table"/>"#);
+        assert_eq!(
+            Compat::of(&s.nodes).text().as_deref(),
+            Some("1 unsupported widget")
+        );
+        let s = one(r#"<widget type="led"><scripts><script file="a"/></scripts></widget>"#);
+        assert_eq!(
+            Compat::of(&s.nodes).text().as_deref(),
+            Some("1 widget with scripts ignored")
+        );
+        // Embedded screens and tabs are walked.
+        let mut s = one(r#"<widget type="group"/>"#);
+        let inner = one(r#"<widget type="table"/>"#);
+        let tab = one(r#"<widget type="webbrowser"/>"#).nodes;
+        s.nodes[0].embedded = Some(Box::new(inner));
+        s.nodes[0].tabs = vec![tab];
+        assert_eq!(Compat::of(&s.nodes).placeholders, 2);
     }
 
     #[test]

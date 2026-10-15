@@ -376,7 +376,7 @@ impl View {
                 ui.label(format!("PVs {connected}/{total} connected"));
                 if let Some(text) = Compat::of(&s.nodes).text() {
                     ui.weak(format!("| {text}"))
-                        .on_hover_text("Scripts are not run and some widget types are not drawn");
+                        .on_hover_text("Scripts are not run, and widget types bobview does not draw show as placeholders");
                 }
                 if let Some(cur) = &self.current {
                     ui.weak(cur.source.to_string());

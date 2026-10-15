@@ -7,8 +7,9 @@ It shows live EPICS Channel Access and PV Access values, including areaDetector
 images (decimated when a side is over 2048 pixels, to keep drawing fast), and is small enough to run on a phone, in the Android 16 Linux Terminal (Debian 13, aarch64).
 
 Scripts (Jython/JavaScript), display editing, alarm and archiver services are
-out of scope. The status line shows "N scripts ignored" and "N unsupported
-widgets" for a display that uses them.
+out of scope. The status line shows "N widgets with scripts ignored" (`.bob` and `.opi`,
+counting widgets, not scripts; the DLS vacuum group-link script is run, so not
+counted) and "N unsupported widgets" for a display that has them.
 
 Fidelity to Phoebus is approximate: sizes, fonts (scaled by 0.95) and layout
 were tuned by eye, and output has not been compared with Phoebus's own.

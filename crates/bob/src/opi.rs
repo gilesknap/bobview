@@ -412,8 +412,14 @@ fn widget(mut el: Element) -> Vec<Element> {
     el.children = props;
     // Read before the scripts and widget type are dropped as noise.
     let group_link = crate::group_link::from_opi(&el);
+    // Kept for `has_scripts` unless bobview runs them as a group link.
+    let scripts = el
+        .child("scripts")
+        .filter(|s| group_link.is_none() && !s.children.is_empty())
+        .cloned();
     remove(&mut el, NOISE);
     el.children.extend(group_link);
+    el.children.extend(scripts);
     let mut children: Vec<Element> = kids.into_iter().flat_map(widget).collect();
 
     let kind = kind(&short, &el);
@@ -2152,7 +2158,7 @@ ScriptUtil.executeEclipseCommand(command_id, ['pvnames', '$(dom)-VA-GAUGE-01:PLO
         assert_eq!(d.background.rgba(), [200, 200, 200, 255]);
         assert_eq!(d.macros.get("dom"), Some("SR"));
         let w = &d.widgets[0];
-        assert!(w.get("wuid").is_none() && w.get("widget_type").is_none() && !w.has_scripts());
+        assert!(w.get("wuid").is_none() && w.get("widget_type").is_none() && w.has_scripts());
     }
 
     #[test]
@@ -2206,5 +2212,8 @@ ScriptUtil.executeEclipseCommand(command_id, ['pvnames', '$(dom)-VA-GAUGE-01:PLO
             <path pathString="get_pv_name.py"><pv>A</pv></path></scripts>"#,
         );
         assert_eq!(none.group_link(), None);
+        // Those ignored scripts are still counted; a group link's are not.
+        assert!(none.has_scripts());
+        assert!(!sym.has_scripts() && !label.has_scripts());
     }
 }
