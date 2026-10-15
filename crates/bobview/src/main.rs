@@ -13,6 +13,7 @@ mod rules;
 mod screen;
 mod snapshot;
 mod style;
+mod symbol;
 mod widgets;
 
 use std::path::PathBuf;

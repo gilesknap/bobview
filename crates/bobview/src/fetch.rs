@@ -5,6 +5,7 @@
 //! reload. Fetching blocks, so the app builds a fetched display on a thread.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
@@ -49,6 +50,37 @@ pub fn load(source: &Source) -> Result<Display, Error> {
 /// Drop every cached display, so the next load fetches it again.
 pub fn forget() {
     CACHE.lock().unwrap().clear();
+}
+
+/// Read the file at `source` as bytes, such as an image a display names.
+/// Nothing is cached here: the caller keeps what it decodes.
+pub fn bytes(source: &Source) -> Result<Vec<u8>, Error> {
+    match source {
+        Source::File(path) => {
+            let mut data = Vec::new();
+            std::fs::File::open(path)
+                .and_then(|f| f.take(MAX_SIZE + 1).read_to_end(&mut data))
+                .map_err(|e| Error::Io(path.clone(), e))?;
+            if data.len() as u64 > MAX_SIZE {
+                let why = format!("larger than {} MiB", MAX_SIZE >> 20);
+                return Err(Error::Io(path.clone(), std::io::Error::other(why)));
+            }
+            Ok(data)
+        }
+        Source::Url(url) => {
+            log::info!("fetching {url}");
+            let fail = |why: String| Error::Fetch(url.to_string(), why);
+            AGENT
+                .get(url)
+                .call()
+                .map_err(|e| fail(describe(e)))?
+                .body_mut()
+                .with_config()
+                .limit(MAX_SIZE)
+                .read_to_vec()
+                .map_err(|e| fail(describe(e)))
+        }
+    }
 }
 
 fn get(url: &str) -> Result<Fetched, Error> {

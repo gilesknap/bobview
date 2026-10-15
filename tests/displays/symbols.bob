@@ -1,0 +1,232 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<display version="2.0.0">
+  <name>Symbols</name>
+  <width>460</width>
+  <height>360</height>
+  <widget type="label" version="2.0.0">
+    <name>Title</name>
+    <text>Symbols and pictures</text>
+    <width>460</width>
+    <height>30</height>
+    <font>
+      <font family="Liberation Sans" style="BOLD" size="18.0">
+      </font>
+    </font>
+    <horizontal_alignment>1</horizontal_alignment>
+  </widget>
+  <widget type="label" version="2.0.0">
+    <name>PV picks the symbol</name>
+    <text>PV picks the symbol</text>
+    <x>10</x>
+    <y>44</y>
+    <width>160</width>
+  </widget>
+  <widget type="combo" version="2.0.0">
+    <name>Mode</name>
+    <pv_name>loc://mode&lt;VEnum&gt;(0, "Off", "Slow", "Fast")</pv_name>
+    <x>170</x>
+    <y>40</y>
+    <width>100</width>
+    <height>28</height>
+  </widget>
+  <widget type="symbol" version="2.0.0">
+    <name>Lamp</name>
+    <pv_name>loc://mode&lt;VEnum&gt;(0, "Off", "Slow", "Fast")</pv_name>
+    <symbols>
+      <symbol>symbols/lamp-off.svg</symbol>
+      <symbol>symbols/lamp-slow.svg</symbol>
+      <symbol>symbols/lamp-fast.svg</symbol>
+    </symbols>
+    <x>290</x>
+    <y>34</y>
+    <width>40</width>
+    <height>40</height>
+    <show_index>true</show_index>
+  </widget>
+  <widget type="symbol" version="2.0.0">
+    <name>Valve</name>
+    <pv_name>sim://flipflop(1)</pv_name>
+    <symbols>
+      <symbol>symbols/valve-closed.svg</symbol>
+      <symbol>symbols/valve-open.svg</symbol>
+    </symbols>
+    <x>350</x>
+    <y>34</y>
+    <width>40</width>
+    <height>40</height>
+  </widget>
+  <widget type="label" version="2.0.0">
+    <name>Rule sets symbols[0]</name>
+    <text>Rule sets symbols[0]</text>
+    <x>10</x>
+    <y>94</y>
+    <width>160</width>
+  </widget>
+  <widget type="symbol" version="2.0.0">
+    <name>Ruled</name>
+    <symbols>
+      <symbol>symbols/valve-closed.svg</symbol>
+    </symbols>
+    <x>170</x>
+    <y>84</y>
+    <width>40</width>
+    <height>40</height>
+    <rules>
+      <rule name="open" prop_id="symbols[0]" out_exp="false">
+        <exp bool_exp="pv0 &gt; 0">
+          <value>symbols/valve-open.svg</value>
+        </exp>
+        <pv_name>sim://flipflop(1)</pv_name>
+      </rule>
+    </rules>
+  </widget>
+  <widget type="label" version="2.0.0">
+    <name>rotation</name>
+    <text>rotation</text>
+    <x>10</x>
+    <y>144</y>
+    <width>160</width>
+  </widget>
+  <widget type="symbol" version="2.0.0">
+    <name>Arrow 0</name>
+    <symbols>
+      <symbol>symbols/arrow.svg</symbol>
+    </symbols>
+    <x>170</x>
+    <y>134</y>
+    <width>40</width>
+    <height>40</height>
+    <rotation>0.0</rotation>
+  </widget>
+  <widget type="symbol" version="2.0.0">
+    <name>Arrow 45</name>
+    <symbols>
+      <symbol>symbols/arrow.svg</symbol>
+    </symbols>
+    <x>230</x>
+    <y>134</y>
+    <width>40</width>
+    <height>40</height>
+    <rotation>45.0</rotation>
+  </widget>
+  <widget type="symbol" version="2.0.0">
+    <name>Arrow 90</name>
+    <symbols>
+      <symbol>symbols/arrow.svg</symbol>
+    </symbols>
+    <x>290</x>
+    <y>134</y>
+    <width>40</width>
+    <height>40</height>
+    <rotation>90.0</rotation>
+  </widget>
+  <widget type="symbol" version="2.0.0">
+    <name>Arrow 225</name>
+    <symbols>
+      <symbol>symbols/arrow.svg</symbol>
+    </symbols>
+    <x>350</x>
+    <y>134</y>
+    <width>40</width>
+    <height>40</height>
+    <rotation>225.0</rotation>
+  </widget>
+  <widget type="label" version="2.0.0">
+    <name>Click to open the gallery</name>
+    <text>Click to open the gallery</text>
+    <x>10</x>
+    <y>194</y>
+    <width>160</width>
+  </widget>
+  <widget type="symbol" version="2.0.0">
+    <name>Link</name>
+    <symbols>
+      <symbol>symbols/arrow.svg</symbol>
+    </symbols>
+    <x>170</x>
+    <y>184</y>
+    <width>40</width>
+    <height>40</height>
+    <actions>
+      <action type="open_display">
+        <file>widgets.bob</file>
+        <target>replace</target>
+        <description>Widget gallery</description>
+      </action>
+    </actions>
+    <run_actions_on_mouse_click>true</run_actions_on_mouse_click>
+  </widget>
+  <widget type="label" version="2.0.0">
+    <name>Fallback, missing, filled</name>
+    <text>Fallback, missing, filled</text>
+    <x>10</x>
+    <y>244</y>
+    <width>160</width>
+  </widget>
+  <widget type="symbol" version="2.0.0">
+    <name>Out of range</name>
+    <pv_name>loc://big&lt;VLong&gt;(7)</pv_name>
+    <symbols>
+      <symbol>symbols/lamp-off.svg</symbol>
+      <symbol>symbols/lamp-fast.svg</symbol>
+    </symbols>
+    <x>170</x>
+    <y>234</y>
+    <width>60</width>
+    <height>40</height>
+    <fallback_symbol>symbols/stripe.png</fallback_symbol>
+    <preserve_ratio>false</preserve_ratio>
+  </widget>
+  <widget type="symbol" version="2.0.0">
+    <name>Missing</name>
+    <symbols>
+      <symbol>symbols/no-such.svg</symbol>
+    </symbols>
+    <x>250</x>
+    <y>234</y>
+    <width>40</width>
+    <height>40</height>
+    <fallback_symbol></fallback_symbol>
+  </widget>
+  <widget type="symbol" version="2.0.0">
+    <name>Filled</name>
+    <symbols>
+      <symbol>symbols/lamp-fast.svg</symbol>
+    </symbols>
+    <x>310</x>
+    <y>234</y>
+    <width>40</width>
+    <height>40</height>
+    <transparent>false</transparent>
+    <background_color>
+      <color red="255" green="255" blue="180">
+      </color>
+    </background_color>
+  </widget>
+  <widget type="label" version="2.0.0">
+    <name>Pictures</name>
+    <text>Pictures</text>
+    <x>10</x>
+    <y>304</y>
+    <width>160</width>
+  </widget>
+  <widget type="picture" version="2.0.0">
+    <name>Stripe</name>
+    <file>symbols/stripe.png</file>
+    <x>170</x>
+    <y>290</y>
+    <width>120</width>
+    <height>50</height>
+    <rotation>30.0</rotation>
+    <opacity>0.6</opacity>
+  </widget>
+  <widget type="picture" version="2.0.0">
+    <name>Stretched</name>
+    <file>symbols/arrow.svg</file>
+    <x>310</x>
+    <y>290</y>
+    <width>140</width>
+    <height>50</height>
+    <stretch_image>true</stretch_image>
+  </widget>
+</display>

@@ -185,6 +185,11 @@ fn draw_node(ui: &mut Ui, node: &mut Node, cx: &mut Cx, id: Id) {
             navtabs(ui, node, rect, cx, id);
             None
         }
+        "symbol" => crate::symbol::draw_symbol(ui, node, state.as_ref(), rect, cx, id),
+        "picture" => {
+            crate::symbol::draw_picture(ui, node, rect, cx);
+            None
+        }
         "image" => Some(crate::image::draw(
             ui,
             node,
@@ -211,10 +216,12 @@ fn draw_node(ui: &mut Ui, node: &mut Node, cx: &mut Cx, id: Id) {
 
     // A control that is disabled or whose PV is read-only is greyed out and
     // shows a "not allowed" cursor; its writes are refused in `write`. The
-    // image widget responds to the pointer but is not a control.
-    let disabled =
-        response.is_some() && node.w.kind != "image" && is_disabled(&node.w, state.as_ref());
-    if disabled {
+    // image and symbol widgets respond to the pointer but are not controls.
+    let disabled = response.is_some()
+        && !matches!(node.w.kind.as_str(), "image" | "symbol")
+        && is_disabled(&node.w, state.as_ref());
+    // A slide button greys only its track: the rest of its box is see-through.
+    if disabled && node.w.kind != "slide_button" {
         painter.rect_filled(rect, CornerRadius::ZERO, Color32::from_white_alpha(110));
     }
 
@@ -265,7 +272,21 @@ fn tooltip(node: &Node, s: Option<&PvState>) -> String {
         None => String::new(),
     };
     match node.w.text("tooltip") {
-        Some(t) => tooltip_text(t, &node.pv_name, &value, &|t| node.expand(t)),
+        Some(t) => {
+            // `$(actions)` lists what the widget's actions do, as in Phoebus.
+            let actions = node.w.actions();
+            let t = if t.contains("$(actions)") {
+                let list: Vec<&str> = actions
+                    .iter()
+                    .map(|a| a.description())
+                    .filter(|d| !d.trim().is_empty())
+                    .collect();
+                t.replace("$(actions)", &list.join("\n"))
+            } else {
+                t.to_string()
+            };
+            tooltip_text(&t, &node.pv_name, &value, &|t| node.expand(t))
+        }
         None => {
             let name = plain_pv_name(&node.pv_name);
             match s {
@@ -1030,7 +1051,7 @@ fn action_button(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut Cx, id: Id) 
     resp
 }
 
-fn run_action(node: &Node, action: &Action, cx: &mut Cx) {
+pub(crate) fn run_action(node: &Node, action: &Action, cx: &mut Cx) {
     match action {
         Action::OpenDisplay {
             file,
@@ -1038,12 +1059,15 @@ fn run_action(node: &Node, action: &Action, cx: &mut Cx) {
             target,
             ..
         } => {
-            let file = node.expand(file);
+            // The file name may use the action's own macros, as in
+            // `<file>$(IOC)/$(P).bob</file>` with IOC and P set by the action.
             let expanded =
                 Macros::from_pairs(macros.iter().map(|(k, v)| (k.to_string(), node.expand(v))));
+            let macros = node.macros.with(&expanded);
+            let file = node.expand_with(&macros, file);
             cx.requests.push(Request::Open {
                 source: node.resolve(&file),
-                macros: node.macros.with(&expanded),
+                macros,
                 target: target.clone(),
             });
         }
@@ -1067,8 +1091,42 @@ fn run_action(node: &Node, action: &Action, cx: &mut Cx) {
                 log::warn!("not opening '{url}': a display from the web may only open web pages");
             }
         }
+        Action::Execute {
+            text, description, ..
+        } => {
+            if is_toggle_script(text) {
+                if let Some(s) = node.state() {
+                    // As `(PVUtil.getDouble(pv) == 0) ? 1 : 0`: a value
+                    // that is not a number is NaN there, so it writes 0.
+                    let zero = s.value.as_f64() == Some(0.0);
+                    write(node, if zero { "1" } else { "0" });
+                }
+            } else {
+                log::warn!("script '{description}' is not supported: bobview runs no scripts");
+            }
+        }
         Action::Unsupported { kind, .. } => log::warn!("action '{kind}' is not supported"),
     }
+}
+
+/// Whether `script` is the toggle that techui-builder embeds in synoptic
+/// symbols, which bobview runs natively since it runs no scripts:
+///
+/// ```js
+/// pv = ScriptUtil.getPrimaryPV(widget)
+/// var pv_value = PVUtil.getDouble(pv);
+/// pv_value = (pv_value == 0) ? 1 : 0;
+/// pv.setValue(pv_value);
+/// ```
+fn is_toggle_script(script: &str) -> bool {
+    let code: String = script
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("importClass") && !l.trim_start().starts_with("/*"))
+        .flat_map(|l| l.chars())
+        .filter(|c| !c.is_whitespace() && *c != ';')
+        .collect();
+    code == "pv=ScriptUtil.getPrimaryPV(widget)varpv_value=PVUtil.getDouble(pv)\
+             pv_value=(pv_value==0)?1:0pv.setValue(pv_value)"
 }
 
 /// Whether a display at `base` may hand `url` to `xdg-open`. One fetched
@@ -1460,6 +1518,9 @@ fn slide_button(
         Color32::WHITE,
         Stroke::new(1.0, Color32::from_gray(140)),
     );
+    if is_disabled(&w, s) {
+        painter.rect_filled(track, r, Color32::from_white_alpha(110));
+    }
     if let Some(lr) = label_rect {
         text_in(
             &painter,
@@ -2049,6 +2110,53 @@ mod tests {
             tooltip_text("$(P)M1.STOP = 1", "", "", &expand),
             "BL01T:M1.STOP = 1"
         );
+    }
+
+    #[test]
+    fn open_display_files_use_the_action_macros() {
+        let xml = r#"<display><widget type="symbol"><name>S</name>
+            <macros><D>sub</D></macros>
+            <actions><action type="open_display"><file>$(IOC)/$(P).bob</file>
+            <macros><P>BL01C-MO-01</P><IOC>../$(D)/ioc</IOC></macros>
+            </action></actions></widget></display>"#;
+        let pvs = PvManager::new();
+        let display = bob::Display::parse(xml).unwrap();
+        let screen = Builder { pvs: &pvs }.screen(display, &Macros::default(), None, 0);
+        let node = &screen.nodes[0];
+        let mut requests = Vec::new();
+        let mut cx = Cx {
+            view: View {
+                origin: Pos2::ZERO,
+                zoom: 1.0,
+            },
+            clip: Rect::EVERYTHING,
+            pvs: &pvs,
+            requests: &mut requests,
+            depth: 0,
+            keypad: false,
+        };
+        run_action(node, &node.w.actions()[0], &mut cx);
+        let Some(Request::Open { source, macros, .. }) = requests.first() else {
+            panic!("no display opened")
+        };
+        assert_eq!(*source, Source::parse("../sub/ioc/BL01C-MO-01.bob"));
+        assert_eq!(macros.get("P"), Some("BL01C-MO-01"));
+    }
+
+    #[test]
+    fn recognises_the_techui_toggle_script() {
+        let script = "/* Embedded javascript */
+importClass(org.csstudio.display.builder.runtime.script.PVUtil);
+importClass(org.csstudio.display.builder.runtime.script.ScriptUtil);
+pv = ScriptUtil.getPrimaryPV(widget)
+var pv_value = PVUtil.getDouble(pv);
+pv_value = (pv_value == 0) ? 1 : 0;
+pv.setValue(pv_value);
+";
+        assert!(is_toggle_script(script));
+        assert!(is_toggle_script(&script.replace('\n', "\n        ")));
+        assert!(!is_toggle_script(&script.replace("? 1 : 0", "? 2 : 0")));
+        assert!(!is_toggle_script(""));
     }
 
     #[test]

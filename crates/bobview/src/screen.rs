@@ -44,6 +44,8 @@ pub struct Node {
     pub base: Option<Source>,
     /// The image widget's texture and the frame it shows.
     pub image: Option<crate::image::ImageCache>,
+    /// The symbol or picture widget's texture and index.
+    pub symbol: crate::symbol::State,
     /// The x and y PVs of each trace of an XY plot.
     pub traces: Vec<crate::plot::TracePvs>,
 }
@@ -65,6 +67,11 @@ impl Node {
     /// properties, so `$(pv_name)` and `$(name)` work as in Phoebus.
     pub fn expand(&self, text: &str) -> String {
         expand_for(&self.w, &self.macros, text)
+    }
+
+    /// Expand macros with `macros` in place of the widget's own.
+    pub fn expand_with(&self, macros: &Macros, text: &str) -> String {
+        expand_for(&self.w, macros, text)
     }
 
     /// An expanded simple property.
@@ -242,6 +249,7 @@ impl Builder<'_> {
             error: None,
             base: base.cloned(),
             image: None,
+            symbol: Default::default(),
             traces: Vec::new(),
         };
 
@@ -445,6 +453,8 @@ pub mod display_set {
         "embedded",
         "navtabs",
         "image",
+        "symbol",
+        "picture",
         "xyplot",
     ];
 
