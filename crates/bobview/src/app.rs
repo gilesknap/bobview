@@ -4,17 +4,18 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use bob::{Macros, Source};
-use eframe::egui::{self, Id, Vec2};
+use eframe::egui::{self, Id, Pos2, Rect, Vec2};
 use pv::PvManager;
 
 use crate::chrome::{self, Chrome, UiScale};
+use crate::layout::{self, Geometry, Layout, WindowLayout, Zoom};
 use crate::pvmenu;
 use crate::style;
 use crate::trend::Trend;
-use crate::view::{LaunchKey, View, ViewCx, WindowKey};
+use crate::view::{LaunchKey, Origin, View, ViewCx, WindowKey};
 use crate::widgets::{self, Request};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Location {
     pub source: Source,
     pub macros: Macros,
@@ -24,6 +25,24 @@ pub struct BobApp {
     pvs: PvManager,
     /// The main window's display.
     main: View,
+    /// Where the main window is, for saving a layout.
+    geometry: Geometry,
+    /// The display windows other than the main one, and the number the
+    /// next one's id is made from.
+    windows: Vec<DisplayWindow>,
+    next_window: u64,
+    /// Links open their displays in windows of their own.
+    multi_window: bool,
+    /// The layout last loaded or saved, which Save saves to.
+    layout_name: Option<String>,
+    /// A layout to load once the controls' scale has settled (and the
+    /// monitors are known).
+    pending_layout: Option<(Layout, Option<String>)>,
+    /// The monitors, in desktop points, when the window system says.
+    monitors: Vec<Rect>,
+    settings: layout::Settings,
+    /// The Save as… dialog, when open.
+    save_as: Option<SaveAs>,
     home: Option<Location>,
     show_open: bool,
     /// Use the on-screen keypad for text entries (switched on by the first touch).
@@ -55,6 +74,54 @@ struct Keypad {
     text: String,
 }
 
+/// A display in a native window of its own, opened in multi-window mode or
+/// from a layout.
+struct DisplayWindow {
+    /// Stable for the window's life: made from a counter, never reused.
+    id: egui::ViewportId,
+    view: View,
+    /// The size and place it is created with.
+    builder: egui::ViewportBuilder,
+    /// Size the window to the next display shown: not when a layout gave
+    /// its size.
+    fit_next: bool,
+    /// Show the display toolbar (Ctrl+T, the chevron or the context menu).
+    toolbar: bool,
+    /// Where the window is, for saving a layout.
+    geometry: Geometry,
+    close: bool,
+}
+
+/// The Save as… dialog: the name typed, and whether replacing the layout
+/// of that name has been asked about.
+#[derive(Default)]
+struct SaveAs {
+    name: String,
+    confirm: bool,
+}
+
+/// Where a link's display is shown.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Route {
+    /// In the window the link is in, which keeps its history.
+    InPlace,
+    /// Raise the window already showing it.
+    Raise(WindowKey),
+    /// A new window.
+    NewWindow,
+}
+
+/// Where a link goes: in multi-window mode to a window of its own (raising
+/// one already `showing` the same display and macros), unless ctrl was held;
+/// otherwise in place, whatever its target, since most links are `replace`.
+fn route(multi_window: bool, ctrl: bool, showing: Option<WindowKey>) -> Route {
+    match showing {
+        _ if !multi_window || ctrl => Route::InPlace,
+        Some(window) => Route::Raise(window),
+        None => Route::NewWindow,
+    }
+}
+
 impl BobApp {
     pub fn new(
         ctx: &egui::Context,
@@ -82,6 +149,15 @@ impl BobApp {
         let mut app = Self {
             pvs,
             main,
+            geometry: Geometry::default(),
+            windows: Vec::new(),
+            next_window: 0,
+            multi_window: false,
+            layout_name: None,
+            pending_layout: None,
+            monitors: Vec::new(),
+            settings: layout::Settings::load(),
+            save_as: None,
             home: start.clone(),
             show_open: start.is_none(),
             keypad_mode: false,
@@ -102,19 +178,114 @@ impl BobApp {
         self.keypad_mode = on;
     }
 
+    #[cfg_attr(
+        target_arch = "wasm32",
+        expect(dead_code, reason = "a browser has one window")
+    )]
+    pub fn set_multi_window(&mut self, on: bool) {
+        self.multi_window = on;
+    }
+
+    /// Restore `layout` (saved as `name`) once the window is up.
+    #[cfg_attr(
+        target_arch = "wasm32",
+        expect(dead_code, reason = "a browser has one window")
+    )]
+    pub fn restore_layout(&mut self, layout: Layout, name: Option<String>) {
+        if layout.windows.iter().any(|w| w.main) {
+            self.show_open = false;
+        }
+        self.pending_layout = Some((layout, name));
+    }
+
     /// The view drawn in `window`, unless that window has closed.
     fn view_mut(&mut self, window: WindowKey) -> Option<&mut View> {
         match window {
             WindowKey::Main => Some(&mut self.main),
-            WindowKey::Child(_) => None,
+            WindowKey::Child(id) => self
+                .windows
+                .iter_mut()
+                .find(|w| w.id == id && !w.close)
+                .map(|w| &mut w.view),
         }
+    }
+
+    /// The window showing `loc` (the same display and macros), if any.
+    fn showing(&self, loc: &Location) -> Option<WindowKey> {
+        if self.main.current.as_ref() == Some(loc) {
+            return Some(WindowKey::Main);
+        }
+        self.windows
+            .iter()
+            .find(|w| !w.close && w.view.current.as_ref() == Some(loc))
+            .map(|w| WindowKey::Child(w.id))
+    }
+
+    /// Show `loc`, from a link in `origin`'s window: in place, or in a
+    /// window of its own in multi-window mode.
+    fn follow(&mut self, ctx: &egui::Context, origin: Origin, loc: Location, target: &str) {
+        match route(self.multi_window, origin.ctrl, self.showing(&loc)) {
+            Route::InPlace => {
+                log::info!("open {} ({target})", loc.source);
+                if let Some(view) = self.view_mut(origin.window) {
+                    view.open(loc);
+                }
+            }
+            Route::Raise(window) => {
+                log::info!("raise {}", loc.source);
+                raise(ctx, window);
+            }
+            Route::NewWindow => {
+                log::info!("open {} (new window)", loc.source);
+                self.open_window(ctx, loc, Geometry::default(), false);
+            }
+        }
+    }
+
+    /// Open `loc` in a new display window, at `geometry` when known, else
+    /// sized to the display at 100% (within the monitor).
+    fn open_window(
+        &mut self,
+        ctx: &egui::Context,
+        loc: Location,
+        geometry: Geometry,
+        toolbar: bool,
+    ) -> WindowKey {
+        let id = egui::ViewportId::from_hash_of(("display", self.next_window));
+        self.next_window += 1;
+        let mut view = View::new(&self.pvs, None);
+        view.show(loc);
+        // In desktop points: egui's are scaled by its zoom factor.
+        let zoom = ctx.zoom_factor();
+        let size = geometry.size.map(|s| s / zoom).or_else(|| {
+            let monitor = ctx.input(|i| i.viewport().monitor_size);
+            let display = view.natural_size(zoom)?;
+            Some(chrome::window_size(display, CHILD_STATUS, monitor))
+        });
+        let mut builder = egui::ViewportBuilder::default()
+            .with_app_id("bobview")
+            .with_inner_size(size.unwrap_or(chrome::DEFAULT_WINDOW / zoom))
+            .with_min_inner_size([160.0, 100.0]);
+        if let Some(pos) = geometry.position {
+            builder = builder.with_position(Pos2::ZERO + pos.to_vec2() / zoom);
+        }
+        self.windows.push(DisplayWindow {
+            id,
+            view,
+            builder,
+            fit_next: geometry.size.is_none(),
+            toolbar,
+            geometry,
+            close: false,
+        });
+        WindowKey::Child(id)
     }
 
     /// Whether a display, or one named by a command action, is still being
     /// worked out.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn is_loading(&self) -> bool {
-        self.main.is_loading()
+        self.main.is_loading() || self.windows.iter().any(|w| w.view.is_loading())
     }
 
     /// Run a command action on a thread, so a slow launcher script or file
@@ -181,14 +352,21 @@ impl BobApp {
 
     /// Open the displays named by finished command actions, unless the user
     /// has since moved to another display or closed the window.
-    fn poll_launched(&mut self) {
+    fn poll_launched(&mut self, ctx: &egui::Context) {
         while let Ok(done) = self.launched.1.try_recv() {
             let Some(view) = self.view_mut(done.window) else {
                 continue;
             };
             view.launching.retain(|k| *k != done.key);
+            let current = done.shown == view.shown;
             match done.target {
-                Some(loc) if done.shown == view.shown => view.open(loc),
+                Some(loc) if current => {
+                    let origin = Origin {
+                        window: done.window,
+                        ctrl: false,
+                    };
+                    self.follow(ctx, origin, loc, "window");
+                }
                 Some(loc) => log::info!("drop {}: the display has changed", loc.source),
                 None => {}
             }
@@ -201,6 +379,8 @@ impl BobApp {
         // window (a phone) keeps the navigation and Fit, and moves the rest
         // into a menu.
         let compact = ui.available_width() < chrome::FULL_TOOLBAR_WIDTH;
+        let windows = can_multi_window(ui.ctx(), self.keypad_mode);
+        let mut action = None;
         let view = &mut self.main;
         ui.horizontal(|ui| {
             ui.spacing_mut().button_padding = Vec2::new(10.0, 6.0);
@@ -254,6 +434,16 @@ impl BobApp {
                     if ui.selectable_label(self.show_open, "Open…").clicked() {
                         self.show_open = !self.show_open;
                     }
+                    if windows {
+                        ui.separator();
+                        action = layout_controls(
+                            ui,
+                            &mut self.multi_window,
+                            self.layout_name.as_deref(),
+                            &mut self.settings,
+                            true,
+                        );
+                    }
                 });
             } else {
                 if ui.button("⟳").on_hover_text("Reload").clicked() {
@@ -288,12 +478,181 @@ impl BobApp {
                 if ui.selectable_label(self.show_open, "Open…").clicked() {
                     self.show_open = !self.show_open;
                 }
+                if windows {
+                    ui.separator();
+                    action = layout_controls(
+                        ui,
+                        &mut self.multi_window,
+                        self.layout_name.as_deref(),
+                        &mut self.settings,
+                        false,
+                    );
+                }
             }
             if let Some(s) = &view.screen {
                 ui.add(egui::Label::new(egui::RichText::new(&s.title).strong()).truncate())
                     .on_hover_text(&s.title);
             }
         });
+        if let Some(action) = action {
+            self.layout_action(action);
+            // A layout loads on the next frame.
+            ui.ctx().request_repaint();
+        }
+    }
+
+    /// Load, save or delete a layout, as the toolbar asked.
+    fn layout_action(&mut self, action: LayoutAction) {
+        let done = match action {
+            LayoutAction::Load(name) => layout::load(&name).map(|l| {
+                self.pending_layout = Some((l, Some(name)));
+            }),
+            LayoutAction::Save(name) => self.save_layout(&name),
+            LayoutAction::SaveAs => {
+                self.save_as = Some(SaveAs {
+                    name: self.layout_name.clone().unwrap_or_default(),
+                    confirm: false,
+                });
+                Ok(())
+            }
+            LayoutAction::Delete(name) => layout::delete(&name).map(|()| {
+                log::info!("deleted layout {name}");
+                if self.layout_name.as_deref() == Some(name.as_str()) {
+                    self.layout_name = None;
+                }
+            }),
+        };
+        if let Err(e) = done {
+            log::error!("{e}");
+        }
+    }
+
+    /// The open windows as a layout.
+    fn layout(&self) -> Layout {
+        let mut windows = Vec::new();
+        if let Some(loc) = &self.main.current {
+            let mut w = WindowLayout::new(loc, self.geometry);
+            w.main = true;
+            w.zoom = Some(Zoom::new(self.main.fit, self.main.zoom));
+            windows.push(w);
+        }
+        for dw in self.windows.iter().filter(|w| !w.close) {
+            if let Some(loc) = &dw.view.current {
+                let mut w = WindowLayout::new(loc, dw.geometry);
+                w.toolbar = dw.toolbar;
+                windows.push(w);
+            }
+        }
+        if windows.iter().any(|w| w.position.is_none()) {
+            positions_unknown();
+        }
+        Layout::new(self.multi_window, windows)
+    }
+
+    fn save_layout(&mut self, name: &str) -> Result<(), String> {
+        layout::save(name, &self.layout())?;
+        self.layout_name = Some(name.trim().to_string());
+        Ok(())
+    }
+
+    /// Close the display windows and open those of `layout`; the main
+    /// window moves, takes the layout's size and shows its display.
+    fn apply_layout(&mut self, ctx: &egui::Context, layout: Layout, name: Option<String>) {
+        // Positions are kept when on a monitor: those the window system
+        // lists, else the main window's.
+        let zoom = ctx.zoom_factor();
+        let monitors = if self.monitors.is_empty() {
+            ctx.input(|i| i.viewport().monitor_size)
+                .map(|m| vec![Rect::from_min_size(Pos2::ZERO, m * zoom)])
+                .unwrap_or_default()
+        } else {
+            self.monitors.clone()
+        };
+        self.windows.clear();
+        self.multi_window = layout.multi_window;
+        for w in &layout.windows {
+            let geometry = w.geometry(&monitors);
+            if w.position.is_some() && geometry.position.is_none() {
+                log::info!("{}: its saved position is off screen", w.display);
+            }
+            let loc = w.location();
+            if !w.main {
+                self.open_window(ctx, loc, geometry, w.toolbar);
+                continue;
+            }
+            if let Some(size) = geometry.size {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size / zoom));
+                self.chrome.hold_size();
+            }
+            if let Some(pos) = geometry.position {
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(
+                    Pos2::ZERO + pos.to_vec2() / zoom,
+                ));
+            }
+            if let Some(z) = &w.zoom {
+                self.main.fit = z.factor().is_none();
+                self.main.zoom = z.factor().unwrap_or(self.main.zoom);
+            }
+            if self.home.is_none() {
+                self.home = Some(loc.clone());
+            }
+            self.show_open = false;
+            self.main.open(loc);
+        }
+        if layout.windows.iter().any(|w| w.position.is_some()) && on_wayland() {
+            positions_unknown();
+        }
+        self.layout_name = name;
+    }
+
+    /// The Save as… dialog: a name, and a question before replacing a
+    /// layout.
+    fn save_as_window(&mut self, ui: &mut egui::Ui) {
+        let Some(dialog) = self.save_as.as_mut() else {
+            return;
+        };
+        let mut open = true;
+        let mut save = None;
+        egui::Window::new("Save layout as")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ui.ctx(), |ui| {
+                let name = dialog.name.trim().to_string();
+                if dialog.confirm {
+                    ui.label(format!("Replace the layout {name}?"));
+                    ui.horizontal(|ui| {
+                        if ui.button("Replace").clicked() {
+                            save = Some(name);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            dialog.confirm = false;
+                        }
+                    });
+                    return;
+                }
+                let edit = ui.text_edit_singleline(&mut dialog.name);
+                let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let valid = layout::valid_name(&name);
+                let clicked = ui.add_enabled(valid, egui::Button::new("Save")).clicked();
+                if valid && (clicked || enter) {
+                    if layout::exists(&name) {
+                        dialog.confirm = true;
+                    } else {
+                        save = Some(name);
+                    }
+                }
+            });
+        if let Some(name) = save {
+            if let Err(e) = self.save_layout(&name) {
+                log::error!("{e}");
+            }
+            open = false;
+        }
+        if !open {
+            self.save_as = None;
+        }
     }
 
     fn open_panel(&mut self, ui: &mut egui::Ui) {
@@ -364,6 +723,122 @@ fn toggle_auto_size(chrome: &mut Chrome) {
     }
 }
 
+/// The status line's height in a display window, in points, for sizing a
+/// new one before it is drawn.
+const CHILD_STATUS: f32 = 24.0;
+
+/// Whether displays can have native windows of their own: not in a browser
+/// or where there's only one native window, nor on a touch or small screen
+/// (a phone).
+fn can_multi_window(ctx: &egui::Context, touch: bool) -> bool {
+    let zoom = ctx.zoom_factor();
+    let small = ctx.input(|i| chrome::small_screen(i.viewport(), zoom));
+    !cfg!(target_arch = "wasm32") && !ctx.embed_viewports() && !touch && !small
+}
+
+/// What the main toolbar's layout controls ask for.
+enum LayoutAction {
+    Load(String),
+    Save(String),
+    SaveAs,
+    Delete(String),
+}
+
+/// The multi-window toggle, the layout list and the layout menu; in the
+/// `compact` toolbar's menu, the list is a submenu.
+fn layout_controls(
+    ui: &mut egui::Ui,
+    multi_window: &mut bool,
+    current: Option<&str>,
+    settings: &mut layout::Settings,
+    compact: bool,
+) -> Option<LayoutAction> {
+    let mut action = None;
+    let toggle = if compact { "🗗 Multi-window" } else { "🗗" };
+    if ui
+        .selectable_label(*multi_window, toggle)
+        .on_hover_text("Multi-window: links open their displays in windows of their own (ctrl+click opens in place)")
+        .clicked()
+    {
+        *multi_window = !*multi_window;
+    }
+    let mut load = |ui: &mut egui::Ui| {
+        let names = layout::list();
+        if names.is_empty() {
+            ui.weak("No saved layouts");
+        }
+        for name in names {
+            if ui
+                .selectable_label(current == Some(name.as_str()), &name)
+                .clicked()
+            {
+                action = Some(LayoutAction::Load(name));
+            }
+        }
+    };
+    if compact {
+        ui.menu_button("Load layout", load);
+    } else {
+        egui::ComboBox::from_id_salt("layout")
+            .selected_text(current.unwrap_or("Layout"))
+            .show_ui(ui, &mut load);
+    }
+    let menu = if compact { "Layout" } else { "▾" };
+    ui.menu_button(menu, |ui| {
+        if ui
+            .add_enabled(current.is_some(), egui::Button::new("Save"))
+            .clicked()
+            && let Some(name) = current
+        {
+            action = Some(LayoutAction::Save(name.to_string()));
+        }
+        if ui.button("Save as default").clicked() {
+            action = Some(LayoutAction::Save(layout::DEFAULT.to_string()));
+        }
+        if ui.button("Save as…").clicked() {
+            action = Some(LayoutAction::SaveAs);
+        }
+        ui.menu_button("Delete", |ui| {
+            let names = layout::list();
+            if names.is_empty() {
+                ui.weak("No saved layouts");
+            }
+            for name in names {
+                if ui.button(&name).clicked() {
+                    action = Some(LayoutAction::Delete(name));
+                }
+            }
+        });
+        ui.separator();
+        if ui
+            .checkbox(&mut settings.save_default_on_exit, "Save default on exit")
+            .changed()
+        {
+            settings.save();
+        }
+    })
+    .response
+    .on_hover_text("Save, save as or delete layouts");
+    action
+}
+
+/// Whether windows are on Wayland, which won't let a client place them.
+fn on_wayland() -> bool {
+    !cfg!(target_arch = "wasm32")
+        && std::env::var_os("WAYLAND_DISPLAY").is_some_and(|d| !d.is_empty())
+}
+
+/// Say, once, that window positions are not known or can't be set.
+fn positions_unknown() {
+    static SAID: std::sync::Once = std::sync::Once::new();
+    SAID.call_once(|| {
+        log::info!(
+            "window positions are left to the compositor on Wayland \
+             (start bobview with WAYLAND_DISPLAY= to use XWayland, which keeps them)"
+        );
+    });
+}
+
 /// Display files (`.bob`, `.opi`) and subdirectories of `dir`, directories
 /// first. The linked folders of an Eclipse project in `dir` are listed as
 /// directories, and those are listed as if they were where they are linked.
@@ -394,20 +869,64 @@ fn list_dir(dir: &Path) -> Vec<(PathBuf, bool)> {
 }
 
 impl eframe::App for BobApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // A layout's positions are checked against the monitors as they are
+        // when it is loaded.
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.pending_layout.is_some()
+            && let Some(window) = frame.winit_window()
+        {
+            // Desktop points, as egui's (times its zoom factor).
+            let scale = window.scale_factor() as f32;
+            self.monitors = window
+                .available_monitors()
+                .map(|m| {
+                    let (pos, size) = (m.position(), m.size());
+                    Rect::from_min_size(
+                        Pos2::new(pos.x as f32, pos.y as f32) / scale,
+                        Vec2::new(size.width as f32, size.height as f32) / scale,
+                    )
+                })
+                .collect();
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = frame;
         self.draw(ui);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if self.settings.save_default_on_exit
+            && let Err(e) = layout::save(layout::DEFAULT, &self.layout())
+        {
+            log::error!("{e}");
+        }
     }
 }
 
 impl BobApp {
     pub fn draw(&mut self, ui: &mut egui::Ui) {
-        self.main.poll_loading(ui.ctx());
-        self.poll_launched();
+        let ctx = ui.ctx().clone();
+        self.main.poll_loading(&ctx);
+        for w in &mut self.windows {
+            w.view.poll_loading(&ctx);
+        }
+        self.poll_launched(&ctx);
         if !self.keypad_mode && ui.input(|i| i.any_touches()) {
             self.keypad_mode = true;
         }
         widgets::touch_targets(ui.ctx(), self.keypad_mode);
         self.chrome.begin(ui.ctx());
+        // Once the controls' scale has settled, as positions and sizes
+        // depend on it.
+        if self.chrome.settled()
+            && let Some((layout, name)) = self.pending_layout.take()
+        {
+            self.apply_layout(&ctx, layout, name);
+        }
+        if shortcuts(ui, &mut self.main).close {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        self.geometry = geometry(ui);
         self.main.update_title(ui.ctx());
         let toolbar = egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
         self.chrome.toolbar = toolbar.response.rect.height();
@@ -426,8 +945,8 @@ impl BobApp {
             keypad: self.keypad_mode,
             trends: &trends,
         };
-        let (status, requests) = self.main.draw(ui, &vcx);
-        self.chrome.panels = panels + status;
+        let drawn = self.main.draw(ui, &vcx);
+        self.chrome.panels = panels + drawn.status;
 
         // A new display (not a reload, which keeps the size the user gave
         // the window) sizes the window to show it at 100% (or the fixed zoom).
@@ -437,27 +956,26 @@ impl BobApp {
         let display = self.main.natural_size(ui.ctx().zoom_factor());
         self.chrome.end(ui.ctx(), display);
 
-        for (window, req) in requests {
-            self.request(ui.ctx(), window, req);
+        let mut requests = drawn.requests;
+        requests.extend(self.display_windows(ui, &trends));
+        for (origin, req) in requests {
+            self.request(ui.ctx(), origin, req);
         }
         self.keypad_window(ui);
         self.details_window(ui);
+        self.save_as_window(ui);
         self.trend_windows(ui);
     }
 
-    /// Act on a request from a widget in `window`.
-    fn request(&mut self, ctx: &egui::Context, window: WindowKey, req: Request) {
+    /// Act on a request from a widget in `origin`'s window.
+    fn request(&mut self, ctx: &egui::Context, origin: Origin, req: Request) {
+        let window = origin.window;
         match req {
             Request::Open {
                 source,
                 macros,
                 target,
-            } => {
-                log::info!("open {source} ({target})");
-                if let Some(view) = self.view_mut(window) {
-                    view.open(Location { source, macros });
-                }
-            }
+            } => self.follow(ctx, origin, Location { source, macros }, &target),
             Request::Keypad { pv, text } => self.keypad = Some(Keypad { pv, text }),
             Request::Details(details) => self.details = Some(details),
             Request::Trend(names) => {
@@ -478,12 +996,69 @@ impl BobApp {
                 directory,
                 command,
             } => self.launch(ctx, window, base, directory, command),
-            Request::Close => match self.view_mut(window) {
-                Some(view) if !view.back.is_empty() => view.go_back(),
-                _ => ctx.send_viewport_cmd_to(viewport(window), egui::ViewportCommand::Close),
+            // Exit in a display window closes it; the main window goes back
+            // first, as one window used to.
+            Request::Close => match window {
+                WindowKey::Main if !self.main.back.is_empty() => self.main.go_back(),
+                WindowKey::Main => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                WindowKey::Child(id) => {
+                    if let Some(w) = self.windows.iter_mut().find(|w| w.id == id) {
+                        w.close = true;
+                    }
+                }
             },
             Request::Webpage(url) => open_webpage(&url),
         }
+    }
+
+    /// Each display window in its own native window, until it is closed, or
+    /// in a window inside this one where there's only one native window.
+    /// Returns the requests their widgets made.
+    fn display_windows(
+        &mut self,
+        ui: &mut egui::Ui,
+        trends: &[(u64, String)],
+    ) -> Vec<(Origin, Request)> {
+        let ctx = ui.ctx().clone();
+        let mut requests = Vec::new();
+        let (home, keypad, auto_size) = (&self.home, self.keypad_mode, self.chrome.auto_size);
+        for w in &mut self.windows {
+            let vcx = ViewCx {
+                window: WindowKey::Child(w.id),
+                keypad,
+                trends,
+            };
+            let title = w
+                .view
+                .screen
+                .as_ref()
+                .map_or_else(|| "bobview".to_string(), |s| s.title.clone());
+            if ctx.embed_viewports() {
+                let mut open = true;
+                egui::Window::new(&title)
+                    .id(display_window_id(w.id))
+                    .open(&mut open)
+                    .collapsible(false)
+                    .default_size(Vec2::new(640.0, 420.0))
+                    .show(&ctx, |ui| {
+                        requests.extend(child_ui(ui, w, home, &vcx, None));
+                    });
+                w.close |= !open;
+                continue;
+            }
+            let builder = w.builder.clone().with_title(title);
+            ctx.show_viewport_immediate(w.id, builder, |ui, class| {
+                // No native windows after all: a window in this one.
+                let native = (class != egui::ViewportClass::EmbeddedWindow).then_some(auto_size);
+                requests.extend(child_ui(ui, w, home, &vcx, native));
+                // Closing the window drops its view, and its PVs with it.
+                if ui.input(|i| i.viewport().close_requested()) {
+                    w.close = true;
+                }
+            });
+        }
+        self.windows.retain(|w| !w.close);
+        requests
     }
 
     /// Each trend in its own native window, until it is closed, or in a
@@ -640,6 +1215,213 @@ fn viewport(window: WindowKey) -> egui::ViewportId {
     }
 }
 
+/// The display window `id` inside the main one, where windows are embedded.
+fn display_window_id(id: egui::ViewportId) -> Id {
+    Id::new(("display window", id))
+}
+
+/// Bring `window` to the front, as a link to its display is followed.
+fn raise(ctx: &egui::Context, window: WindowKey) {
+    match window {
+        WindowKey::Child(id) if ctx.embed_viewports() => ctx.move_to_top(egui::LayerId::new(
+            egui::Order::Middle,
+            display_window_id(id),
+        )),
+        _ => ctx.send_viewport_cmd_to(viewport(window), egui::ViewportCommand::Focus),
+    }
+}
+
+/// Where the window being drawn is, in desktop points (egui's times its
+/// zoom factor); None where the window system doesn't say.
+fn geometry(ui: &egui::Ui) -> Geometry {
+    let zoom = ui.ctx().zoom_factor();
+    ui.input(|i| {
+        let info = i.viewport();
+        Geometry {
+            position: info.outer_rect.map(|r| Pos2::ZERO + r.min.to_vec2() * zoom),
+            size: info.inner_rect.map(|r| r.size() * zoom),
+        }
+    })
+}
+
+/// What the keyboard shortcuts ask of the window beyond its view.
+#[derive(Default)]
+struct Shortcuts {
+    close: bool,
+    toolbar: bool,
+}
+
+/// The shortcuts every window has: Ctrl+R reloads, Alt+Left and Alt+Right go
+/// back and forward, Ctrl+W closes the window and Ctrl+T shows or hides a
+/// display window's toolbar.
+fn shortcuts(ui: &egui::Ui, view: &mut View) -> Shortcuts {
+    use egui::{Key, Modifiers};
+    ui.input_mut(|i| {
+        if i.consume_key(Modifiers::COMMAND, Key::R) {
+            view.reload();
+        }
+        if i.consume_key(Modifiers::ALT, Key::ArrowLeft) {
+            view.go_back();
+        }
+        if i.consume_key(Modifiers::ALT, Key::ArrowRight) {
+            view.go_forward();
+        }
+        Shortcuts {
+            close: i.consume_key(Modifiers::COMMAND, Key::W),
+            toolbar: i.consume_key(Modifiers::COMMAND, Key::T),
+        }
+    })
+}
+
+/// A display window's contents: its toolbar when shown, the display, the
+/// chevron that shows or hides the toolbar and the context menu on the
+/// display's background. `native` is Some(auto-size) in a native window,
+/// which is sized to each new display (only the first unless auto-size).
+fn child_ui(
+    ui: &mut egui::Ui,
+    w: &mut DisplayWindow,
+    home: &Option<Location>,
+    vcx: &ViewCx,
+    native: Option<bool>,
+) -> Vec<(Origin, Request)> {
+    if native.is_some() {
+        let keys = shortcuts(ui, &mut w.view);
+        w.close |= keys.close;
+        w.toolbar ^= keys.toolbar;
+    }
+    let mut panels = 0.0;
+    if w.toolbar {
+        panels += egui::Panel::top(Id::new(("toolbar", w.id)))
+            .show(ui, |ui| display_toolbar(ui, &mut w.view, home))
+            .response
+            .rect
+            .height();
+    }
+    let drawn = w.view.draw(ui, vcx);
+    panels += drawn.status;
+    if let Some(background) = &drawn.background {
+        background.context_menu(|ui| {
+            let label = if w.toolbar {
+                "Hide toolbar"
+            } else {
+                "Show toolbar"
+            };
+            if ui.button(label).clicked() {
+                w.toolbar = !w.toolbar;
+            }
+            if ui.button("Close").clicked() {
+                w.close = true;
+            }
+        });
+    }
+    let Some(auto_size) = native else {
+        w.view.new_display = false;
+        return drawn.requests;
+    };
+    chevron(ui, w);
+    w.geometry = geometry(ui);
+    // Sized to a new display at 100%, within the monitor, once the window
+    // knows its monitor; then the display fits the window as it is resized.
+    let info = ui.input(|i| i.viewport().clone());
+    if w.view.new_display && info.monitor_size.is_some() {
+        w.view.new_display = false;
+        let zoom = ui.ctx().zoom_factor();
+        if std::mem::replace(&mut w.fit_next, auto_size)
+            && chrome::can_resize(&info, zoom)
+            && let Some(display) = w.view.natural_size(zoom)
+        {
+            let size = chrome::window_size(display, panels, info.monitor_size);
+            let inner = ui.input(|i| i.content_rect().size());
+            if (size - inner).length() >= 1.0 {
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+            }
+        }
+    }
+    drawn.requests
+}
+
+/// A small chevron in the top-right corner while the pointer is over the
+/// window, that shows or hides its toolbar: drawn over the display, so it
+/// takes no room.
+fn chevron(ui: &egui::Ui, w: &mut DisplayWindow) {
+    if !ui.input(|i| i.pointer.has_pointer()) {
+        return;
+    }
+    egui::Area::new(Id::new(("chevron", w.id)))
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::RIGHT_TOP, Vec2::new(-4.0, 4.0))
+        .show(ui.ctx(), |ui| {
+            let (rect, resp) = ui.allocate_exact_size(Vec2::new(22.0, 14.0), egui::Sense::click());
+            let visuals = ui.style().interact(&resp);
+            let painter = ui.painter();
+            painter.rect_filled(rect, 3.0, visuals.weak_bg_fill);
+            // ⌄ to show the toolbar, ⌃ to hide it (drawn: the fonts have no ⌄).
+            let c = rect.center();
+            let (dx, dy) = (5.0, if w.toolbar { -2.5 } else { 2.5 });
+            painter.line(
+                vec![
+                    c + Vec2::new(-dx, -dy),
+                    c + Vec2::new(0.0, dy),
+                    c + Vec2::new(dx, -dy),
+                ],
+                visuals.fg_stroke,
+            );
+            let tip = if w.toolbar {
+                "Hide the toolbar (Ctrl+T)"
+            } else {
+                "Show the toolbar (Ctrl+T)"
+            };
+            if resp.on_hover_text(tip).clicked() {
+                w.toolbar = !w.toolbar;
+            }
+        });
+}
+
+/// A display window's toolbar: navigation, reload and zoom. The window and
+/// layout controls stay on the main window.
+fn display_toolbar(ui: &mut egui::Ui, view: &mut View, home: &Option<Location>) {
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(!view.back.is_empty(), egui::Button::new("◀"))
+            .on_hover_text("Back")
+            .clicked()
+        {
+            view.go_back();
+        }
+        if ui
+            .add_enabled(!view.forward.is_empty(), egui::Button::new("▶"))
+            .on_hover_text("Forward")
+            .clicked()
+        {
+            view.go_forward();
+        }
+        if ui.button("⟳").on_hover_text("Reload").clicked() {
+            view.reload();
+        }
+        ui.separator();
+        if ui.button("−").clicked() {
+            view.zoom_by(1.0 / 1.25);
+        }
+        if ui.selectable_label(view.fit, "Fit").clicked() {
+            view.fit = !view.fit;
+        }
+        if ui.button("+").clicked() {
+            view.zoom_by(1.25);
+        }
+        ui.label(format!("{:.0}%", view.zoom * 100.0));
+        ui.separator();
+        if ui
+            .add_enabled(home.is_some(), egui::Button::new("⌂"))
+            .on_hover_text("Home")
+            .clicked()
+            && let Some(home) = home.clone()
+        {
+            view.open(home);
+        }
+    });
+}
+
 /// The native window of the trend `id`.
 fn trend_viewport(id: u64) -> egui::ViewportId {
     egui::ViewportId::from_hash_of(("trend", id))
@@ -724,7 +1506,7 @@ mod tests {
         assert!(app.is_loading());
         while app.is_loading() {
             std::thread::sleep(std::time::Duration::from_millis(5));
-            app.poll_launched();
+            app.poll_launched(&ctx);
         }
         // A result from before the display changed is dropped.
         let loc = Location {
@@ -744,8 +1526,90 @@ mod tests {
                 target: Some(loc),
             })
             .unwrap();
-        app.poll_launched();
+        app.poll_launched(&ctx);
         assert!(app.main.current.is_none() && !app.is_loading());
+    }
+
+    #[test]
+    fn links_route_by_mode_modifier_and_open_windows() {
+        use super::{Route, WindowKey, route};
+        let child = WindowKey::Child(eframe::egui::ViewportId::from_hash_of("x"));
+        // One window: always in place, whatever is open.
+        assert_eq!(route(false, false, None), Route::InPlace);
+        assert_eq!(route(false, false, Some(child)), Route::InPlace);
+        assert_eq!(route(false, true, None), Route::InPlace);
+        // Multi-window: a new window, or the one already showing it.
+        assert_eq!(route(true, false, None), Route::NewWindow);
+        assert_eq!(route(true, false, Some(child)), Route::Raise(child));
+        assert_eq!(
+            route(true, false, Some(WindowKey::Main)),
+            Route::Raise(WindowKey::Main)
+        );
+        // Ctrl+click navigates in place.
+        assert_eq!(route(true, true, None), Route::InPlace);
+        assert_eq!(route(true, true, Some(child)), Route::InPlace);
+    }
+
+    #[test]
+    fn requests_act_on_their_own_window() {
+        use super::{BobApp, Location, Origin, WindowKey};
+        use crate::widgets::Request;
+        let ctx = eframe::egui::Context::default();
+        let mut app = BobApp::new(&ctx, None, Some(1.0), crate::chrome::UiScale::Auto);
+        let display = |name: &str| Location {
+            source: bob::Source::File(format!("/no/such/{name}.bob").into()),
+            macros: bob::Macros::from_pairs([("P", name)]),
+        };
+        let open = |app: &mut BobApp, window, ctrl, loc: Location| {
+            let req = Request::Open {
+                source: loc.source,
+                macros: loc.macros,
+                target: "replace".into(),
+            };
+            app.request(&ctx, Origin { window, ctrl }, req);
+        };
+        let main = WindowKey::Main;
+        open(&mut app, main, false, display("a"));
+        assert_eq!(app.main.current, Some(display("a")));
+
+        app.set_multi_window(true);
+        // A link opens a new window, and again raises it.
+        open(&mut app, main, false, display("b"));
+        assert_eq!(app.windows.len(), 1);
+        let child = WindowKey::Child(app.windows[0].id);
+        open(&mut app, main, false, display("b"));
+        assert_eq!(app.windows.len(), 1);
+        // The same display with other macros is another window.
+        let mut other = display("b");
+        other.macros = bob::Macros::from_pairs([("P", "c")]);
+        open(&mut app, main, false, other);
+        assert_eq!(app.windows.len(), 2);
+        // Ctrl+click in a window navigates it, keeping its history.
+        open(&mut app, child, true, display("d"));
+        assert_eq!(app.windows[0].view.current, Some(display("d")));
+        assert_eq!(app.windows[0].view.back, [display("b")]);
+        assert_eq!(app.main.current, Some(display("a")));
+        // Exit closes a display window even when it has history.
+        app.request(
+            &ctx,
+            Origin {
+                window: child,
+                ctrl: false,
+            },
+            Request::Close,
+        );
+        assert!(app.view_mut(child).is_none());
+        // The main window still goes back first.
+        open(&mut app, main, true, display("e"));
+        app.request(
+            &ctx,
+            Origin {
+                window: main,
+                ctrl: false,
+            },
+            Request::Close,
+        );
+        assert_eq!(app.main.current, Some(display("a")));
     }
 
     #[test]

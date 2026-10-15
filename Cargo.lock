@@ -355,6 +355,8 @@ dependencies = [
  "png",
  "pv",
  "resvg",
+ "serde",
+ "serde_json",
  "ureq",
  "wasm-bindgen",
  "wasm-bindgen-futures",

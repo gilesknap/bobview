@@ -228,6 +228,58 @@ switch; each value holds until the next, and a gap marks where a PV was
 disconnected. Below the plot a legend gives each PV's colour, name and
 current value, or Disconnected; ✖ removes a PV, and Add PV adds one.
 
+## Multi-window mode and layouts
+
+For a control room, several displays can be open side by side, each in a
+window of its own, and the arrangement saved and restored. Multi-window mode
+is switched on with 🗗 on the main window's toolbar (or `--multi-window`).
+The toggle and the layout controls are not shown in a browser, nor on a
+touch or small screen.
+
+In multi-window mode a link (an action or menu button, a symbol click …)
+opens its display in a new window, whatever its target, and a link to a
+display already open with the same macros raises that window instead.
+**Ctrl+click** follows a link in place, in the window it is in, with Back
+and Forward as in one window; with multi-window mode off every link
+navigates in place, as before. BOY Exit buttons close the display window
+they are in (in the main window they go back first, as before).
+
+A display window opens sized to its display at 100%, within the monitor,
+and the display fits the window as you resize it. It has the native title
+bar only: its toolbar (Back, Forward, Reload, zoom and Home) is hidden until
+you show it with the chevron that appears in the top-right corner while the
+pointer is over the window, with **Ctrl+T**, or with Show toolbar in the
+right-click menu on the display's background (which also has Close). In
+every window Ctrl+R reloads, Alt+← and Alt+→ go back and forward, and
+Ctrl+W closes the window. Closing the main window quits bobview and closes
+its windows.
+
+A layout records the open windows: each one's display, Eclipse project and
+effective macros, its position and size, the main window's zoom and whether
+a display window shows its toolbar. Layouts are JSON files in
+`$XDG_CONFIG_HOME/bobview/layouts` (by default `~/.config/bobview/layouts`).
+The main toolbar's layout list loads one (closing the display windows open
+now), and the ▾ menu next to it has Save (to the layout last loaded or
+saved), Save as default, Save as… (asking before replacing a layout),
+Delete, and Save default on exit (off unless ticked).
+
+```bash
+bobview                     # restores the default layout if there is one
+bobview DISPLAY             # opens DISPLAY; the default layout is not restored
+bobview --layout rf-shift   # restores layouts/rf-shift.json
+bobview --no-layout         # ignores the default layout
+```
+
+`--snapshot` ignores layouts. A saved position that is on none of the
+monitors now (a laptop that was docked) is dropped and the window manager
+places the window.
+
+**Wayland** does not let an application read or set its windows' positions,
+so on a Wayland desktop a layout restores the windows and their sizes but the
+compositor places them, and bobview logs this once. Running bobview under
+XWayland, with `WAYLAND_DISPLAY= bobview`, keeps positions. X11 desktops,
+including `bobview-ssh` over X forwarding, restore positions.
+
 ## In a browser
 
 The same app also builds for the browser (WebAssembly, drawn with WebGL),

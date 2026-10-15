@@ -114,13 +114,19 @@ pub fn window_size(display: Vec2, chrome: f32, monitor: Option<Vec2>) -> Vec2 {
 /// screen too small for the default window (a phone), where it fills the
 /// screen anyway.
 pub fn can_resize(info: &egui::ViewportInfo, zoom_factor: f32) -> bool {
+    info.fullscreen != Some(true)
+        && info.maximized != Some(true)
+        && !small_screen(info, zoom_factor)
+}
+
+/// Whether the window's monitor is too small for the default window (a
+/// phone).
+pub fn small_screen(info: &egui::ViewportInfo, zoom_factor: f32) -> bool {
     // The monitor size is in points at the current zoom; the default window
     // is in points at the desktop scale.
-    let small = info
-        .monitor_size
+    info.monitor_size
         .map(|m| m * zoom_factor)
-        .is_some_and(|m| m.x < DEFAULT_WINDOW.x || m.y < DEFAULT_WINDOW.y);
-    info.fullscreen != Some(true) && info.maximized != Some(true) && !small
+        .is_some_and(|m| m.x < DEFAULT_WINDOW.x || m.y < DEFAULT_WINDOW.y)
 }
 
 /// The controls' scale and the window size, carried between frames.
@@ -140,6 +146,8 @@ pub struct Chrome {
     pub auto_size: bool,
     /// The window has not been sized yet.
     first: bool,
+    /// Keep the window's size for the next display shown: a layout gave it.
+    hold: bool,
 }
 
 impl Chrome {
@@ -153,7 +161,20 @@ impl Chrome {
             resize: false,
             auto_size: true,
             first: true,
+            hold: false,
         }
+    }
+
+    /// Whether the zoom factor is where the scale wants it.
+    pub fn settled(&self) -> bool {
+        self.settled
+    }
+
+    /// The window has been given its size (by a layout): keep it when the
+    /// next display is shown.
+    pub fn hold_size(&mut self) {
+        self.first = false;
+        self.hold = true;
     }
 
     /// A new display is being shown.
@@ -194,6 +215,9 @@ impl Chrome {
             return;
         }
         self.resize = false;
+        if std::mem::take(&mut self.hold) {
+            return;
+        }
         let follow = self.first || self.auto_size;
         self.first = false;
         if !follow || !can_resize(&info, ctx.zoom_factor()) {

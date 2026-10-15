@@ -19,8 +19,25 @@ pub enum WindowKey {
     /// The main window, with the toolbar.
     Main,
     /// A display window of its own.
-    #[expect(dead_code, reason = "child display windows are not opened yet")]
     Child(egui::ViewportId),
+}
+
+/// Where a request came from: its window, and whether ctrl was held as it
+/// was made (a link then navigates in place in multi-window mode).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Origin {
+    pub window: WindowKey,
+    pub ctrl: bool,
+}
+
+/// What drawing a view gives back.
+pub struct Drawn {
+    /// The status line's height.
+    pub status: f32,
+    pub requests: Vec<(Origin, Request)>,
+    /// The display area behind the widgets, in a display window, for its
+    /// context menu.
+    pub background: Option<egui::Response>,
 }
 
 /// What a view needs from the application to draw: owned or shared, so a
@@ -265,9 +282,16 @@ impl View {
     }
 
     /// Draw the status line and the display, and return the status line's
-    /// height and the requests its widgets made, tagged with `vcx.window`.
-    pub fn draw(&mut self, ui: &mut egui::Ui, vcx: &ViewCx) -> (f32, Vec<(WindowKey, Request)>) {
-        let status = egui::Panel::bottom("status")
+    /// height and the requests its widgets made, tagged with where they came
+    /// from.
+    pub fn draw(&mut self, ui: &mut egui::Ui, vcx: &ViewCx) -> Drawn {
+        // Display windows drawn inside the main one (no native windows) must
+        // not share its ids.
+        let id = |name: &str| match vcx.window {
+            WindowKey::Main => Id::new(name),
+            WindowKey::Child(v) => Id::new((name, v)),
+        };
+        let status = egui::Panel::bottom(id("status"))
             .show(ui, |ui| self.status(ui))
             .response
             .rect
@@ -276,9 +300,15 @@ impl View {
         let ui_zoom = ui.ctx().zoom_factor();
 
         let mut requests = Vec::new();
+        let mut background = None;
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(Color32::from_gray(200)))
             .show(ui, |ui| {
+                // Sensed before the widgets, so that they win a click on them.
+                if let WindowKey::Child(_) = vcx.window {
+                    let rect = ui.max_rect();
+                    background = Some(ui.interact(rect, id("background"), egui::Sense::click()));
+                }
                 let Some(screen) = self.screen.as_mut() else {
                     return;
                 };
@@ -313,11 +343,18 @@ impl View {
                         trends: vcx.trends,
                         window: vcx.window,
                     };
-                    widgets::draw_screen(ui, screen, &mut cx, Id::new("display"));
+                    widgets::draw_screen(ui, screen, &mut cx, id("display"));
                 });
             });
-        let requests = requests.into_iter().map(|r| (vcx.window, r)).collect();
-        (status, requests)
+        let origin = Origin {
+            window: vcx.window,
+            ctrl: ui.input(|i| i.modifiers.command),
+        };
+        Drawn {
+            status,
+            requests: requests.into_iter().map(|r| (origin, r)).collect(),
+            background,
+        }
     }
 
     fn status(&self, ui: &mut egui::Ui) {
