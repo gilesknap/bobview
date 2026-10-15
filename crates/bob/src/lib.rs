@@ -24,6 +24,12 @@ pub use model::{Action, Color, Font, FontStyle, Rule, RuleExpr, named_color};
 pub use source::Source;
 pub use trend::{databrowser_pvs, strip_tool_pvs};
 
+/// The largest display file read from disk, as for those fetched by URL.
+const MAX_FILE_SIZE: u64 = 16 << 20;
+
+/// The most XML nodes in a display, so a small file can't expand to a huge tree.
+const MAX_NODES: u32 = 1 << 20;
+
 /// A parsed `.bob` (or translated `.opi`) display.
 #[derive(Clone, Debug)]
 pub struct Display {
@@ -75,14 +81,28 @@ impl Display {
     /// project's linked folder (see [`project`]).
     pub fn load(path: &Path) -> Result<Self, Error> {
         let real = project::locate(path);
-        let text = std::fs::read_to_string(&real).map_err(|e| Error::Io(path.into(), e))?;
+        use std::io::Read;
+        let io = |e| Error::Io(path.into(), e);
+        let file = std::fs::File::open(&real).map_err(io)?;
+        let mut text = String::new();
+        file.take(MAX_FILE_SIZE + 1)
+            .read_to_string(&mut text)
+            .map_err(io)?;
+        if text.len() as u64 > MAX_FILE_SIZE {
+            let why = format!("larger than {} MiB", MAX_FILE_SIZE >> 20);
+            return Err(io(std::io::Error::other(why)));
+        }
         let mut display = Self::parse(&text)?;
         display.source = Some(Source::File(path.to_path_buf()));
         Ok(display)
     }
 
     pub fn parse(xml: &str) -> Result<Self, Error> {
-        let doc = roxmltree::Document::parse(xml).map_err(Error::Xml)?;
+        let options = roxmltree::ParsingOptions {
+            nodes_limit: MAX_NODES,
+            ..Default::default()
+        };
+        let doc = roxmltree::Document::parse_with_options(xml, options).map_err(Error::Xml)?;
         let mut root = Element::from_node(doc.root_element());
         if root.name != "display" {
             return Err(Error::NotADisplay(root.name));

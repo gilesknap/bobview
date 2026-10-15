@@ -1951,7 +1951,7 @@ fn embedded(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut Cx, id: Id) {
         let file = node.prop("file");
         let group = node.prop("group_name");
         let macros = node.macros.clone();
-        Builder { pvs: cx.pvs }.embed(node, &file, &macros, &group, cx.depth);
+        Builder::new(cx.pvs).embed(node, &file, &macros, &group, cx.depth);
     }
     let w = node.w.clone();
     match node.embedded.as_mut() {
@@ -2012,10 +2012,10 @@ fn navtabs(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut Cx, id: Id) {
         }
     }
     if let Some(i) = clicked {
-        Builder { pvs: cx.pvs }.select_navtab(node, i, cx.depth);
+        Builder::new(cx.pvs).select_navtab(node, i, cx.depth);
     }
     if fetched(ui, node) {
-        Builder { pvs: cx.pvs }.select_navtab(node, node.active_tab, cx.depth);
+        Builder::new(cx.pvs).select_navtab(node, node.active_tab, cx.depth);
     }
     let body = if vertical {
         Rect::from_min_max(rect.min + Vec2::new(tw + gap, 0.0), rect.max)
@@ -2076,8 +2076,7 @@ mod tests {
         )
         .unwrap();
         let pvs = PvManager::new();
-        let screen =
-            crate::screen::Builder { pvs: &pvs }.screen(d, &bob::Macros::default(), None, 0);
+        let screen = crate::screen::Builder::new(&pvs).screen(d, &bob::Macros::default(), None, 0);
         let widget = |resize: i64| {
             bob::Display::parse(&format!(
                 "<display><widget type='embedded'><resize>{resize}</resize></widget></display>"
@@ -2104,8 +2103,7 @@ mod tests {
         for dir in ["", "/tmp", "file:///tmp"] {
             let mut d = bob::Display::parse(&actions(dir)).unwrap();
             d.source = Some(Source::Url("https://example.com/x.bob".into()));
-            let screen =
-                crate::screen::Builder { pvs: &pvs }.screen(d, &Macros::default(), None, 0);
+            let screen = crate::screen::Builder::new(&pvs).screen(d, &Macros::default(), None, 0);
             let node = &screen.nodes[0];
             let mut requests = Vec::new();
             let mut cx = Cx {
@@ -2432,7 +2430,7 @@ mod tests {
             </action></actions></widget></display>"#;
         let pvs = PvManager::new();
         let display = bob::Display::parse(xml).unwrap();
-        let screen = Builder { pvs: &pvs }.screen(display, &Macros::default(), None, 0);
+        let screen = Builder::new(&pvs).screen(display, &Macros::default(), None, 0);
         let node = &screen.nodes[0];
         let mut requests = Vec::new();
         let mut cx = Cx {
@@ -2466,7 +2464,7 @@ mod tests {
             </actions></widget></display>"#;
         let pvs = PvManager::new();
         let display = bob::Display::parse(xml).unwrap();
-        let screen = Builder { pvs: &pvs }.screen(display, &Macros::default(), None, 0);
+        let screen = Builder::new(&pvs).screen(display, &Macros::default(), None, 0);
         let node = &screen.nodes[0];
         let mut requests = Vec::new();
         let mut cx = Cx {

@@ -1,12 +1,21 @@
 //! A loaded display: widgets with resolved positions, macros and PVs.
 
 use bob::{Display, Macros, Source, Widget};
+use std::cell::Cell;
+
 use pv::{Pv, PvManager};
 
 use crate::rules::CompiledRule;
 
 /// How deep embedded displays may nest before we stop (guards against loops).
 const MAX_DEPTH: u32 = 8;
+
+/// The most embedded displays one load builds, however they nest (guards
+/// against displays that embed themselves several times over).
+const MAX_SCREENS: u32 = 256;
+
+/// The most widgets one load builds, counting those of embedded displays.
+const MAX_WIDGETS: u32 = 100_000;
 
 /// A display ready to draw. Node rectangles are in this screen's own coordinates.
 pub struct Screen {
@@ -61,13 +70,26 @@ pub struct Node {
 
 pub struct Builder<'a> {
     pub pvs: &'a PvManager,
+    /// Embedded displays and widgets this builder may still make.
+    screens: Cell<u32>,
+    widgets: Cell<u32>,
+}
+
+impl<'a> Builder<'a> {
+    pub fn new(pvs: &'a PvManager) -> Self {
+        Self {
+            pvs,
+            screens: Cell::new(MAX_SCREENS),
+            widgets: Cell::new(MAX_WIDGETS),
+        }
+    }
 }
 
 impl Screen {
     /// Load `source` with `macros` layered over the display's own macros.
     pub fn load(source: &Source, macros: &Macros, pvs: &PvManager) -> Result<Self, bob::Error> {
         let display = crate::fetch::load(source)?;
-        Ok(Builder { pvs }.screen(display, macros, None, 0))
+        Ok(Builder::new(pvs).screen(display, macros, None, 0))
     }
 }
 
@@ -246,10 +268,17 @@ impl Builder<'_> {
         base: Option<&Source>,
         depth: u32,
     ) -> Vec<Node> {
-        widgets
-            .iter()
-            .map(|w| self.node(w, origin, macros, base, depth))
-            .collect()
+        let mut nodes = Vec::new();
+        for w in widgets {
+            // Widgets past the budget are left out.
+            let Some(left) = self.widgets.get().checked_sub(1) else {
+                log::warn!("too many widgets; the rest are left out");
+                break;
+            };
+            self.widgets.set(left);
+            nodes.push(self.node(w, origin, macros, base, depth));
+        }
+        nodes
     }
 
     fn node(
@@ -394,6 +423,11 @@ impl Builder<'_> {
             node.error = Some("embedded displays nested too deeply".into());
             return;
         }
+        let Some(left) = self.screens.get().checked_sub(1) else {
+            node.error = Some("too many embedded displays".into());
+            return;
+        };
+        self.screens.set(left);
         let source = node.resolve(file);
         match crate::fetch::load(&source) {
             Ok(d) => {
@@ -476,7 +510,7 @@ mod tests {
         )
         .unwrap();
         let pvs = PvManager::new();
-        let s = Builder { pvs: &pvs }.screen(d, &Macros::default(), None, 0);
+        let s = Builder::new(&pvs).screen(d, &Macros::default(), None, 0);
         let child = &s.nodes[0].children[0];
         assert_eq!(
             child.rect,
@@ -498,7 +532,7 @@ mod tests {
         )
         .unwrap();
         let pvs = PvManager::new();
-        let s = Builder { pvs: &pvs }.screen(d, &Macros::default(), None, 0);
+        let s = Builder::new(&pvs).screen(d, &Macros::default(), None, 0);
         assert_eq!(s.nodes[0].pv_name, "loc://SR04S-PIRG:STA");
         // Through two properties, as a BOY symbol's rule PV `$(pv_name)` is.
         assert_eq!(s.nodes[0].expand("$(pv_name)"), "loc://SR04S-PIRG:STA");
@@ -518,15 +552,43 @@ mod tests {
         ))
         .unwrap();
         let pvs = PvManager::new();
-        let s = Builder { pvs: &pvs }.screen(d, &Macros::default(), None, 0);
+        let s = Builder::new(&pvs).screen(d, &Macros::default(), None, 0);
         assert_eq!(s.nodes[0].expand("$(p38)"), "xxxx");
         assert!(s.nodes[0].expand("$(p0)").starts_with("$(p0)"));
     }
 
     #[test]
+    fn displays_embedding_themselves_stay_bounded() {
+        // Four embeds of itself, 8 deep: 4^8 screens if each were built.
+        let dir = std::env::temp_dir().join(format!("bobview-bomb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("bomb.bob");
+        let embed = "<widget type='embedded'><file>bomb.bob</file></widget>";
+        std::fs::write(&file, format!("<display>{}</display>", embed.repeat(4))).unwrap();
+        let start = std::time::Instant::now();
+        let pvs = PvManager::new();
+        let s = Screen::load(&Source::File(file), &Macros::default(), &pvs).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        fn count(nodes: &[Node], errors: &mut u32) -> u32 {
+            nodes
+                .iter()
+                .map(|n| {
+                    *errors += n.error.is_some() as u32;
+                    1 + n.embedded.as_ref().map_or(0, |e| count(&e.nodes, errors))
+                })
+                .sum()
+        }
+        let mut errors = 0;
+        let total = count(&s.nodes, &mut errors);
+        assert!(total <= MAX_SCREENS * 4 + 4, "{total} nodes");
+        assert!(errors > 0);
+        assert!(start.elapsed().as_secs() < 10);
+    }
+
+    #[test]
     fn titles_expand_macros_or_use_the_file_name() {
         let pvs = PvManager::new();
-        let b = Builder { pvs: &pvs };
+        let b = Builder::new(&pvs);
         let d = Display::parse("<display><name>RGA - $(device)</name></display>").unwrap();
         let s = b.screen(
             d,
@@ -546,7 +608,7 @@ mod tests {
     #[test]
     fn opi_screens_keep_their_declared_size() {
         let pvs = PvManager::new();
-        let b = Builder { pvs: &pvs };
+        let b = Builder::new(&pvs);
         let xml = |root: &str| {
             format!(
                 "<display {root}><width>300</width><height>200</height>
@@ -570,7 +632,7 @@ mod tests {
         )
         .unwrap();
         let pvs = PvManager::new();
-        let s = Builder { pvs: &pvs }.screen(d, &Macros::from_pairs([("P", "B")]), None, 0);
+        let s = Builder::new(&pvs).screen(d, &Macros::from_pairs([("P", "B")]), None, 0);
         assert_eq!(s.nodes[0].pv_name, "loc://Bq");
     }
 }
