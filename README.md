@@ -94,6 +94,9 @@ CI builds the x86_64 and aarch64 binaries on GitHub's `ubuntu-24.04` and
 are linked against glibc 2.28, so they run on RHEL 8+, Ubuntu 20.04+ and
 Debian 10+.
 
+To release, push a tag such as `v0.2.2`. CI creates the GitHub Release itself
+and builds with the version taken from the tag, so `Cargo.toml` needs no bump.
+
 ## Licences
 
 bobview is Apache-2.0. The release binaries include third-party crates, among
