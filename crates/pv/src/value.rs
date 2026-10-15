@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::SystemTime;
+use web_time::SystemTime;
 
 /// A PV's value, reduced to the few shapes a display needs.
 #[derive(Clone, Debug, Default, PartialEq)]

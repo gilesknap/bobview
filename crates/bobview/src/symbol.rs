@@ -64,9 +64,11 @@ static IMAGES: LazyLock<Mutex<Images>> = LazyLock::new(|| {
 });
 
 /// Threads that load images; more images than this wait their turn.
+#[cfg(not(target_arch = "wasm32"))]
 const LOADERS: usize = 4;
 
 /// The queue the loader threads take images from, started on first use.
+#[cfg(not(target_arch = "wasm32"))]
 static QUEUE: LazyLock<Mutex<std::sync::mpsc::Sender<Job>>> = LazyLock::new(|| {
     let (tx, rx) = std::sync::mpsc::channel::<Job>();
     let rx = Arc::new(Mutex::new(rx));
@@ -99,6 +101,7 @@ pub fn forget() {
 }
 
 /// Whether any image is still loading.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn loading() -> bool {
     IMAGES
         .lock()
@@ -125,15 +128,30 @@ fn image(ctx: &egui::Context, source: &Source) -> Option<Result<Image, ()>> {
         ctx: ctx.clone(),
     };
     drop(images);
+    #[cfg(not(target_arch = "wasm32"))]
     let _ = QUEUE.lock().unwrap().send(job);
+    // A browser has one thread: fetch without blocking, then decode.
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_futures::spawn_local(async move {
+        let data = crate::fetch::bytes_async(&job.source).await;
+        finish(job, data);
+    });
     None
 }
 
 /// Read and decode one image on a loader thread.
+#[cfg(not(target_arch = "wasm32"))]
 fn load(job: Job) {
+    let data = crate::fetch::bytes(&job.source);
+    finish(job, data);
+}
+
+/// Decode what was read for `job` and keep it.
+fn finish(job: Job, data: Result<Vec<u8>, bob::Error>) {
     let source = &job.source;
+    let data = data.map_err(|e| e.to_string());
     // A decoder that panics on a bad file must not leave it loading.
-    let read = || match crate::fetch::bytes(source).map_err(|e| e.to_string()) {
+    let read = || match data {
         Ok(data) => match decode(source, &data) {
             Ok(img) => Entry::Ready(img),
             Err(e) => {

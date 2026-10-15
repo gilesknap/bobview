@@ -137,7 +137,6 @@ fn location_path(location: &str, dir: &Path) -> Option<PathBuf> {
 
 /// `text` with `%xx` escapes decoded, as in a URI.
 fn percent_decode(text: &str) -> std::ffi::OsString {
-    use std::os::unix::ffi::OsStringExt;
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -157,7 +156,12 @@ fn percent_decode(text: &str) -> std::ffi::OsString {
             }
         }
     }
-    std::ffi::OsString::from_vec(out)
+    #[cfg(unix)]
+    return std::os::unix::ffi::OsStringExt::from_vec(out);
+    // Elsewhere (Windows, and the browser, which has no files anyway) paths
+    // are text.
+    #[cfg(not(unix))]
+    return String::from_utf8_lossy(&out).into_owned().into();
 }
 
 /// `path` with `.` and `..` removed, without looking at the file system.

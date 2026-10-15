@@ -42,7 +42,7 @@ pub struct BobApp {
     trends: Vec<Trend>,
     next_trend: u64,
     /// The display at `current`, being fetched and built on a thread.
-    loading: Option<std::sync::mpsc::Receiver<Result<Screen, bob::Error>>>,
+    loading: Option<Loading>,
     /// Displays named by command actions, worked out on threads.
     launched: (
         std::sync::mpsc::Sender<Launched>,
@@ -66,6 +66,13 @@ struct Launched {
     shown: u64,
     target: Option<Location>,
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+type Loading = std::sync::mpsc::Receiver<Result<Screen, bob::Error>>;
+/// In a browser, the display's files are fetched first and it is built
+/// once they have all arrived.
+#[cfg(target_arch = "wasm32")]
+struct Loading;
 
 struct Keypad {
     pv: pv::Pv,
@@ -135,17 +142,16 @@ impl BobApp {
         self.screen = None;
         self.shown += 1;
         self.open_path = loc.source.to_string();
+        #[cfg(target_arch = "wasm32")]
+        set_page_url(&loc);
         self.loading = None;
-        if loc.source.is_url() {
-            // Build a fetched display on a thread, embedded displays and all,
-            // so a slow server doesn't freeze the window; `poll_loading`
-            // shows it once it arrives.
-            let (tx, rx) = std::sync::mpsc::channel();
-            let (source, macros, pvs) = (loc.source.clone(), loc.macros.clone(), self.pvs.clone());
-            std::thread::spawn(move || {
-                tx.send(Screen::load(&source, &macros, &pvs)).ok();
-            });
-            self.loading = Some(rx);
+        // In a browser `poll_loading` fetches and builds every display.
+        #[cfg(target_arch = "wasm32")]
+        let fetch_first = true;
+        #[cfg(not(target_arch = "wasm32"))]
+        let fetch_first = loc.source.is_url();
+        if fetch_first {
+            self.loading = Some(self.start_loading(&loc));
             self.error = None;
             self.current = Some(loc);
             return;
@@ -155,10 +161,32 @@ impl BobApp {
         self.loaded(loaded);
     }
 
+    /// Build a fetched display on a thread, embedded displays and all, so a
+    /// slow server doesn't freeze the window; `poll_loading` shows it once
+    /// it arrives.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn start_loading(&self, loc: &Location) -> Loading {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (source, macros, pvs) = (loc.source.clone(), loc.macros.clone(), self.pvs.clone());
+        std::thread::spawn(move || {
+            tx.send(Screen::load(&source, &macros, &pvs)).ok();
+        });
+        rx
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn start_loading(&self, _loc: &Location) -> Loading {
+        Loading
+    }
+
     /// Show a loaded display, or why it could not be loaded.
     fn loaded(&mut self, loaded: Result<Screen, bob::Error>) {
         match loaded {
             Ok(screen) => {
+                #[cfg(target_arch = "wasm32")]
+                if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+                    doc.set_title(&screen.title);
+                }
                 self.screen = Some(screen);
                 self.error = None;
                 // A reload keeps the size the user gave the window.
@@ -176,11 +204,33 @@ impl BobApp {
 
     /// Whether a display, or one named by a command action, is still being
     /// worked out.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn is_loading(&self) -> bool {
         self.loading.is_some() || !self.launching.is_empty()
     }
 
+    /// Build the display once its files have arrived, fetching more if
+    /// building it finds it names others.
+    #[cfg(target_arch = "wasm32")]
+    fn poll_loading(&mut self, ctx: &egui::Context) {
+        if self.loading.is_none() {
+            return;
+        }
+        if !crate::fetch::pending()
+            && let Some(cur) = &self.current
+        {
+            let loaded = Screen::load(&cur.source, &cur.macros, &self.pvs);
+            if !crate::fetch::pending() {
+                self.loading = None;
+                self.loaded(loaded);
+                return;
+            }
+        }
+        ctx.request_repaint_after(Duration::from_millis(50));
+    }
+
     /// Show the display being fetched, or its error, once the fetch is done.
+    #[cfg(not(target_arch = "wasm32"))]
     fn poll_loading(&mut self, ctx: &egui::Context) {
         let Some(rx) = &self.loading else { return };
         match rx.try_recv() {
@@ -198,6 +248,7 @@ impl BobApp {
     /// Run a command action on a thread, so a slow launcher script or file
     /// system doesn't freeze the window, and open the display it names. A
     /// command already in flight is ignored.
+    #[cfg(not(target_arch = "wasm32"))]
     fn launch(
         &mut self,
         ctx: &egui::Context,
@@ -230,6 +281,12 @@ impl BobApp {
             tx.send(Launched { key, shown, target }).ok();
             ctx.request_repaint();
         });
+    }
+
+    /// A browser runs no commands.
+    #[cfg(target_arch = "wasm32")]
+    fn launch(&mut self, _: &egui::Context, _: Option<Source>, _: Option<Source>, cmd: String) {
+        log::warn!("command '{cmd}' is not run in a browser");
     }
 
     /// Open the displays named by finished command actions, unless the user
@@ -544,6 +601,8 @@ impl BobApp {
             && s.title != self.window_title
         {
             self.window_title = s.title.clone();
+            // A browser page's title is set when the display loads instead.
+            #[cfg(not(target_arch = "wasm32"))]
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::Title(self.window_title.clone()));
         }
@@ -648,11 +707,7 @@ impl BobApp {
                 } => self.launch(ui.ctx(), base, directory, command),
                 Request::Close if !self.back.is_empty() => self.go_back(),
                 Request::Close => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
-                Request::Webpage(url) => {
-                    if let Err(e) = std::process::Command::new("xdg-open").arg(&url).spawn() {
-                        log::warn!("cannot open {url}: {e}");
-                    }
-                }
+                Request::Webpage(url) => open_webpage(&url),
             }
         }
         self.keypad_window(ui);
@@ -787,6 +842,59 @@ impl BobApp {
             Some(None) => self.keypad = None,
             None => {}
         }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn open_webpage(url: &str) {
+    if let Err(e) = std::process::Command::new("xdg-open").arg(url).spawn() {
+        log::warn!("cannot open {url}: {e}");
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn open_webpage(url: &str) {
+    if let Some(w) = web_sys::window()
+        && w.open_with_url_and_target(url, "_blank").is_err()
+    {
+        log::warn!("cannot open {url}");
+    }
+}
+
+/// Keep the page's address on the display shown, so a bookmark or a reload
+/// comes back to it: `display` relative to the page when it is beside it,
+/// and `macros`; other parameters (`pvws`, `zoom` …) stay as they were.
+#[cfg(target_arch = "wasm32")]
+fn set_page_url(loc: &Location) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(url) = window
+        .location()
+        .href()
+        .ok()
+        .and_then(|href| web_sys::Url::new(&href).ok())
+    else {
+        return;
+    };
+    let path = url.pathname();
+    let dir = format!("{}{}", url.origin(), &path[..=path.rfind('/').unwrap_or(0)]);
+    let display = loc.source.to_string();
+    let params = url.search_params();
+    params.set("display", display.strip_prefix(&dir).unwrap_or(&display));
+    // Escaped for parse_macros.
+    let macros: Vec<String> = loc
+        .macros
+        .iter()
+        .map(|(k, v)| format!("{k}={}", v.replace('\\', r"\\").replace(',', r"\,")))
+        .collect();
+    if macros.is_empty() {
+        params.delete("macros");
+    } else {
+        params.set("macros", &macros.join(","));
+    }
+    if let Ok(history) = window.history() {
+        let _ = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&url.href()));
     }
 }
 

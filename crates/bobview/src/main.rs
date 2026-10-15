@@ -7,23 +7,28 @@ mod colormaps;
 mod fetch;
 mod group_link;
 mod image;
+#[cfg(not(target_arch = "wasm32"))]
 mod launch;
 mod meter;
 mod plot;
 mod pvmenu;
 mod rules;
 mod screen;
+#[cfg(not(target_arch = "wasm32"))]
 mod snapshot;
 mod style;
 mod symbol;
 mod trend;
 mod widgets;
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 
 use bob::{Macros, Source};
+#[cfg(not(target_arch = "wasm32"))]
 use eframe::egui;
 
+#[cfg(not(target_arch = "wasm32"))]
 const USAGE: &str = "\
 usage: bobview [options] [display.bob | display.opi | http(s)://host/display.bob]
 
@@ -60,6 +65,7 @@ project/module/screen.opi) finds the linked files.
 PVs without a prefix use Channel Access; EPICS_CA_ADDR_LIST and
 EPICS_CA_NAME_SERVERS select the IOCs. Set BOBVIEW_LOG=debug for more output.";
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
     init_logging();
     let mut file = None;
@@ -203,19 +209,101 @@ fn main() -> eframe::Result {
 }
 
 /// A time in seconds: a number, not negative (nor too big for a Duration).
+#[cfg(not(target_arch = "wasm32"))]
 fn seconds(text: Option<String>) -> Option<f64> {
     text?.parse::<f64>().ok().filter(|s| (0.0..1e9).contains(s))
 }
 
-/// Parse `P=X,R=Y` into macros.
+/// Parse `P=X,R=Y` into macros; `\,` and `\\` in a value stand for `,`
+/// and `\`.
 fn parse_macros(text: &str) -> Macros {
-    Macros::from_pairs(text.split(',').filter_map(|kv| {
+    // Split on unescaped commas, keeping escapes for now.
+    let mut pairs = vec![String::new()];
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            ',' => pairs.push(String::new()),
+            '\\' => {
+                let last = pairs.last_mut().expect("a pair");
+                last.push(c);
+                last.extend(chars.next());
+            }
+            _ => pairs.last_mut().expect("a pair").push(c),
+        }
+    }
+    Macros::from_pairs(pairs.iter().filter_map(|kv| {
         let (k, v) = kv.split_once('=')?;
-        Some((k.trim().to_string(), v.trim().to_string()))
+        Some((k.trim().to_string(), unescape_macro(v.trim())))
     }))
 }
 
+fn unescape_macro(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match (c, chars.clone().next()) {
+            ('\\', Some(next @ (',' | '\\'))) => {
+                out.push(next);
+                chars.next();
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// The browser build: the page's query string names the display, its
+/// macros and the PV Web Socket, e.g.
+/// `?display=https://host/opi/index.bob&macros=P=X&pvws=pvws.host:443`
+/// (and `zoom=1.5`, `keypad`).
+/// A relative display is found next to the page; the default is `index.bob`.
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    use wasm_bindgen::JsCast;
+
+    init_logging();
+    let window = web_sys::window().expect("a browser window");
+    let location = window.location();
+    let query = web_sys::UrlSearchParams::new_with_str(&location.search().unwrap_or_default())
+        .expect("a query string");
+    let page = Source::Url(location.href().unwrap_or_default());
+    let display = query.get("display").unwrap_or_else(|| "index.bob".into());
+    let start = app::Location {
+        source: page.resolve(&display),
+        macros: parse_macros(&query.get("macros").unwrap_or_default()),
+    };
+    if let Some(pvws) = query.get("pvws") {
+        pv::set_pvws(&pvws);
+    }
+    let zoom = query.get("zoom").and_then(|z| z.parse().ok());
+    let keypad = query.has("keypad");
+
+    let canvas = window
+        .document()
+        .and_then(|d| d.get_element_by_id("bobview"))
+        .and_then(|c| c.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+        .expect("a <canvas id=\"bobview\"> on the page");
+    wasm_bindgen_futures::spawn_local(async move {
+        let started = eframe::WebRunner::new()
+            .start(
+                canvas,
+                eframe::WebOptions::default(),
+                Box::new(move |cc| {
+                    let ui_scale = chrome::UiScale::from_env();
+                    let mut app = app::BobApp::new(&cc.egui_ctx, Some(start), zoom, ui_scale);
+                    app.set_keypad(keypad);
+                    Ok(Box::new(app))
+                }),
+            )
+            .await;
+        if let Err(e) = started {
+            log::error!("cannot start: {e:?}");
+        }
+    });
+}
+
 /// The bundled index display, next to the binary or in ~/.local/share.
+#[cfg(not(target_arch = "wasm32"))]
 fn default_display() -> Option<PathBuf> {
     let mut candidates = Vec::new();
     if let Ok(exe) = std::env::current_exe()
@@ -248,7 +336,10 @@ impl log::Log for Logger {
 
     fn log(&self, r: &log::Record) {
         if self.enabled(r.metadata()) {
+            #[cfg(not(target_arch = "wasm32"))]
             eprintln!("{:<5} {}", r.level(), r.args());
+            #[cfg(target_arch = "wasm32")]
+            web_sys::console::log_1(&format!("{:<5} {}", r.level(), r.args()).into());
         }
     }
 
@@ -276,6 +367,16 @@ mod tests {
         let m = super::parse_macros("P=BL01T, R=:DET:");
         assert_eq!(m.get("P"), Some("BL01T"));
         assert_eq!(m.get("R"), Some(":DET:"));
+    }
+
+    #[test]
+    fn parses_escaped_macros() {
+        let m = super::parse_macros(r"LIST=a\,b,P=X");
+        assert_eq!(m.get("LIST"), Some("a,b"));
+        assert_eq!(m.get("P"), Some("X"));
+        let m = super::parse_macros(r"D=C:\\dir\\,E=a\b");
+        assert_eq!(m.get("D"), Some(r"C:\dir\"));
+        assert_eq!(m.get("E"), Some(r"a\b"));
     }
 
     #[test]

@@ -17,9 +17,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Clippy the browser build
+        run: cargo clippy -p pv -p bobview --target wasm32-unknown-unknown -- -D warnings
       - run: cargo test --workspace
       - name: Snapshot the test displays against bobview-testioc
         env:
@@ -63,19 +66,24 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ env.TARGET }}
+          targets: ${{ env.TARGET }}, wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - uses: mlugg/setup-zig@v2
+      - name: Find the wasm-bindgen version in Cargo.lock
+        run: |
+          echo "WASM_BINDGEN=$(sed -n '/^name = "wasm-bindgen"$/{n;s/^version = "\(.*\)"$/\1/p;}' Cargo.lock)" >> "$GITHUB_ENV"
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-zigbuild
+          tool: cargo-zigbuild, wasm-bindgen@${{ env.WASM_BINDGEN }}
       - name: Take the version from the release tag
         if: startsWith(github.ref, 'refs/tags/v')
         run: sed -i "0,/^version = .*/s//version = \"${GITHUB_REF_NAME#v}\"/" Cargo.toml
       - run: cargo zigbuild --release --workspace --target ${TARGET}.${GLIBC}
+      - name: Build the browser bundle
+        run: ./scripts/build-web.sh
       - name: Check the glibc requirement
         run: |
-          for b in bobview bobview-probe bobview-testioc; do
+          for b in bobview bobview-probe bobview-testioc bobview-server; do
             need=$(objdump -T ${TARGET_DIR}/$b | grep -oE "GLIBC_[0-9.]+" | sort -Vu | tail -1)
             echo "$b needs $need"
             [ "$(printf "%s\n" "$need" "GLIBC_${GLIBC}" | sort -V | tail -1)" = "GLIBC_${GLIBC}" ]
@@ -86,8 +94,10 @@ jobs:
           EPICS_CA_AUTO_ADDR_LIST: "NO"
         run: |
           ${TARGET_DIR}/bobview --version | tee version.txt
+          ${TARGET_DIR}/bobview-server --version | tee -a version.txt
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             grep -qx "bobview ${GITHUB_REF_NAME#v}" version.txt
+            grep -qx "bobview-server ${GITHUB_REF_NAME#v}" version.txt
           fi
           ${TARGET_DIR}/bobview-testioc &
           ${TARGET_DIR}/bobview-probe --seconds 3 bl01t:SUM BL01T-MO-SIMC-01:M1.RBV | tee probe.txt

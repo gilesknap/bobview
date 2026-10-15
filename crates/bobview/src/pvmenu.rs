@@ -1,7 +1,7 @@
 //! The context menu on widgets with a PV (right-click, or long-press on a
 //! touch screen) and the PV details window it can open.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use web_time::{SystemTime, UNIX_EPOCH};
 
 use eframe::egui::{self, Ui};
 use pv::{Pv, PvName, PvState, Scheme, Severity, Value};

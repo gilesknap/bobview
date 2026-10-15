@@ -10,20 +10,31 @@
 //! | `pva://`  | PV Access                               |
 //! | `loc://`  | local PVs held in this process          |
 //! | `sim://`  | simulated signals (sine, ramp, noise …) |
+//!
+//! In a browser (wasm32) there is no runtime: `sim://` runs on the page's
+//! event loop, and `ca://` and `pva://` PVs come over a PV Web Socket
+//! ([`set_pvws`]).
 
+#[cfg(not(target_arch = "wasm32"))]
 mod ca;
 mod local;
 mod name;
+#[cfg(not(target_arch = "wasm32"))]
 mod pva;
+#[cfg(target_arch = "wasm32")]
+mod pvws;
 mod sim;
 mod value;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::mpsc;
 
 pub use name::{PvName, Scheme};
+#[cfg(target_arch = "wasm32")]
+pub use pvws::set_pvws;
 pub use value::{Image, ImageData, PvState, Severity, Value, split_array, split_strings};
 
 /// Called whenever any PV changes, so a UI can schedule a repaint.
@@ -37,9 +48,13 @@ pub type ListenFn = dyn Fn(&PvState) + Send + Sync;
 /// Where writes to a PV go.
 pub(crate) enum Writer {
     /// To the backend task, which converts and sends them.
+    #[cfg(not(target_arch = "wasm32"))]
     Channel(mpsc::UnboundedSender<String>),
     /// Straight into the local value.
     Local,
+    /// Over the PV Web Socket, which converts them.
+    #[cfg(target_arch = "wasm32")]
+    Pvws(String),
 }
 
 /// State shared between a [`Pv`] handle and the task serving it.
@@ -89,11 +104,17 @@ impl Shared {
     }
 }
 
+/// What serves a PV: stopped when the last [`Pv`] is dropped.
+#[cfg(not(target_arch = "wasm32"))]
+type Task = tokio::task::JoinHandle<()>;
+#[cfg(target_arch = "wasm32")]
+type Task = pvws::Task;
+
 /// One subscription; the backend task stops when the last [`Pv`] is dropped.
 struct Entry {
     name: PvName,
     shared: Arc<Shared>,
-    task: Option<tokio::task::JoinHandle<()>>,
+    task: Option<Task>,
 }
 
 impl Drop for Entry {
@@ -136,12 +157,15 @@ impl Pv {
         let value = value.into();
         let shared = &self.0.shared;
         match shared.writer.lock().unwrap().as_ref() {
+            #[cfg(not(target_arch = "wasm32"))]
             Some(Writer::Channel(tx)) => {
                 let _ = tx.send(value);
             }
             Some(Writer::Local) => {
                 shared.update(|s| s.value = local::apply(&s.value, &s.labels, &value));
             }
+            #[cfg(target_arch = "wasm32")]
+            Some(Writer::Pvws(name)) => pvws::write(name, &shared.snapshot(), value),
             None => log::warn!("{} is read-only", self.0.name),
         }
     }
@@ -155,21 +179,44 @@ pub struct PvManager {
 
 struct Inner {
     /// Always `Some` until drop, which shuts it down without blocking.
+    #[cfg(not(target_arch = "wasm32"))]
     rt: Option<tokio::runtime::Runtime>,
-    entries: Mutex<HashMap<String, Weak<Entry>>>,
+    entries: Mutex<Entries>,
     locals: Mutex<HashMap<String, Arc<Shared>>>,
     // Shared with the PV tasks, which must not hold `Inner` itself: the last
     // reference could then be dropped on a runtime thread.
+    #[cfg(not(target_arch = "wasm32"))]
     ca: Arc<tokio::sync::OnceCell<epics_ca_rs::client::CaClient>>,
+    #[cfg(not(target_arch = "wasm32"))]
     pva: Arc<std::sync::OnceLock<epics_pva_rs::client::PvaClient>>,
     notify: Arc<RwLock<Option<Notifier>>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for Inner {
     fn drop(&mut self) {
         if let Some(rt) = self.rt.take() {
             rt.shutdown_background();
         }
+    }
+}
+
+/// Every subscription by key, including dropped ones until the next prune.
+#[derive(Default)]
+struct Entries {
+    map: HashMap<String, Weak<Entry>>,
+    /// Prune dropped entries once the map is this big, so a batch of
+    /// subscriptions doesn't scan the map for each one.
+    prune_at: usize,
+}
+
+impl Entries {
+    fn insert(&mut self, key: String, entry: Weak<Entry>) {
+        if self.map.len() >= self.prune_at {
+            self.map.retain(|_, w| w.strong_count() > 0);
+            self.prune_at = (2 * self.map.len()).max(64);
+        }
+        self.map.insert(key, entry);
     }
 }
 
@@ -180,6 +227,18 @@ impl Default for PvManager {
 }
 
 impl PvManager {
+    #[cfg(target_arch = "wasm32")]
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                entries: Mutex::default(),
+                locals: Mutex::new(HashMap::new()),
+                notify: Arc::new(RwLock::new(None)),
+            }),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new() -> Self {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -190,7 +249,7 @@ impl PvManager {
         Self {
             inner: Arc::new(Inner {
                 rt: Some(rt),
-                entries: Mutex::new(HashMap::new()),
+                entries: Mutex::default(),
                 locals: Mutex::new(HashMap::new()),
                 ca: Arc::new(tokio::sync::OnceCell::new()),
                 pva: Arc::new(std::sync::OnceLock::new()),
@@ -205,6 +264,7 @@ impl PvManager {
     }
 
     /// The tokio runtime the PV tasks run on.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn runtime(&self) -> &tokio::runtime::Runtime {
         self.inner.rt.as_ref().expect("runtime present until drop")
     }
@@ -214,7 +274,7 @@ impl PvManager {
         let name = PvName::parse(name);
         let key = name.key();
         let mut entries = self.inner.entries.lock().unwrap();
-        if let Some(entry) = entries.get(&key).and_then(Weak::upgrade) {
+        if let Some(entry) = entries.map.get(&key).and_then(Weak::upgrade) {
             return Pv(entry);
         }
 
@@ -227,7 +287,6 @@ impl PvManager {
             }
         };
         let entry = Arc::new(Entry { name, shared, task });
-        entries.retain(|_, w| w.strong_count() > 0);
         entries.insert(key, Arc::downgrade(&entry));
         Pv(entry)
     }
@@ -240,11 +299,17 @@ impl PvManager {
             .clone()
     }
 
-    fn spawn_backend(
-        &self,
-        name: &PvName,
-        shared: Arc<Shared>,
-    ) -> Option<tokio::task::JoinHandle<()>> {
+    #[cfg(target_arch = "wasm32")]
+    fn spawn_backend(&self, name: &PvName, shared: Arc<Shared>) -> Option<Task> {
+        Some(match name.scheme {
+            Scheme::Sim => pvws::spawn(sim::run(name.clone(), shared)),
+            Scheme::Ca | Scheme::Pva => pvws::subscribe(name, shared),
+            Scheme::Loc => unreachable!("local PVs have no task"),
+        })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn spawn_backend(&self, name: &PvName, shared: Arc<Shared>) -> Option<Task> {
         let rt = self.runtime().handle();
         match name.scheme {
             Scheme::Ca => {

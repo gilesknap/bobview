@@ -27,7 +27,9 @@ This installs into `~/.local`:
 | `bin/bobview-ssh` | runs the viewer over `ssh -X`, see below |
 | `bin/bobview-testioc` | a pure-Rust IOC serving the example-services BL01T PVs |
 | `bin/bobview-probe` | prints live PV values from the command line |
+| `bin/bobview-server` | serves bobview to browsers, see [In a browser](#in-a-browser) |
 | `share/bobview/displays/` | test screens; `index.bob` opens by default |
+| `share/bobview/web/` | the browser build that `bobview-server` serves |
 
 ## Run
 
@@ -225,6 +227,39 @@ from its menu), with a value axis that fits the data and a Log scale
 switch; each value holds until the next, and a gap marks where a PV was
 disconnected. Below the plot a legend gives each PV's colour, name and
 current value, or Disconnected; ✖ removes a PV, and Add PV adds one.
+
+## In a browser
+
+The same app also builds for the browser (WebAssembly, drawn with WebGL),
+with PVs coming over a [PV Web Socket](https://github.com/ornl-epics/pvws)
+(PVWS) as in Daedalus. `bobview-server` serves the lot from one port: the web
+build, `.bob` files and a PVWS at `/pvws/pv` that reaches PVs through
+bobview's own CA/PVA client. Run it anywhere `caget` works:
+
+```bash
+bobview-server --opi /path/to/displays
+```
+
+and open `http://HOST:8080/?display=index.bob`. The release tarball includes
+`bobview-server` and the web build, which it finds in `share/bobview/web`; in
+a checkout, `./scripts/build-web.sh` writes `dist/web` (it needs the
+`wasm-bindgen` CLI matching `Cargo.lock`) and `--web DIR` picks another. Files
+in `--opi` take precedence over same-named files in the web build (which has
+the test displays); dot-files such as `.git` are never served. The server
+listens on `--bind 0.0.0.0 --port 8080` by default, so on every interface.
+
+The page also takes `&macros=P=X,R=Y`, `&zoom=F`, `&keypad` and, to use
+another PVWS server, `&pvws=host[:port]` (meaning `wss://host[:port]/pvws/pv`,
+or `ws://` when the page is plain `http:` and the port isn't 443) or a full
+`ws://` or `wss://` URL; `display` may be a URL on another server that allows
+cross-origin requests. Writes are off unless the server has `--write`, since
+they go out as the server's user. Browsers let any page open a websocket, so
+with `--write` the server accepts only pages from itself (by `Origin`), plus
+any named with `--allow-origin https://host.example.com` (repeatable). Those
+pages must also call the server by an IP address, `localhost`, this machine's
+name, the host of an `--allow-origin` or a name given with `--host NAME`
+(repeatable), so a page cannot reach it through a DNS name of its own.
+Images from PVA are not sent over PVWS yet.
 
 ## Build
 
