@@ -40,5 +40,5 @@ cp "${src}/README.md" "${src}/LICENSE" "${prefix}/share/bobview/"
 if [[ -f "${src}/THIRD_PARTY_LICENSES.txt" ]]; then
     cp "${src}/THIRD_PARTY_LICENSES.txt" "${prefix}/share/bobview/"
 fi
-echo "installed bobview, bobview-testioc and bobview-probe into ${prefix}/bin"
+echo "installed bobview, bobview-ssh, bobview-testioc and bobview-probe into ${prefix}/bin"
 echo "displays are in ${prefix}/share/bobview/displays"

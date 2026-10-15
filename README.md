@@ -23,6 +23,7 @@ This installs into `~/.local`:
 | file | what |
 | --- | --- |
 | `bin/bobview` | the viewer |
+| `bin/bobview-ssh` | runs the viewer over `ssh -X`, see below |
 | `bin/bobview-testioc` | a pure-Rust IOC serving the example-services BL01T PVs |
 | `bin/bobview-probe` | prints live PV values from the command line |
 | `share/bobview/displays/` | test screens; `index.bob` opens by default |
@@ -57,6 +58,14 @@ for gateways reached over TCP (this works through the phone VM's NAT, since
 the phone opens the connection). The example-services `ca-gateway` listens on
 port 9064 of its host. PVs prefixed `pva://` use PV Access; others use Channel
 Access.
+
+Over `ssh -X` or `-Y`, run `bobview-ssh` (same arguments) instead. Forwarded
+OpenGL reaches your local X server as indirect GLX, which current X servers
+refuse, so `bobview` exits with `glutin error: [2] BadValue`. `bobview-ssh`
+makes Mesa render in software on the remote machine (`LIBGL_ALWAYS_SOFTWARE=1`,
+and the glvnd vendor forced to Mesa so a GPU driver such as NVIDIA's is not
+picked instead). It needs Mesa there: `mesa-dri-drivers` on RHEL,
+`libgl1-mesa-dri` on Debian.
 
 Options: `-z ZOOM` fixes the zoom instead of fitting the window, `-f` starts
 full screen, `--snapshot out.png` renders headless and exits (with `--size WxH`
