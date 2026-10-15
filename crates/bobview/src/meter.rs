@@ -21,12 +21,12 @@ fn prop_color(w: &Widget, key: &str, default: Color32) -> Color32 {
 /// The scale range: the PV's display limits when `limits_from_pv` is set and
 /// it has them, else the widget's minimum and maximum.
 pub fn limits(w: &Widget, s: Option<&PvState>) -> (f64, f64) {
-    let own = (
-        w.f64("minimum").unwrap_or(0.0),
-        w.f64("maximum").unwrap_or(100.0),
-    );
+    // Finite, or the meters' `hi <= lo` checks and `clamp` fail on NaN.
+    let finite = |k, default| w.f64(k).filter(|v| v.is_finite()).unwrap_or(default);
+    let own = (finite("minimum", 0.0), finite("maximum", 100.0));
     s.filter(|_| w.bool("limits_from_pv").unwrap_or(true))
         .and_then(|s| s.range())
+        .filter(|(lo, hi)| lo.is_finite() && hi.is_finite())
         .unwrap_or(own)
 }
 
@@ -55,6 +55,9 @@ pub fn regions(w: &Widget, levels: [Option<f64>; 4], lo: f64, hi: f64) -> Vec<(f
     let normal = prop_color(w, "normal_status_color", NORMAL);
     let minor = prop_color(w, "minor_warning_color", MINOR);
     let major = prop_color(w, "major_warning_color", MAJOR);
+    if lo.partial_cmp(&hi) != Some(std::cmp::Ordering::Less) {
+        return Vec::new();
+    }
     let clamp = |v: f64| v.clamp(lo, hi);
     let [lolo, low, high, hihi] = levels;
     let lolo = lolo.map_or(lo, clamp);
@@ -490,6 +493,13 @@ mod tests {
         let w = widget("<widget type='linearmeter'></widget>");
         assert_eq!(limits(&w, Some(&s)), (0.0, 10.0));
         assert_eq!(limits(&w, None), (0.0, 100.0));
+        // Never NaN, which `clamp` panics on.
+        let w = widget(
+            "<widget type='meter'><limits_from_pv>false</limits_from_pv>
+             <minimum>NaN</minimum><maximum>inf</maximum></widget>",
+        );
+        assert_eq!(limits(&w, None), (0.0, 100.0));
+        assert!(regions(&w, [None; 4], f64::NAN, 1.0).is_empty());
     }
 
     #[test]

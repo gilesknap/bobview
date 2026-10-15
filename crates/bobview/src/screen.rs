@@ -102,29 +102,39 @@ impl Node {
 }
 
 fn expand_for(w: &Widget, macros: &Macros, text: &str) -> String {
-    expand_props(w, macros, text, &std::cell::RefCell::new(Vec::new()))
+    expand_props(w, macros, text, &Default::default())
 }
 
-/// [`expand_for`], with the properties being expanded in `active`. A widget
-/// property may name others, as BOY's rule PV `$(pv_name)` does with
-/// `$(name):STA` and the name `$(prefix)$(cell)S-VA-PIRG-01`; one that names
-/// itself, directly or not, or anything unknown is left as written.
-fn expand_props(
-    w: &Widget,
-    macros: &Macros,
-    text: &str,
-    active: &std::cell::RefCell<Vec<String>>,
-) -> String {
+/// The properties being expanded, and those already expanded.
+type Expanding = std::cell::RefCell<(
+    Vec<String>,
+    std::collections::HashMap<String, Option<String>>,
+)>;
+
+/// [`expand_for`], with the properties being expanded and their values so
+/// far in `state`. A widget property may name others, as BOY's rule PV
+/// `$(pv_name)` does with `$(name):STA` and the name
+/// `$(prefix)$(cell)S-VA-PIRG-01`; one that names itself, directly or not,
+/// or anything unknown or too long is left as written. Each is expanded
+/// once, so properties that name others several times don't take
+/// exponential time.
+fn expand_props(w: &Widget, macros: &Macros, text: &str, state: &Expanding) -> String {
     bob::expand(text, &|name| {
         macros.get(name).map(str::to_string).or_else(|| {
-            if active.borrow().iter().any(|a| a == name) {
+            if let Some(value) = state.borrow().1.get(name) {
+                return value.clone();
+            }
+            if state.borrow().0.iter().any(|a| a == name) {
                 return None;
             }
             let prop = w.text(name)?;
-            active.borrow_mut().push(name.to_string());
-            let value = expand_props(w, macros, prop, active);
-            active.borrow_mut().pop();
-            Some(value).filter(|v| !v.contains('$'))
+            state.borrow_mut().0.push(name.to_string());
+            let value = expand_props(w, macros, prop, state);
+            let value = Some(value).filter(|v| !v.contains('$') && v.len() <= 1 << 16);
+            let mut state = state.borrow_mut();
+            state.0.pop();
+            state.1.insert(name.to_string(), value.clone());
+            value
         })
     })
 }
@@ -484,6 +494,23 @@ mod tests {
         assert_eq!(s.nodes[0].expand("$(pv_name)"), "loc://SR04S-PIRG:STA");
         // Properties naming themselves are left alone, not expanded forever.
         assert_eq!(s.nodes[1].expand("$(name)"), "$(name)");
+    }
+
+    #[test]
+    fn property_macros_naming_others_twice_stay_quick() {
+        // p0 names p1 twice, which names p2 twice … : 2^40 expansions, and
+        // a 2^40 byte value, if each were expanded each time it is named.
+        let props: String = (0..40)
+            .map(|i| format!("<p{i}>$(p{n})$(p{n})</p{i}>", n = i + 1))
+            .collect();
+        let d = Display::parse(&format!(
+            "<display><widget type='label'>{props}<p40>x</p40></widget></display>"
+        ))
+        .unwrap();
+        let pvs = PvManager::new();
+        let s = Builder { pvs: &pvs }.screen(d, &Macros::default(), None, 0);
+        assert_eq!(s.nodes[0].expand("$(p38)"), "xxxx");
+        assert!(s.nodes[0].expand("$(p0)").starts_with("$(p0)"));
     }
 
     #[test]

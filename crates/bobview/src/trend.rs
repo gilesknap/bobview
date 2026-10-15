@@ -113,6 +113,8 @@ fn sample(s: &PvState) -> Option<f64> {
 /// A PV being trended: a sample on each update, at the time it arrived.
 pub struct Series {
     pub pv: Pv,
+    /// Locked by the listener while the PV's state is locked, so never read
+    /// `pv.state()` while holding this lock.
     samples: Arc<Mutex<Samples>>,
     _listener: Listener,
 }
@@ -651,6 +653,13 @@ pub fn draw_stripchart(painter: &egui::Painter, node: &Node, rect: Rect, z: f32)
         Pos2::new(rect.right(), rect.bottom() - legend_h),
     );
     draw_plot(painter, area, &lines, span, now(), &look, z);
+    // Keep time moving while the PVs are quiet, as `Trend::ui` does.
+    let per_pixel = span / area.width().max(1.0) as f64;
+    painter
+        .ctx()
+        .request_repaint_after(std::time::Duration::from_secs_f64(
+            per_pixel.clamp(0.1, 1.0),
+        ));
 
     if let Some(s) = plot::worst_state(node) {
         alarm_border(painter, w, &s, rect, z);

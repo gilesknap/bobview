@@ -122,8 +122,8 @@ fn main() -> eframe::Result {
                 }
                 None => {}
             },
-            "--wait" => wait = args.next().and_then(|w| w.parse().ok()).unwrap_or(wait),
-            "--settle" => settle = args.next().and_then(|w| w.parse().ok()).unwrap_or(settle),
+            "--wait" => wait = seconds(args.next()).unwrap_or(wait),
+            "--settle" => settle = seconds(args.next()).unwrap_or(settle),
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return Ok(());
@@ -149,8 +149,8 @@ fn main() -> eframe::Result {
             }
         }
     }
-    // An .opi opened directly gets the macros its DLS launcher script would
-    // give it; those given here override them.
+    // An .opi opened directly (in an Eclipse project) gets the macros its
+    // DLS launcher script would give it; those given here override them.
     if let Some(Source::File(path)) = &file
         && path.extension().is_some_and(|x| x == "opi")
         && let Some(defaults) = launch::defaults(path)
@@ -200,6 +200,11 @@ fn main() -> eframe::Result {
             Ok(Box::new(app))
         }),
     )
+}
+
+/// A time in seconds: a number, not negative (nor too big for a Duration).
+fn seconds(text: Option<String>) -> Option<f64> {
+    text?.parse::<f64>().ok().filter(|s| (0.0..1e9).contains(s))
 }
 
 /// Parse `P=X,R=Y` into macros.
@@ -271,5 +276,14 @@ mod tests {
         let m = super::parse_macros("P=BL01T, R=:DET:");
         assert_eq!(m.get("P"), Some("BL01T"));
         assert_eq!(m.get("R"), Some(":DET:"));
+    }
+
+    #[test]
+    fn seconds_are_not_negative() {
+        let s = |t: &str| super::seconds(Some(t.into()));
+        assert_eq!(s("1.5"), Some(1.5));
+        for bad in ["-1", "NaN", "inf", "x"] {
+            assert_eq!(s(bad), None);
+        }
     }
 }

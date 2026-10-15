@@ -125,11 +125,10 @@ impl Pv {
         let shared = &self.0.shared;
         let state = shared.state.lock().unwrap();
         listener(&state);
-        shared
-            .listeners
-            .lock()
-            .unwrap()
-            .push(Arc::downgrade(listener));
+        let mut listeners = shared.listeners.lock().unwrap();
+        // Drop dead ones here too: a PV that never changes is never updated.
+        listeners.retain(|l| l.strong_count() > 0);
+        listeners.push(Arc::downgrade(listener));
     }
 
     /// Write a value given as text; the backend converts it to the PV's type.
@@ -296,5 +295,16 @@ mod tests {
         drop(listener);
         pv.write("4");
         assert_eq!(*seen.lock().unwrap(), [Some(1.0), Some(2.0), Some(3.0)]);
+    }
+
+    #[test]
+    fn listen_drops_dead_listeners() {
+        let pvs = PvManager::new();
+        let pv = pvs.subscribe("loc://listen_prune(1)");
+        for _ in 0..3 {
+            let listener: Listener = Arc::new(|_: &PvState| {});
+            pv.listen(&listener);
+        }
+        assert_eq!(pv.0.shared.listeners.lock().unwrap().len(), 1);
     }
 }
