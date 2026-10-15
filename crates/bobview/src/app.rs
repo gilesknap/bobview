@@ -272,6 +272,7 @@ impl BobApp {
     fn reload(&mut self) {
         if let Some(cur) = self.current.clone() {
             crate::fetch::forget();
+            crate::symbol::forget();
             self.show(cur);
         }
     }

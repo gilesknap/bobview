@@ -70,7 +70,8 @@ pub fn run(start: Location, opts: &Options, out: &Path) -> Result<(), String> {
 
     // Run frames until PVs have had time to connect and clicks have settled.
     let output = loop {
-        let started = begin.elapsed() >= opts.wait && !app.is_loading();
+        let started =
+            begin.elapsed() >= opts.wait && !app.is_loading() && !crate::symbol::loading();
         let events = if started {
             pending.pop_front().unwrap_or_default()
         } else {

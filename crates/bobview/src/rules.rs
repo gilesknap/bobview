@@ -75,16 +75,36 @@ impl CompiledRule {
     }
 }
 
-/// Apply rule outcomes to a widget's properties.
+/// Apply rule outcomes to a widget's properties. A property such as
+/// `symbols[1]` names one item of a list property.
 pub fn apply(props: &mut Element, outcomes: &[(String, Outcome)]) {
     for (prop, outcome) in outcomes {
         if let Outcome::Set(el) = outcome {
+            if let Some((list, index)) = list_item(prop) {
+                let item = props
+                    .children
+                    .iter_mut()
+                    .find(|c| c.name == list)
+                    .and_then(|l| l.children.get_mut(index));
+                match item {
+                    Some(item) => item.text = el.text.clone(),
+                    None => log::warn!("rule sets '{prop}', which the widget does not have"),
+                }
+                continue;
+            }
             match props.children.iter_mut().find(|c| &c.name == prop) {
                 Some(existing) => *existing = el.clone(),
                 None => props.children.push(el.clone()),
             }
         }
     }
+}
+
+/// `symbols[1]` as the list `symbols` and index 1.
+fn list_item(prop: &str) -> Option<(&str, usize)> {
+    let (list, rest) = prop.split_once('[')?;
+    let index = rest.strip_suffix(']')?.parse().ok()?;
+    Some((list, index))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -378,5 +398,29 @@ mod tests {
         };
         apply(&mut props, &[("visible".into(), Outcome::Set(set))]);
         assert_eq!(props.child_text("visible"), Some("false"));
+    }
+
+    #[test]
+    fn sets_one_item_of_a_list_property() {
+        let el = |name: &str, text: &str| Element {
+            name: name.into(),
+            text: text.into(),
+            ..Default::default()
+        };
+        let mut props = Element {
+            children: vec![Element {
+                name: "symbols".into(),
+                children: vec![el("symbol", "a.svg"), el("symbol", "b.svg")],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let set = |text| Outcome::Set(el("symbols[1]", text));
+        apply(&mut props, &[("symbols[1]".into(), set("c.svg"))]);
+        apply(&mut props, &[("symbols[5]".into(), set("d.svg"))]);
+        let items: Vec<_> = props.children[0].children.iter().map(|c| &c.text).collect();
+        assert_eq!(items, ["a.svg", "c.svg"]);
+        assert_eq!(props.children[0].children[1].name, "symbol");
+        assert_eq!(props.children.len(), 1);
     }
 }

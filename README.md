@@ -84,14 +84,16 @@ name or value, or open the PV details. On a touch screen, pinch to zoom.
 | rectangle, ellipse, arc, polyline, polygon | |
 | group, tabs, embedded, navtabs | macros pass down; embedded resize modes 0–2 |
 | image | PVA NTNDArray (uncompressed, mono or RGB1) or a CA array shaped by `data_width`/`data_height`; Phoebus colour maps, autoscale or fixed range, `unsigned`, colour bar with a scale; toolbar to zoom, pan and place a crosshair that reads out the pixel value |
+| symbol, picture | SVG or PNG files, local or fetched next to the display; the PV value picks the symbol (`initial_index`, `array_index`, `fallback_symbol`), rotation, `preserve_ratio`/`stretch_image`, opacity, overlay for a disconnected PV; `run_actions_on_mouse_click` runs the symbol's actions when clicked |
 
 Also: macros (`$(X)`, `${X}`, defaults, widget properties such as
 `$(pv_name)`), rules (expressions over `pv0`, `pvStr0`, `pvSev0` … that set any
-property), alarm borders and dashed borders for disconnected PVs, back and
+property, or one item of a list such as `symbols[0]`), alarm borders and dashed borders for disconnected PVs, back and
 forward navigation, `loc://` and `sim://` PVs.
 
 Not yet: compressed (codec) images, image axes, ROIs and cursor PVs, the XY plot
-`markers`, error bars and toolbar, strip chart widgets (drawn as placeholders), pictures.
+`markers`, error bars and toolbar, strip chart widgets (drawn as placeholders), GIF and JPEG
+images (symbols and pictures show their fallback or a placeholder).
 
 ## Build
 

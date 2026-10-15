@@ -185,6 +185,11 @@ fn draw_node(ui: &mut Ui, node: &mut Node, cx: &mut Cx, id: Id) {
             navtabs(ui, node, rect, cx, id);
             None
         }
+        "symbol" => crate::symbol::draw_symbol(ui, node, state.as_ref(), rect, cx, id),
+        "picture" => {
+            crate::symbol::draw_picture(ui, node, rect, cx);
+            None
+        }
         "image" => Some(crate::image::draw(
             ui,
             node,
@@ -211,9 +216,10 @@ fn draw_node(ui: &mut Ui, node: &mut Node, cx: &mut Cx, id: Id) {
 
     // A control that is disabled or whose PV is read-only is greyed out and
     // shows a "not allowed" cursor; its writes are refused in `write`. The
-    // image widget responds to the pointer but is not a control.
-    let disabled =
-        response.is_some() && node.w.kind != "image" && is_disabled(&node.w, state.as_ref());
+    // image and symbol widgets respond to the pointer but are not controls.
+    let disabled = response.is_some()
+        && !matches!(node.w.kind.as_str(), "image" | "symbol")
+        && is_disabled(&node.w, state.as_ref());
     if disabled {
         painter.rect_filled(rect, CornerRadius::ZERO, Color32::from_white_alpha(110));
     }
@@ -1030,7 +1036,7 @@ fn action_button(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut Cx, id: Id) 
     resp
 }
 
-fn run_action(node: &Node, action: &Action, cx: &mut Cx) {
+pub(crate) fn run_action(node: &Node, action: &Action, cx: &mut Cx) {
     match action {
         Action::OpenDisplay {
             file,

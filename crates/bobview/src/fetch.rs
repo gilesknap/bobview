@@ -51,6 +51,27 @@ pub fn forget() {
     CACHE.lock().unwrap().clear();
 }
 
+/// Read the file at `source` as bytes, such as an image a display names.
+/// Nothing is cached here: the caller keeps what it decodes.
+pub fn bytes(source: &Source) -> Result<Vec<u8>, Error> {
+    match source {
+        Source::File(path) => std::fs::read(path).map_err(|e| Error::Io(path.clone(), e)),
+        Source::Url(url) => {
+            log::info!("fetching {url}");
+            let fail = |why: String| Error::Fetch(url.to_string(), why);
+            AGENT
+                .get(url)
+                .call()
+                .map_err(|e| fail(describe(e)))?
+                .body_mut()
+                .with_config()
+                .limit(MAX_SIZE)
+                .read_to_vec()
+                .map_err(|e| fail(describe(e)))
+        }
+    }
+}
+
 fn get(url: &str) -> Result<Fetched, Error> {
     if let Some(fetched) = CACHE.lock().unwrap().get(url).cloned() {
         return Ok(fetched);
