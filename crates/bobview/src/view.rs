@@ -8,7 +8,7 @@ use eframe::egui::{self, Color32, Id, Vec2};
 use pv::PvManager;
 
 use crate::app::Location;
-use crate::screen::{Node, Screen};
+use crate::screen::{Compat, Node, Screen};
 use crate::style;
 use crate::widgets::{self, Cx, Request};
 
@@ -374,6 +374,10 @@ impl View {
             } else if let Some(s) = &self.screen {
                 let (connected, total) = count_pvs(&s.nodes);
                 ui.label(format!("PVs {connected}/{total} connected"));
+                if let Some(text) = Compat::of(&s.nodes).text() {
+                    ui.weak(format!("| {text}"))
+                        .on_hover_text("Scripts are not run, and widget types bobview does not draw show as placeholders");
+                }
                 if let Some(cur) = &self.current {
                     ui.weak(cur.source.to_string());
                 }

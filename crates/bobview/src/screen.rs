@@ -99,6 +99,102 @@ impl Budget {
     }
 }
 
+/// Widget types bobview draws (anything else gets a placeholder).
+pub const DRAWN: &[&str] = &[
+    "label",
+    "textupdate",
+    "textentry",
+    "led",
+    "multi_state_led",
+    "byte_monitor",
+    "action_button",
+    "bool_button",
+    "choice",
+    "radio",
+    "combo",
+    "checkbox",
+    "slide_button",
+    "rectangle",
+    "ellipse",
+    "arc",
+    "polyline",
+    "polygon",
+    "progressbar",
+    "tank",
+    "thermometer",
+    "linearmeter",
+    "meter",
+    "scaledslider",
+    "scrollbar",
+    "spinner",
+    "group",
+    "tabs",
+    "embedded",
+    "navtabs",
+    "image",
+    "symbol",
+    "picture",
+    "xyplot",
+    "stripchart",
+];
+
+/// What a display asks for that bobview does not do.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Compat {
+    /// Widgets with Jython/JavaScript scripts (not scripts), which are ignored.
+    pub scripts: usize,
+    /// Widgets of a type bobview does not draw: a placeholder is shown.
+    pub placeholders: usize,
+}
+
+impl Compat {
+    /// Count over `nodes`, including groups, tabs and embedded displays.
+    pub fn of(nodes: &[Node]) -> Self {
+        let mut c = Self::default();
+        for n in nodes {
+            // A script bobview recognises (the vacuum group link) is run.
+            if n.w.has_scripts() && n.link.is_none() {
+                c.scripts += 1;
+            }
+            if !DRAWN.contains(&n.w.kind.as_str()) {
+                c.placeholders += 1;
+            }
+            let mut add = |o: Self| {
+                c.scripts += o.scripts;
+                c.placeholders += o.placeholders;
+            };
+            add(Self::of(&n.children));
+            n.tabs.iter().for_each(|t| add(Self::of(t)));
+            if let Some(e) = &n.embedded {
+                add(Self::of(&e.nodes));
+            }
+        }
+        c
+    }
+
+    /// The status line text, or none when there is nothing to say.
+    pub fn text(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        if self.scripts > 0 {
+            let s = if self.scripts == 1 {
+                "widget"
+            } else {
+                "widgets"
+            };
+            parts.push(format!("{} {s} with scripts ignored", self.scripts));
+        }
+        if self.placeholders > 0 {
+            let s = if self.placeholders == 1 {
+                "widget"
+            } else {
+                "widgets"
+            };
+            parts.push(format!("{} unsupported {s}", self.placeholders));
+        }
+        (!parts.is_empty()).then(|| parts.join(", "))
+    }
+}
+
 pub struct Builder<'a> {
     pub pvs: &'a PvManager,
     budget: Arc<Budget>,
@@ -546,6 +642,62 @@ mod tests {
     use super::*;
 
     #[test]
+    fn counts_ignored_scripts_and_placeholders() {
+        let d = Display::parse(
+            r#"<display>
+            <widget type="table"/>
+            <widget type="label"><scripts><script file="a.py"/></scripts></widget>
+            <widget type="label"><scripts/></widget>
+            <widget type="group">
+              <widget type="webbrowser"/>
+              <widget type="led"><scripts><script file="b.js"/></scripts></widget>
+            </widget></display>"#,
+        )
+        .unwrap();
+        let pvs = PvManager::new();
+        let s = Builder { pvs: &pvs }.screen(d, &Macros::default(), None, 0);
+        let c = Compat::of(&s.nodes);
+        assert_eq!(
+            c,
+            Compat {
+                scripts: 2,
+                placeholders: 2
+            }
+        );
+        assert_eq!(
+            c.text().as_deref(),
+            Some("2 widgets with scripts ignored, 2 unsupported widgets")
+        );
+        assert_eq!(Compat::default().text(), None);
+    }
+
+    #[test]
+    fn counts_singular_and_through_embedded_and_tabs() {
+        let one = |xml: &str| {
+            let d = Display::parse(&format!("<display>{xml}</display>")).unwrap();
+            let pvs = PvManager::new();
+            Builder { pvs: &pvs }.screen(d, &Macros::default(), None, 0)
+        };
+        let s = one(r#"<widget type="table"/>"#);
+        assert_eq!(
+            Compat::of(&s.nodes).text().as_deref(),
+            Some("1 unsupported widget")
+        );
+        let s = one(r#"<widget type="led"><scripts><script file="a"/></scripts></widget>"#);
+        assert_eq!(
+            Compat::of(&s.nodes).text().as_deref(),
+            Some("1 widget with scripts ignored")
+        );
+        // Embedded screens and tabs are walked.
+        let mut s = one(r#"<widget type="group"/>"#);
+        let inner = one(r#"<widget type="table"/>"#);
+        let tab = one(r#"<widget type="webbrowser"/>"#).nodes;
+        s.nodes[0].embedded = Some(Box::new(inner));
+        s.nodes[0].tabs = vec![tab];
+        assert_eq!(Compat::of(&s.nodes).placeholders, 2);
+    }
+
+    #[test]
     fn positions_children_inside_groups() {
         let d = Display::parse(
             r#"<display><macros><P>X</P></macros>
@@ -719,44 +871,6 @@ pub mod display_set {
     use super::*;
     use std::path::{Path, PathBuf};
 
-    /// Widget types bobview draws (anything else gets a placeholder).
-    const KNOWN: &[&str] = &[
-        "label",
-        "textupdate",
-        "textentry",
-        "led",
-        "multi_state_led",
-        "byte_monitor",
-        "action_button",
-        "bool_button",
-        "choice",
-        "radio",
-        "combo",
-        "checkbox",
-        "slide_button",
-        "rectangle",
-        "ellipse",
-        "arc",
-        "polyline",
-        "polygon",
-        "progressbar",
-        "tank",
-        "thermometer",
-        "linearmeter",
-        "meter",
-        "scaledslider",
-        "scrollbar",
-        "spinner",
-        "group",
-        "tabs",
-        "embedded",
-        "navtabs",
-        "image",
-        "symbol",
-        "picture",
-        "xyplot",
-    ];
-
     pub fn files() -> Vec<PathBuf> {
         fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
             for e in std::fs::read_dir(dir).unwrap().flatten() {
@@ -781,7 +895,7 @@ pub mod display_set {
     fn check(nodes: &[Node], file: &Path) {
         for n in nodes {
             assert!(
-                KNOWN.contains(&n.w.kind.as_str()),
+                DRAWN.contains(&n.w.kind.as_str()),
                 "{}: unknown widget {}",
                 file.display(),
                 n.w.kind
@@ -849,7 +963,7 @@ pub mod display_set {
             problems: &mut BTreeMap<String, usize>,
         ) {
             for n in nodes {
-                if !KNOWN.contains(&n.w.kind.as_str()) {
+                if !DRAWN.contains(&n.w.kind.as_str()) {
                     *kinds.entry(n.w.kind.clone()).or_default() += 1;
                 }
                 if let Some(e) = &n.error {
