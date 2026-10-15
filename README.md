@@ -16,10 +16,11 @@ were tuned by eye, and output has not been compared with Phoebus's own.
 
 ## Install
 
-On the phone (Android Linux Terminal) or an x86_64 Linux desktop; `install.sh`
-picks the aarch64 or x86_64 release build to match the machine:
+On the phone (Android Linux Terminal), an x86_64 Linux desktop or a Mac
+(Apple silicon or Intel, macOS 11 or later); `install.sh` picks the aarch64
+or x86_64, Linux or macOS release build to match the machine.
 
-Pre-requisites on debian distros:
+Pre-requisites on debian distros (none on macOS):
 ```bash
 sudo apt install libxkbcommon0 libwayland-client0 libegl1 libgl1-mesa-dri
 ```
@@ -40,6 +41,9 @@ This installs into `~/.local`:
 | `bin/bobview-server` | serves bobview to browsers, see [In a browser](#in-a-browser) |
 | `share/bobview/displays/` | test screens; `index.bob` opens by default |
 | `share/bobview/web/` | the browser build that `bobview-server` serves |
+
+On macOS `~/.local/bin` is not on `PATH` by default; add
+`export PATH=$HOME/.local/bin:$PATH` to `~/.zshrc`.
 
 ## Run
 

@@ -21,5 +21,11 @@ cp README.md LICENSE install.sh "${out}/"
 "$(dirname "$0")/third-party-licenses.py" "${LICENSE_TARGET:-$(rustc -vV | sed -n 's/^host: //p')}" \
     > "${out}/THIRD_PARTY_LICENSES.txt"
 
-tar --owner=0 --group=0 -C "$(dirname "${out}")" -czf "${name}.tar.gz" "${name}"
+# owned by root in the archive; GNU tar and bsdtar (macOS) spell this differently
+if tar --version | grep -q GNU; then
+    owner=(--owner=0 --group=0)
+else
+    owner=(--uid 0 --gid 0)
+fi
+tar "${owner[@]}" -C "$(dirname "${out}")" -czf "${name}.tar.gz" "${name}"
 echo "wrote ${name}.tar.gz"
