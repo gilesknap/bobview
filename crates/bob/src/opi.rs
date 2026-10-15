@@ -1026,13 +1026,15 @@ fn format(el: &mut Element) {
         .into_iter()
         .flat_map(|r| &mut r.children)
     {
-        if rule.name != "rule" || rule.attr("prop_id") != Some("format_type") {
+        // An `out_exp` rule computes the BOY code, which can't be mapped here,
+        // so it stays on `format_type` and is left untranslated.
+        if rule.name != "rule"
+            || rule.attr("prop_id") != Some("format_type")
+            || rule.attr("out_exp") == Some("true")
+        {
             continue;
         }
         rule.set_attr("prop_id", "format");
-        if rule.attr("out_exp") == Some("true") {
-            continue;
-        }
         for value in rule
             .children
             .iter_mut()
@@ -1726,6 +1728,10 @@ menumap {
             &format!("<pv_name>X</pv_name>{}", rule("format_type", "4")),
         );
         assert_eq!(prop(&w), ("format".into(), "6".into()));
+        // An `out_exp` rule's computed code can't be mapped: left alone.
+        let out = rule("format_type", "4").replace(r#"out_exp="false""#, r#"out_exp="true""#);
+        let w = one("TextUpdate", &format!("<pv_name>X</pv_name>{out}"));
+        assert_eq!(prop(&w), ("format_type".into(), "4".into()));
         let w = one("linkingContainer", &rule("opi_file", "b.opi"));
         assert_eq!(prop(&w).0, "file");
         let menu = r#"<actions_from_pv>false</actions_from_pv><actions>

@@ -45,12 +45,26 @@ pub struct BobApp {
     loading: Option<std::sync::mpsc::Receiver<Result<Screen, bob::Error>>>,
     /// Displays named by command actions, worked out on threads.
     launched: (
-        std::sync::mpsc::Sender<Location>,
-        std::sync::mpsc::Receiver<Location>,
+        std::sync::mpsc::Sender<Launched>,
+        std::sync::mpsc::Receiver<Launched>,
     ),
+    /// Command actions still being worked out, so a double click runs one.
+    launching: Vec<LaunchKey>,
+    /// Bumped on every `show`, so a launch started on another display is dropped.
+    shown: u64,
     chrome: Chrome,
     /// The window title last set, the shown display's title.
     window_title: String,
+}
+
+/// What makes two command actions the same: base, directory and command.
+type LaunchKey = (Option<String>, Option<String>, String);
+
+/// A command action's result, tagged with the display it was started on.
+struct Launched {
+    key: LaunchKey,
+    shown: u64,
+    target: Option<Location>,
 }
 
 struct Keypad {
@@ -96,6 +110,8 @@ impl BobApp {
             next_trend: 0,
             loading: None,
             launched: std::sync::mpsc::channel(),
+            launching: Vec::new(),
+            shown: 0,
             chrome: Chrome::new(ui_scale),
             window_title: String::new(),
             open_path: start
@@ -117,6 +133,7 @@ impl BobApp {
     fn show(&mut self, loc: Location) {
         // Drop the old screen first so its PVs disconnect before the new ones start.
         self.screen = None;
+        self.shown += 1;
         self.open_path = loc.source.to_string();
         self.loading = None;
         if loc.source.is_url() {
@@ -157,9 +174,10 @@ impl BobApp {
         self.reloading = false;
     }
 
-    /// Whether a display is still being fetched.
+    /// Whether a display, or one named by a command action, is still being
+    /// worked out.
     pub fn is_loading(&self) -> bool {
-        self.loading.is_some()
+        self.loading.is_some() || !self.launching.is_empty()
     }
 
     /// Show the display being fetched, or its error, once the fetch is done.
@@ -178,20 +196,53 @@ impl BobApp {
     }
 
     /// Run a command action on a thread, so a slow launcher script or file
-    /// system doesn't freeze the window, and open the display it names.
-    fn launch(&self, ctx: &egui::Context, base: Option<Source>, dir: Option<Source>, cmd: String) {
-        let (tx, ctx) = (self.launched.0.clone(), ctx.clone());
-        std::thread::spawn(
-            move || match crate::launch::command_target(base.as_ref(), dir, &cmd) {
+    /// system doesn't freeze the window, and open the display it names. A
+    /// command already in flight is ignored.
+    fn launch(
+        &mut self,
+        ctx: &egui::Context,
+        base: Option<Source>,
+        dir: Option<Source>,
+        cmd: String,
+    ) {
+        let key = (
+            base.as_ref().map(|s| s.to_string()),
+            dir.as_ref().map(|s| s.to_string()),
+            cmd.clone(),
+        );
+        if self.launching.contains(&key) {
+            return;
+        }
+        self.launching.push(key.clone());
+        let (tx, ctx, shown) = (self.launched.0.clone(), ctx.clone(), self.shown);
+        std::thread::spawn(move || {
+            let target = match crate::launch::command_target(base.as_ref(), dir, &cmd) {
                 Some((file, macros)) => {
                     let source = Source::File(file);
                     log::info!("open {source} (window) from '{cmd}'");
-                    tx.send(Location { source, macros }).ok();
-                    ctx.request_repaint();
+                    Some(Location { source, macros })
                 }
-                None => log::warn!("command '{cmd}' is not supported"),
-            },
-        );
+                None => {
+                    log::warn!("command '{cmd}' is not supported");
+                    None
+                }
+            };
+            tx.send(Launched { key, shown, target }).ok();
+            ctx.request_repaint();
+        });
+    }
+
+    /// Open the displays named by finished command actions, unless the user
+    /// has since moved to another display.
+    fn poll_launched(&mut self) {
+        while let Ok(done) = self.launched.1.try_recv() {
+            self.launching.retain(|k| *k != done.key);
+            match done.target {
+                Some(loc) if done.shown == self.shown => self.open(loc),
+                Some(loc) => log::info!("drop {}: the display has changed", loc.source),
+                None => {}
+            }
+        }
     }
 
     /// Navigate to a display, recording where we came from.
@@ -483,9 +534,7 @@ impl eframe::App for BobApp {
 impl BobApp {
     pub fn draw(&mut self, ui: &mut egui::Ui) {
         self.poll_loading(ui.ctx());
-        while let Ok(loc) = self.launched.1.try_recv() {
-            self.open(loc);
-        }
+        self.poll_launched();
         if !self.keypad_mode && ui.input(|i| i.any_touches()) {
             self.keypad_mode = true;
         }
@@ -758,6 +807,41 @@ mod tests {
             ]
         );
         std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn launches_once_and_drops_stale_results() {
+        use super::{BobApp, Launched, Location};
+        let ctx = eframe::egui::Context::default();
+        let mut app = BobApp::new(&ctx, None, Some(1.0), crate::chrome::UiScale::Auto);
+        // A double click runs the command once, and counts as loading.
+        app.launch(&ctx, None, None, "no-such-launcher".into());
+        app.launch(&ctx, None, None, "no-such-launcher".into());
+        assert_eq!(app.launching.len(), 1);
+        assert!(app.is_loading());
+        while app.is_loading() {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            app.poll_launched();
+        }
+        // A result from before the display changed is dropped.
+        let loc = Location {
+            source: bob::Source::File("/no/such.bob".into()),
+            macros: Default::default(),
+        };
+        let key = (None, None, "x".to_string());
+        app.launching.push(key.clone());
+        let stale = app.shown;
+        app.shown += 1;
+        app.launched
+            .0
+            .send(Launched {
+                key,
+                shown: stale,
+                target: Some(loc),
+            })
+            .unwrap();
+        app.poll_launched();
+        assert!(app.current.is_none() && !app.is_loading());
     }
 
     #[test]

@@ -113,7 +113,8 @@ fn location_path(location: &str, dir: &Path) -> Option<PathBuf> {
             None => (0, rest.strip_prefix("PROJECT_LOC")?),
         };
         let rest = rest.strip_prefix('/').or(rest.is_empty().then_some(rest))?;
-        let mut base = std::path::absolute(dir).ok()?;
+        // `absolute` keeps `..`, so `../proj` needs normalising before `parent`.
+        let mut base = normalize(&std::path::absolute(dir).ok()?);
         for _ in 0..n {
             base = base.parent()?.to_path_buf();
         }
@@ -244,6 +245,12 @@ mod tests {
         assert_eq!(
             loc("PARENT-1-PROJECT_LOC/other%20x"),
             Some(PathBuf::from("/w/other x"))
+        );
+        // A relative project path with `..` climbs from its normalised form.
+        let up = normalize(&std::path::absolute("..").unwrap());
+        assert_eq!(
+            location_path("PARENT-2-PROJECT_LOC/x", Path::new("../proj")),
+            Some(up.parent().unwrap().join("x"))
         );
         for bad in [
             "virtual:/virtual",
