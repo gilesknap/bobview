@@ -1,0 +1,71 @@
+name: Interop
+
+# Runs the pv crate against a real softIoc (CA and PVXS) and a ca-gateway.
+# A separate, non-required workflow: it pulls third-party container images and
+# depends on UDP/TCP networking on the runner, so it may be flaky. A failure
+# here must not block CI.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "crates/pv/**"
+      - ".github/workflows/interop.yml"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # epics-containers images, pinned. Bump deliberately.
+  EPICS_IMAGE: ghcr.io/epics-containers/epics-base-runtime:7.0.9ec2
+  GATEWAY_IMAGE: ghcr.io/epics-containers/ca-gateway:2.1.3
+
+jobs:
+  interop:
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Write a test database
+        run: |
+          cat > interop.db <<'DB'
+          record(ao, "INTEROP:AO") { field(VAL, "3.5") }
+          record(ai, "INTEROP:AI") { field(VAL, "1.25") }
+          record(longin, "INTEROP:LI") { field(VAL, "42") }
+          DB
+      - name: Start a softIoc (CA and PVA on the host network)
+        run: |
+          docker run -d --name ioc --network host -v "$PWD/interop.db:/db/interop.db:ro" \
+            --entrypoint /epics/epics-base/bin/linux-x86_64/softIoc \
+            "$EPICS_IMAGE" -d /db/interop.db
+      - name: Start ca-gateway in front of it
+        run: |
+          # the gateway serves on 9064/9065 and finds the IOC on 5064/5065
+          docker run -d --name gw --network host \
+            -e EPICS_CA_ADDR_LIST=127.0.0.1 -e EPICS_CA_AUTO_ADDR_LIST=NO \
+            "$GATEWAY_IMAGE" -sip 127.0.0.1 -cip 127.0.0.1 -sport 9064 -cport 5064 -pvlist /dev/null || true
+          sleep 5
+          docker ps -a
+      - name: Run the interop tests
+        env:
+          EPICS_CA_ADDR_LIST: 127.0.0.1
+          EPICS_CA_AUTO_ADDR_LIST: "NO"
+          EPICS_PVA_ADDR_LIST: 127.0.0.1
+          EPICS_PVA_AUTO_ADDR_LIST: "NO"
+          BOBVIEW_INTEROP_CA_PV: INTEROP:AI
+          BOBVIEW_INTEROP_PVA_PV: INTEROP:AI
+          BOBVIEW_INTEROP_WRITE_PV: INTEROP:AO
+        run: cargo test -p pv --test interop -- --nocapture
+      - name: Run the gateway test
+        env:
+          EPICS_CA_ADDR_LIST: ""
+          EPICS_CA_AUTO_ADDR_LIST: "NO"
+          EPICS_CA_NAME_SERVERS: 127.0.0.1:9064
+          BOBVIEW_INTEROP_GW_PV: INTEROP:LI
+        run: cargo test -p pv --test interop ca_through_gateway -- --nocapture
+      - name: Container logs
+        if: always()
+        run: docker logs ioc; docker logs gw

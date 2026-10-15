@@ -68,6 +68,14 @@ the phone opens the connection). The example-services `ca-gateway` listens on
 port 9064 of its host. PVs prefixed `pva://` use PV Access; others use Channel
 Access.
 
+Protocol correctness rests on the third-party
+[epics-rs](https://github.com/epics-rs/epics-rs) `epics-ca-rs` and
+`epics-pva-rs` 0.31 crates, which are young. bobview's own `ca.rs` and `pva.rs`
+are thin adapters over them. So far bobview has only been exercised against the
+in-repo Rust `bobview-testioc`, not a real softIOC, PVXS or ca-gateway; the
+`interop` CI job and `crates/pv/tests/interop.rs` are there to start changing
+that.
+
 Over `ssh -X` or `-Y`, run `bobview-ssh` (same arguments) instead. Forwarded
 OpenGL reaches your local X server as indirect GLX, which current X servers
 refuse, so `bobview` exits with `glutin error: [2] BadValue`. `bobview-ssh`
