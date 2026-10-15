@@ -122,9 +122,16 @@ jobs:
         with:
           pattern: bobview-*-linux
           merge-multiple: true
-      - name: Create release
+      - name: Create the release, or add the binaries to an existing one
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" bobview-*-linux.tar.gz \
-            --repo "${GITHUB_REPOSITORY}" --title "${GITHUB_REF_NAME}" --generate-notes
+          # a release made in the GitHub UI creates the tag too, so the
+          # release may already exist when this tag build runs
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" > /dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" bobview-*-linux.tar.gz \
+              --repo "${GITHUB_REPOSITORY}" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" bobview-*-linux.tar.gz \
+              --repo "${GITHUB_REPOSITORY}" --title "${GITHUB_REF_NAME}" --generate-notes
+          fi
