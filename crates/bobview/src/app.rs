@@ -110,6 +110,8 @@ impl BobApp {
         // Drop the old screen first so its PVs disconnect before the new ones start.
         self.screen = None;
         self.open_path = loc.source.to_string();
+        #[cfg(target_arch = "wasm32")]
+        set_page_url(&loc);
         self.loading = None;
         // In a browser `poll_loading` fetches and builds every display.
         #[cfg(target_arch = "wasm32")]
@@ -149,6 +151,10 @@ impl BobApp {
     fn loaded(&mut self, loaded: Result<Screen, bob::Error>) {
         match loaded {
             Ok(screen) => {
+                #[cfg(target_arch = "wasm32")]
+                if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+                    doc.set_title(&screen.display.name);
+                }
                 self.screen = Some(screen);
                 self.error = None;
                 // A reload keeps the size the user gave the window.
@@ -672,6 +678,38 @@ fn open_webpage(url: &str) {
         && w.open_with_url_and_target(url, "_blank").is_err()
     {
         log::warn!("cannot open {url}");
+    }
+}
+
+/// Keep the page's address on the display shown, so a bookmark or a reload
+/// comes back to it: `display` relative to the page when it is beside it,
+/// and `macros`; other parameters (`pvws`, `zoom` …) stay as they were.
+#[cfg(target_arch = "wasm32")]
+fn set_page_url(loc: &Location) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(url) = window
+        .location()
+        .href()
+        .ok()
+        .and_then(|href| web_sys::Url::new(&href).ok())
+    else {
+        return;
+    };
+    let path = url.pathname();
+    let dir = format!("{}{}", url.origin(), &path[..=path.rfind('/').unwrap_or(0)]);
+    let display = loc.source.to_string();
+    let params = url.search_params();
+    params.set("display", display.strip_prefix(&dir).unwrap_or(&display));
+    let macros: Vec<String> = loc.macros.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    if macros.is_empty() {
+        params.delete("macros");
+    } else {
+        params.set("macros", &macros.join(","));
+    }
+    if let Ok(history) = window.history() {
+        let _ = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&url.href()));
     }
 }
 

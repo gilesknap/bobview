@@ -23,5 +23,6 @@ js-sys = "0.3.106"
 wasm-bindgen = "0.2.129"
 wasm-bindgen-futures = "0.4.79"
 web-sys = { version = "0.3.106", features = [
-    "console", "Document", "HtmlCanvasElement", "Location", "Response", "UrlSearchParams", "Window",
+    "console", "Document", "History", "HtmlCanvasElement", "Location", "Response", "Url",
+    "UrlSearchParams", "Window",
 ] }
