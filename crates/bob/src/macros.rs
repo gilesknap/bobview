@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::Element;
 
@@ -12,10 +13,12 @@ pub struct Macros {
     own: Vec<(String, String)>,
 }
 
-/// The most expanded text one layer of macros holds. Later definitions in a
-/// layer past it are kept as written, not expanded, so nested definitions
-/// that each double the last can't use memory without bound.
+/// The most expanded text that [`Macros::with`] holds in one layer.
 const MAX_LAYER_BYTES: usize = 1 << 20;
+
+/// The most expanded macro text a whole load should hold, across every
+/// layer, for [`Macros::with_budget`] to be given.
+pub const MAX_LOAD_BYTES: usize = 16 << 20;
 
 impl Macros {
     pub fn from_element(el: &Element) -> Self {
@@ -61,27 +64,58 @@ impl Macros {
     /// These macros with `inner` layered on top. Values in `inner` are first
     /// expanded against `self`, so `<P>$(P):SUB</P>` works.
     pub fn with(&self, inner: &Macros) -> Macros {
-        let mut held = 0;
-        let own = inner
-            .iter()
-            .map(|(k, v)| {
-                let v = if held < MAX_LAYER_BYTES {
-                    expand(v, &|name| self.get(name).map(str::to_string))
-                } else {
-                    v.to_string()
-                };
-                held += v.len();
-                (k.to_string(), v)
-            })
-            .collect();
+        self.with_budget(inner, &AtomicUsize::new(MAX_LAYER_BYTES))
+    }
+
+    /// [`Macros::with`], where the expanded values take their size from
+    /// `left`, which several layers may share. Once it is spent, values are
+    /// kept as written, not expanded, so nested definitions that each double
+    /// the last, in many widgets, can't use memory without bound.
+    pub fn with_budget(&self, inner: &Macros, left: &AtomicUsize) -> Macros {
         if inner.is_empty() {
             return self.clone();
         }
+        let own = inner
+            .iter()
+            .map(|(k, v)| {
+                let v = if left.load(Ordering::Relaxed) > 0 {
+                    let v = expand(v, &|name| self.get(name).map(str::to_string));
+                    spend(left, v.len());
+                    v
+                } else {
+                    v.to_string()
+                };
+                (k.to_string(), v)
+            })
+            .collect();
         Macros {
             parent: Some(Arc::new(self.clone())),
             own,
         }
     }
+
+    /// The bytes of the definitions in this layer alone.
+    pub fn own_bytes(&self) -> usize {
+        self.own.iter().map(|(k, v)| k.len() + v.len()).sum()
+    }
+}
+
+/// Take `n` from `left`, down to nothing.
+pub fn spend(left: &AtomicUsize, n: usize) {
+    let mut l = left.load(Ordering::Relaxed);
+    while let Err(now) =
+        left.compare_exchange(l, l.saturating_sub(n), Ordering::Relaxed, Ordering::Relaxed)
+    {
+        l = now;
+    }
+}
+
+/// Warn, once until [`rearm_warning`], that an expansion was left as written.
+static WARNED: AtomicBool = AtomicBool::new(false);
+
+/// Let the next expansion that gives up warn again, as at the start of a load.
+pub fn rearm_warning() {
+    WARNED.store(false, Ordering::Relaxed);
 }
 
 /// Replace `$(NAME)` and `${NAME}` using `lookup`. `$(NAME=default)` falls back
@@ -91,10 +125,17 @@ impl Macros {
 /// unexpanded, as written, rather than truncated.
 pub fn expand(text: &str, lookup: &dyn Fn(&str) -> Option<String>) -> String {
     let mut work = 0;
-    expand_depth(text, lookup, 0, &mut work).unwrap_or_else(|| text.to_string())
+    expand_depth(text, lookup, 0, &mut work).unwrap_or_else(|| {
+        if !WARNED.swap(true, Ordering::Relaxed) {
+            log::warn!("macro expansion over {MAX_WORK} bytes left as written: {text:.80}");
+        }
+        text.to_string()
+    })
 }
 
 /// The most output, counted over every nested expansion, that [`expand`] builds.
+/// Kept at 16 KiB rather than more because an expansion that fails costs all
+/// of it each time, and widgets expand text as they draw.
 const MAX_WORK: usize = 16 << 10;
 
 /// [`expand`] one level down, adding the size of what it builds to `work`;
@@ -211,20 +252,17 @@ mod tests {
     }
 
     #[test]
-    fn macro_sets_stay_bounded() {
-        // Layers that each double a value, then 1500 macros naming V11:
-        // about 58 MB if every one were stored expanded.
-        let mut set = Macros::from_pairs([("V0", "x".repeat(4))]);
-        for i in 1..=13 {
-            let v = format!("$(V{})$(V{})", i - 1, i - 1);
-            set = set.with(&Macros::from_pairs([(format!("V{i}"), v)]));
-        }
-        let many = Macros::from_pairs((0..1500).map(|i| (format!("N{i}"), "$(V11)")));
-        let set = set.with(&many);
-        let held: usize = set.iter().map(|(k, v)| k.len() + v.len()).sum();
-        assert!(held <= 2 * MAX_LAYER_BYTES, "{held} bytes");
-        // Sharing: layering nothing, or something, doesn't copy the set.
-        assert_eq!(set.with(&Macros::default()), set);
+    fn layers_share_a_budget() {
+        let root = Macros::from_pairs([("V", "x".repeat(1000))]);
+        let left = AtomicUsize::new(5000);
+        let inner = Macros::from_pairs((0..100).map(|i| (format!("N{i}"), "$(V)")));
+        let set = root.with_budget(&inner, &left);
+        // Expanded until spent, then kept as written.
+        assert_eq!(set.get("N0").map(str::len), Some(1000));
+        assert_eq!(set.get("N99"), Some("$(V)"));
+        assert!(set.own_bytes() < 10_000);
+        let more = set.with_budget(&inner, &left);
+        assert_eq!(more.get("N0"), Some("$(V)"));
     }
 
     #[test]

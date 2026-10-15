@@ -2,7 +2,7 @@
 
 use bob::{Display, Macros, Source, Widget};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use pv::{Pv, PvManager};
 
@@ -77,6 +77,8 @@ pub struct Node {
 struct Budget {
     screens: AtomicU32,
     widgets: AtomicU32,
+    /// Bytes of expanded macro values and PV names.
+    macros: AtomicUsize,
 }
 
 impl Budget {
@@ -104,11 +106,13 @@ pub struct Builder<'a> {
 
 impl<'a> Builder<'a> {
     pub fn new(pvs: &'a PvManager) -> Self {
+        bob::rearm_warning();
         Self {
             pvs,
             budget: Arc::new(Budget {
                 screens: AtomicU32::new(MAX_SCREENS),
                 widgets: AtomicU32::new(MAX_WIDGETS),
+                macros: AtomicUsize::new(bob::MAX_LOAD_BYTES),
             }),
         }
     }
@@ -251,7 +255,7 @@ impl Builder<'_> {
         depth: u32,
     ) -> Screen {
         // Macros passed in override the display's own defaults.
-        let macros = display.macros.with(macros);
+        let macros = display.macros.with_budget(macros, &self.budget.macros);
         let base = display.source.clone();
         let (widgets, width, height) = match group.filter(|g| !g.is_empty()) {
             Some(name) => match find_group(&display.widgets, name) {
@@ -321,7 +325,7 @@ impl Builder<'_> {
         base: Option<&Source>,
         depth: u32,
     ) -> Node {
-        let macros = parent.with(&w.macros());
+        let macros = parent.with_budget(&w.macros(), &self.budget.macros);
         let (dw, dh) = default_size(&w.kind);
         let rect = [
             origin.0 + w.f64("x").unwrap_or(0.0),
@@ -329,10 +333,16 @@ impl Builder<'_> {
             w.f64("width").unwrap_or(dw),
             w.f64("height").unwrap_or(dh),
         ];
-        let pv_name = w
-            .text("pv_name")
-            .map(|t| expand_for(w, &macros, t))
-            .unwrap_or_default();
+        // Once the load's macro text is spent, names stay as written.
+        let pv_name = match w.text("pv_name") {
+            Some(t) if self.budget.macros.load(Ordering::Relaxed) > 0 => {
+                let name = expand_for(w, &macros, t);
+                bob::spend(&self.budget.macros, name.len());
+                name
+            }
+            Some(t) => t.to_string(),
+            None => String::new(),
+        };
         let pv = (!pv_name.is_empty()).then(|| self.pvs.subscribe(&pv_name));
         let rules = w
             .rules()
@@ -498,10 +508,11 @@ impl Builder<'_> {
         node.active_tab = index;
         let file = node.expand(tab.child_text("file").unwrap_or(""));
         let group = node.expand(tab.child_text("group_name").unwrap_or(""));
-        let macros = node.macros.with(
+        let macros = node.macros.with_budget(
             &tab.child("macros")
                 .map(Macros::from_element)
                 .unwrap_or_default(),
+            &node.budget.macros,
         );
         self.embed(node, &file, &macros, &group, depth);
     }
@@ -620,6 +631,34 @@ mod tests {
         assert!(total <= MAX_SCREENS * 4 + 4, "{total} nodes");
         assert!(errors > 0);
         assert!(start.elapsed().as_secs() < 10);
+    }
+
+    #[test]
+    fn macro_text_is_bounded_across_a_load() {
+        // V9 is 2 KiB. Every widget has 256 macros naming it, and a PV name
+        // that does: 400 widgets would hold 200 MB if each were expanded.
+        let doubling: String = (1..=9)
+            .map(|i| format!("<V{i}>$(V{n})$(V{n})</V{i}>", n = i - 1))
+            .collect();
+        let own: String = (0..256).map(|i| format!("<N{i}>$(V9)</N{i}>")).collect();
+        let widget = format!(
+            "<widget type='label'><pv_name>loc://$(V9)</pv_name><macros>{own}</macros></widget>"
+        );
+        let d = Display::parse(&format!(
+            "<display><macros><V0>xxxx</V0>{doubling}</macros>{}</display>",
+            widget.repeat(400)
+        ))
+        .unwrap();
+        let start = std::time::Instant::now();
+        let pvs = PvManager::new();
+        let s = Builder::new(&pvs).screen(d, &Macros::default(), None, 0);
+        let held: usize = s
+            .nodes
+            .iter()
+            .map(|n| n.macros.own_bytes() + n.pv_name.len())
+            .sum();
+        assert!(held < 2 * bob::MAX_LOAD_BYTES, "{held} bytes held");
+        assert!(start.elapsed().as_secs() < 20);
     }
 
     #[test]
