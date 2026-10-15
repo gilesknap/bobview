@@ -14,6 +14,9 @@ on:
       - ".github/workflows/interop.yml"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   # epics-containers images, pinned. Bump deliberately. The developer image
@@ -61,12 +64,14 @@ jobs:
           BOBVIEW_INTEROP_CA_PV: INTEROP:AI
           BOBVIEW_INTEROP_PVA_PV: INTEROP:AI
           BOBVIEW_INTEROP_WRITE_PV: INTEROP:AO
-        run: cargo test -p pv --test interop -- --nocapture
+          BOBVIEW_INTEROP_REQUIRE: "1"
+        run: cargo test -p pv --test interop -- --nocapture --skip ca_through_gateway
       - name: Run the gateway test
         env:
           EPICS_CA_ADDR_LIST: 127.0.0.1:9064
           EPICS_CA_AUTO_ADDR_LIST: "NO"
           BOBVIEW_INTEROP_GW_PV: INTEROP:LI
+          BOBVIEW_INTEROP_REQUIRE: "1"
         run: cargo test -p pv --test interop ca_through_gateway -- --nocapture
       - name: Container logs
         if: always()
