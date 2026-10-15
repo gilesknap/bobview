@@ -184,22 +184,17 @@ fn main() -> eframe::Result {
         macros = defaults.with(&macros);
     }
     // The named layout, else the default one unless a display was named.
-    let layout_name = match layout_name {
-        Some(name) => Some(name),
-        None if file.is_none() && !no_layout && layout::exists(layout::DEFAULT) => {
-            Some(layout::DEFAULT.to_string())
-        }
-        None => None,
-    };
-    let layout = match layout_name.filter(|_| snapshot.is_none()) {
-        Some(name) => match layout::load(&name) {
-            Ok(layout) => Some((layout, name)),
+    let layout = if snapshot.is_some() {
+        None
+    } else {
+        let default = file.is_none() && !no_layout && layout::exists(layout::DEFAULT);
+        match layout::startup(layout_name, default, layout::load) {
+            Ok(layout) => layout,
             Err(e) => {
-                eprintln!("cannot restore layout {name}: {e}");
+                eprintln!("{e}");
                 std::process::exit(2);
             }
-        },
-        None => None,
+        }
     };
     // A layout's main window has a display of its own.
     let layout_has_main = layout
@@ -242,6 +237,14 @@ fn main() -> eframe::Result {
             .with_app_id("bobview")
             .with_inner_size(chrome::DEFAULT_WINDOW)
             .with_fullscreen(fullscreen),
+        // No vsync: each window's buffer swap would wait for a screen
+        // refresh, and every window is drawn in the main one's frame, so a
+        // frame took a refresh per window (~120 ms with 7 windows). We only
+        // repaint on change, so this doesn't spin.
+        glow_options: eframe::egui_glow::GlowConfiguration {
+            vsync: false,
+            ..Default::default()
+        },
         ..Default::default()
     };
     eframe::run_native(

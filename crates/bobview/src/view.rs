@@ -63,7 +63,9 @@ pub struct View {
     error: Option<String>,
     /// The display being loaded is the current one again: keep the window size.
     reloading: bool,
-    /// A new display (not a reload) was shown, for the window to size itself to.
+    /// A new display (not a reload) was shown, for the window to size itself
+    /// to; also set when one failed to load, so a window stops keeping the
+    /// size a layout gave it.
     pub new_display: bool,
     /// The path in the Open panel, following the display shown.
     pub open_path: String,
@@ -166,6 +168,9 @@ impl View {
             Err(e) => {
                 log::error!("{e}");
                 self.error = Some(e.to_string());
+                if !self.reloading {
+                    self.new_display = true;
+                }
             }
         }
         self.reloading = false;

@@ -57,28 +57,54 @@ pub struct WindowLayout {
     pub toolbar: bool,
 }
 
+/// A number, or the string "fit".
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(try_from = "ZoomText", into = "ZoomText")]
 pub enum Zoom {
     Factor(f32),
-    /// "fit": fit the display to the window.
-    Fit(String),
+    /// Fit the display to the window.
+    Fit,
+}
+
+/// How a zoom is written.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum ZoomText {
+    Factor(f32),
+    Text(String),
+}
+
+impl TryFrom<ZoomText> for Zoom {
+    type Error = String;
+
+    fn try_from(z: ZoomText) -> Result<Self, String> {
+        match z {
+            ZoomText::Factor(f) => Ok(Self::Factor(f)),
+            ZoomText::Text(t) if t == "fit" => Ok(Self::Fit),
+            ZoomText::Text(t) => Err(format!("zoom {t:?}: expected a number or \"fit\"")),
+        }
+    }
+}
+
+impl From<Zoom> for ZoomText {
+    fn from(z: Zoom) -> Self {
+        match z {
+            Zoom::Factor(f) => Self::Factor(f),
+            Zoom::Fit => Self::Text("fit".into()),
+        }
+    }
 }
 
 impl Zoom {
     pub fn new(fit: bool, zoom: f32) -> Self {
-        if fit {
-            Self::Fit("fit".into())
-        } else {
-            Self::Factor(zoom)
-        }
+        if fit { Self::Fit } else { Self::Factor(zoom) }
     }
 
     /// A fixed zoom, or None to fit to the window.
     pub fn factor(&self) -> Option<f32> {
         match self {
             Self::Factor(f) => Some(f.clamp(0.2, 5.0)),
-            Self::Fit(_) => None,
+            Self::Fit => None,
         }
     }
 }
@@ -248,18 +274,59 @@ pub fn load(name: &str) -> Result<Layout, String> {
     Ok(layout)
 }
 
+/// The layout to start with: `named` (with `--layout`), which must load,
+/// else the default one when `default`, which bobview starts without, with
+/// a warning, if it doesn't load (written by a newer bobview, say).
+#[cfg_attr(
+    target_arch = "wasm32",
+    expect(dead_code, reason = "a browser starts from its address")
+)]
+pub fn startup(
+    named: Option<String>,
+    default: bool,
+    load: impl Fn(&str) -> Result<Layout, String>,
+) -> Result<Option<(Layout, String)>, String> {
+    if let Some(name) = named {
+        return load(&name)
+            .map(|l| Some((l, name.clone())))
+            .map_err(|e| format!("cannot restore layout {name}: {e}"));
+    }
+    if !default {
+        return Ok(None);
+    }
+    match load(DEFAULT) {
+        Ok(l) => Ok(Some((l, DEFAULT.to_string()))),
+        Err(e) => {
+            log::warn!("not restoring the default layout: {e}");
+            Ok(None)
+        }
+    }
+}
+
 pub fn save(name: &str, layout: &Layout) -> Result<(), String> {
     let path = file(name).ok_or_else(|| format!("not a layout name: {name:?}"))?;
     let write = || -> std::io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
         let text = serde_json::to_string_pretty(layout).map_err(std::io::Error::other)?;
-        std::fs::write(&path, text + "\n")
+        write_atomic(&path, &(text + "\n"))
     };
     write().map_err(|e| format!("{}: {e}", path.display()))?;
     log::info!("saved layout {}", path.display());
     Ok(())
+}
+
+/// Write `text` to `path` through a file beside it, so that a crash or a
+/// full disk leaves the old file whole rather than half written.
+fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    // Hidden and not .json, so never listed as a layout.
+    let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, text)
+        .and_then(|()| std::fs::rename(&tmp, path))
+        .inspect_err(|_| {
+            std::fs::remove_file(&tmp).ok();
+        })
 }
 
 pub fn delete(name: &str) -> Result<(), String> {
@@ -285,10 +352,9 @@ impl Settings {
 
     pub fn save(&self) {
         let Some(dir) = config_dir() else { return };
-        let written = std::fs::create_dir_all(&dir).and_then(|_| {
-            let text = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
-            std::fs::write(dir.join("settings.json"), text + "\n")
-        });
+        let written = serde_json::to_string_pretty(self)
+            .map_err(std::io::Error::other)
+            .and_then(|text| write_atomic(&dir.join("settings.json"), &(text + "\n")));
         if let Err(e) = written {
             log::warn!("cannot save settings in {}: {e}", dir.display());
         }
@@ -400,6 +466,49 @@ mod tests {
             Some(Vec2::new(800.0, 600.0))
         );
         assert!(w(9000.0, 9000.0).geometry(&[]).position.is_some());
+    }
+
+    #[test]
+    fn zoom_is_a_number_or_fit() {
+        let zoom = |t: &str| serde_json::from_str::<Zoom>(t);
+        assert_eq!(zoom("1.5").unwrap(), Zoom::Factor(1.5));
+        assert_eq!(zoom("\"fit\"").unwrap(), Zoom::Fit);
+        assert!(zoom("\"fill\"").is_err());
+        assert!(zoom("\"\"").is_err());
+        assert_eq!(serde_json::to_string(&Zoom::Fit).unwrap(), "\"fit\"");
+        assert_eq!(serde_json::to_string(&Zoom::Factor(2.0)).unwrap(), "2.0");
+    }
+
+    #[test]
+    fn only_a_named_layout_must_load() {
+        let layout = Layout::new(false, Vec::new());
+        let good = |_: &str| Ok(layout.clone());
+        let bad = |_: &str| Err::<Layout, _>("newer".to_string());
+        // --layout: loaded, or an error.
+        assert_eq!(
+            startup(Some("rf".into()), true, good).unwrap(),
+            Some((layout.clone(), "rf".to_string()))
+        );
+        assert!(startup(Some("rf".into()), true, bad).is_err());
+        // The default: loaded, or passed over.
+        assert_eq!(
+            startup(None, true, good).unwrap(),
+            Some((layout.clone(), DEFAULT.to_string()))
+        );
+        assert_eq!(startup(None, true, bad).unwrap(), None);
+        assert_eq!(startup(None, false, good).unwrap(), None);
+    }
+
+    #[test]
+    fn saves_replace_the_file_whole() {
+        let dir = std::env::temp_dir().join(format!("bobview-layout-{}", std::process::id()));
+        let path = dir.join("a.json");
+        write_atomic(&path, "one").unwrap();
+        write_atomic(&path, "two").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "two");
+        // No temporary file is left behind.
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

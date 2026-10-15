@@ -204,8 +204,11 @@ impl Chrome {
         if !self.resize || !self.settled {
             return;
         }
+        // A display that failed to load still ends a layout's hold on
+        // the size.
         let Some(display) = display else {
             self.resize = false;
+            self.hold = false;
             return;
         };
         let (info, inner) = ctx.input(|i| (i.viewport().clone(), i.content_rect().size()));

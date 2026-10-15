@@ -48,7 +48,10 @@ pub struct BobApp {
     /// Use the on-screen keypad for text entries (switched on by the first touch).
     keypad_mode: bool,
     keypad: Option<Keypad>,
-    details: Option<pvmenu::Details>,
+    /// The PV details dialog, and the window it was asked for in.
+    details: Option<(WindowKey, pvmenu::Details)>,
+    /// The saved layouts, for the toolbar's menus.
+    layouts: LayoutList,
     /// Open trend windows, and the id the next one gets.
     trends: Vec<Trend>,
     next_trend: u64,
@@ -60,18 +63,45 @@ pub struct BobApp {
     chrome: Chrome,
 }
 
-/// A command action's result, tagged with the window and display it was
-/// started on.
+/// A command action's result, tagged with where it was started (its window
+/// and whether ctrl was held) and the display it was started on.
 struct Launched {
     key: LaunchKey,
-    window: WindowKey,
+    origin: Origin,
     shown: u64,
     target: Option<Location>,
 }
 
 struct Keypad {
+    /// The window it was asked for in, which it is drawn in.
+    window: WindowKey,
     pv: pv::Pv,
     text: String,
+}
+
+/// The saved layouts' names, read when a menu listing them opens and after
+/// a save or delete, not on every frame it is open.
+#[derive(Default)]
+struct LayoutList {
+    names: Vec<String>,
+    /// The (main window's) frame they were last listed on.
+    frame: Option<u64>,
+}
+
+impl LayoutList {
+    fn get(&mut self, ctx: &egui::Context) -> Vec<String> {
+        let frame = ctx.cumulative_frame_nr();
+        if self.frame.is_none_or(|f| f + 1 < frame) {
+            self.names = layout::list();
+        }
+        self.frame = Some(frame);
+        self.names.clone()
+    }
+
+    /// Read them again next time.
+    fn refresh(&mut self) {
+        self.frame = None;
+    }
 }
 
 /// A display in a native window of its own, opened in multi-window mode or
@@ -163,6 +193,7 @@ impl BobApp {
             keypad_mode: false,
             keypad: None,
             details: None,
+            layouts: LayoutList::default(),
             trends: Vec::new(),
             next_trend: 0,
             launched: std::sync::mpsc::channel(),
@@ -290,18 +321,19 @@ impl BobApp {
 
     /// Run a command action on a thread, so a slow launcher script or file
     /// system doesn't freeze the window, and open the display it names in
-    /// `window`. A command already in flight is ignored.
+    /// `origin`'s window, as a link there would. A command already in
+    /// flight is ignored.
     #[cfg(not(target_arch = "wasm32"))]
     fn launch(
         &mut self,
         ctx: &egui::Context,
-        window: WindowKey,
+        origin: Origin,
         base: Option<Source>,
         dir: Option<Source>,
         cmd: String,
     ) {
         let tx = self.launched.0.clone();
-        let Some(view) = self.view_mut(window) else {
+        let Some(view) = self.view_mut(origin.window) else {
             return;
         };
         let key = (
@@ -328,7 +360,7 @@ impl BobApp {
             };
             tx.send(Launched {
                 key,
-                window,
+                origin,
                 shown,
                 target,
             })
@@ -342,7 +374,7 @@ impl BobApp {
     fn launch(
         &mut self,
         _: &egui::Context,
-        _: WindowKey,
+        _: Origin,
         _: Option<Source>,
         _: Option<Source>,
         cmd: String,
@@ -354,19 +386,13 @@ impl BobApp {
     /// has since moved to another display or closed the window.
     fn poll_launched(&mut self, ctx: &egui::Context) {
         while let Ok(done) = self.launched.1.try_recv() {
-            let Some(view) = self.view_mut(done.window) else {
+            let Some(view) = self.view_mut(done.origin.window) else {
                 continue;
             };
             view.launching.retain(|k| *k != done.key);
             let current = done.shown == view.shown;
             match done.target {
-                Some(loc) if current => {
-                    let origin = Origin {
-                        window: done.window,
-                        ctrl: false,
-                    };
-                    self.follow(ctx, origin, loc, "window");
-                }
+                Some(loc) if current => self.follow(ctx, done.origin, loc, "window"),
                 Some(loc) => log::info!("drop {}: the display has changed", loc.source),
                 None => {}
             }
@@ -441,6 +467,7 @@ impl BobApp {
                             &mut self.multi_window,
                             self.layout_name.as_deref(),
                             &mut self.settings,
+                            &mut self.layouts,
                             true,
                         );
                     }
@@ -485,6 +512,7 @@ impl BobApp {
                         &mut self.multi_window,
                         self.layout_name.as_deref(),
                         &mut self.settings,
+                        &mut self.layouts,
                         false,
                     );
                 }
@@ -516,6 +544,7 @@ impl BobApp {
                 Ok(())
             }
             LayoutAction::Delete(name) => layout::delete(&name).map(|()| {
+                self.layouts.refresh();
                 log::info!("deleted layout {name}");
                 if self.layout_name.as_deref() == Some(name.as_str()) {
                     self.layout_name = None;
@@ -543,7 +572,8 @@ impl BobApp {
                 windows.push(w);
             }
         }
-        if windows.iter().any(|w| w.position.is_none()) {
+        // On X11 a window not drawn yet has no position either.
+        if on_wayland() && windows.iter().any(|w| w.position.is_none()) {
             positions_unknown();
         }
         Layout::new(self.multi_window, windows)
@@ -551,6 +581,7 @@ impl BobApp {
 
     fn save_layout(&mut self, name: &str) -> Result<(), String> {
         layout::save(name, &self.layout())?;
+        self.layouts.refresh();
         self.layout_name = Some(name.trim().to_string());
         Ok(())
     }
@@ -751,6 +782,7 @@ fn layout_controls(
     multi_window: &mut bool,
     current: Option<&str>,
     settings: &mut layout::Settings,
+    layouts: &mut LayoutList,
     compact: bool,
 ) -> Option<LayoutAction> {
     let mut action = None;
@@ -763,7 +795,7 @@ fn layout_controls(
         *multi_window = !*multi_window;
     }
     let mut load = |ui: &mut egui::Ui| {
-        let names = layout::list();
+        let names = layouts.get(ui.ctx());
         if names.is_empty() {
             ui.weak("No saved layouts");
         }
@@ -799,7 +831,7 @@ fn layout_controls(
             action = Some(LayoutAction::SaveAs);
         }
         ui.menu_button("Delete", |ui| {
-            let names = layout::list();
+            let names = layouts.get(ui.ctx());
             if names.is_empty() {
                 ui.weak("No saved layouts");
             }
@@ -961,8 +993,23 @@ impl BobApp {
         for (origin, req) in requests {
             self.request(ui.ctx(), origin, req);
         }
-        self.keypad_window(ui);
-        self.details_window(ui);
+        // A dialog goes with its window.
+        let closed = |w: WindowKey| match w {
+            WindowKey::Main => false,
+            WindowKey::Child(id) => !self.windows.iter().any(|dw| dw.id == id),
+        };
+        if self.keypad.as_ref().is_some_and(|k| closed(k.window)) {
+            self.keypad = None;
+        }
+        if self.details.as_ref().is_some_and(|(w, _)| closed(*w)) {
+            self.details = None;
+        }
+        dialogs(
+            ui.ctx(),
+            WindowKey::Main,
+            &mut self.keypad,
+            &mut self.details,
+        );
         self.save_as_window(ui);
         self.trend_windows(ui);
     }
@@ -976,8 +1023,16 @@ impl BobApp {
                 macros,
                 target,
             } => self.follow(ctx, origin, Location { source, macros }, &target),
-            Request::Keypad { pv, text } => self.keypad = Some(Keypad { pv, text }),
-            Request::Details(details) => self.details = Some(details),
+            // Shown in the window asked from, which may have been drawn
+            // already this frame.
+            Request::Keypad { pv, text } => {
+                self.keypad = Some(Keypad { window, pv, text });
+                ctx.request_repaint();
+            }
+            Request::Details(details) => {
+                self.details = Some((window, details));
+                ctx.request_repaint();
+            }
             Request::Trend(names) => {
                 log::info!("trend {}", names.join(", "));
                 self.trends
@@ -995,7 +1050,7 @@ impl BobApp {
                 base,
                 directory,
                 command,
-            } => self.launch(ctx, window, base, directory, command),
+            } => self.launch(ctx, origin, base, directory, command),
             // Exit in a display window closes it; the main window goes back
             // first, as one window used to.
             Request::Close => match window {
@@ -1021,10 +1076,14 @@ impl BobApp {
     ) -> Vec<(Origin, Request)> {
         let ctx = ui.ctx().clone();
         let mut requests = Vec::new();
+        // Closed by Exit or Ctrl+W since they were last drawn.
+        self.windows.retain(|w| !w.close);
         let (home, keypad, auto_size) = (&self.home, self.keypad_mode, self.chrome.auto_size);
+        let (pad, details) = (&mut self.keypad, &mut self.details);
         for w in &mut self.windows {
+            let key = WindowKey::Child(w.id);
             let vcx = ViewCx {
-                window: WindowKey::Child(w.id),
+                window: key,
                 keypad,
                 trends,
             };
@@ -1043,6 +1102,7 @@ impl BobApp {
                     .show(&ctx, |ui| {
                         requests.extend(child_ui(ui, w, home, &vcx, None));
                     });
+                dialogs(&ctx, key, pad, details);
                 w.close |= !open;
                 continue;
             }
@@ -1051,6 +1111,7 @@ impl BobApp {
                 // No native windows after all: a window in this one.
                 let native = (class != egui::ViewportClass::EmbeddedWindow).then_some(auto_size);
                 requests.extend(child_ui(ui, w, home, &vcx, native));
+                dialogs(ui.ctx(), key, pad, details);
                 // Closing the window drops its view, and its PVs with it.
                 if ui.input(|i| i.viewport().close_requested()) {
                     w.close = true;
@@ -1105,89 +1166,104 @@ impl BobApp {
             })
         });
     }
+}
 
-    fn details_window(&mut self, ui: &mut egui::Ui) {
-        let mut open = self.details.is_some();
-        if let Some(details) = &self.details {
-            egui::Window::new("PV details")
-                .open(&mut open)
-                .collapsible(false)
-                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-                .show(ui.ctx(), |ui| pvmenu::details_ui(ui, details));
-        }
-        if !open {
-            self.details = None;
-        }
+/// The keypad and PV details dialogs, when asked for in `window`: drawn in
+/// that window.
+fn dialogs(
+    ctx: &egui::Context,
+    window: WindowKey,
+    keypad: &mut Option<Keypad>,
+    details: &mut Option<(WindowKey, pvmenu::Details)>,
+) {
+    if keypad.as_ref().is_some_and(|k| k.window == window) {
+        keypad_window(ctx, keypad);
     }
+    if details.as_ref().is_some_and(|(w, _)| *w == window) {
+        details_window(ctx, details);
+    }
+}
 
-    fn keypad_window(&mut self, ui: &mut egui::Ui) {
-        let Some(pad) = self.keypad.as_mut() else {
-            return;
-        };
-        let mut done = None;
-        let title = plain_name(pad.pv.name());
-        let state = pad.pv.state();
-        egui::Window::new(title)
+fn details_window(ctx: &egui::Context, details: &mut Option<(WindowKey, pvmenu::Details)>) {
+    let mut open = details.is_some();
+    if let Some((_, d)) = details.as_ref() {
+        egui::Window::new("PV details")
+            .open(&mut open)
             .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_BOTTOM, Vec2::new(0.0, -8.0))
-            .show(ui.ctx(), |ui| {
-                let size = Vec2::new(64.0, 48.0);
-                let font = egui::FontId::proportional(22.0);
-                ui.add(
-                    egui::TextEdit::singleline(&mut pad.text)
-                        .font(font.clone())
-                        .desired_width(4.0 * size.x + 12.0),
-                );
-                // Enums get one button per state instead of digits.
-                if !state.labels.is_empty() {
-                    for label in &state.labels {
-                        let b = egui::Button::new(egui::RichText::new(label).font(font.clone()));
-                        if ui
-                            .add_sized(Vec2::new(4.0 * size.x + 12.0, size.y), b)
-                            .clicked()
-                        {
-                            done = Some(Some(label.clone()));
-                        }
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| pvmenu::details_ui(ui, d));
+    }
+    if !open {
+        *details = None;
+    }
+}
+
+fn keypad_window(ctx: &egui::Context, keypad: &mut Option<Keypad>) {
+    let Some(pad) = keypad.as_mut() else {
+        return;
+    };
+    let mut done = None;
+    let title = plain_name(pad.pv.name());
+    let state = pad.pv.state();
+    egui::Window::new(title)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_BOTTOM, Vec2::new(0.0, -8.0))
+        .show(ctx, |ui| {
+            let size = Vec2::new(64.0, 48.0);
+            let font = egui::FontId::proportional(22.0);
+            ui.add(
+                egui::TextEdit::singleline(&mut pad.text)
+                    .font(font.clone())
+                    .desired_width(4.0 * size.x + 12.0),
+            );
+            // Enums get one button per state instead of digits.
+            if !state.labels.is_empty() {
+                for label in &state.labels {
+                    let b = egui::Button::new(egui::RichText::new(label).font(font.clone()));
+                    if ui
+                        .add_sized(Vec2::new(4.0 * size.x + 12.0, size.y), b)
+                        .clicked()
+                    {
+                        done = Some(Some(label.clone()));
                     }
-                } else {
-                    let rows = [
-                        ["7", "8", "9", "Del"],
-                        ["4", "5", "6", "-"],
-                        ["1", "2", "3", "e"],
-                        ["0", ".", "C", "OK"],
-                    ];
-                    for row in rows {
-                        ui.horizontal(|ui| {
-                            for key in row {
-                                let b =
-                                    egui::Button::new(egui::RichText::new(key).font(font.clone()));
-                                if ui.add_sized(size, b).clicked() {
-                                    match key {
-                                        "Del" => {
-                                            pad.text.pop();
-                                        }
-                                        "C" => pad.text.clear(),
-                                        "OK" => done = Some(Some(pad.text.clone())),
-                                        k => pad.text.push_str(k),
+                }
+            } else {
+                let rows = [
+                    ["7", "8", "9", "Del"],
+                    ["4", "5", "6", "-"],
+                    ["1", "2", "3", "e"],
+                    ["0", ".", "C", "OK"],
+                ];
+                for row in rows {
+                    ui.horizontal(|ui| {
+                        for key in row {
+                            let b = egui::Button::new(egui::RichText::new(key).font(font.clone()));
+                            if ui.add_sized(size, b).clicked() {
+                                match key {
+                                    "Del" => {
+                                        pad.text.pop();
                                     }
+                                    "C" => pad.text.clear(),
+                                    "OK" => done = Some(Some(pad.text.clone())),
+                                    k => pad.text.push_str(k),
                                 }
                             }
-                        });
-                    }
+                        }
+                    });
                 }
-                if ui.button("Cancel").clicked() {
-                    done = Some(None);
-                }
-            });
-        match done {
-            Some(Some(value)) => {
-                pad.pv.write(value);
-                self.keypad = None;
             }
-            Some(None) => self.keypad = None,
-            None => {}
+            if ui.button("Cancel").clicked() {
+                done = Some(None);
+            }
+        });
+    match done {
+        Some(Some(value)) => {
+            pad.pv.write(value);
+            *keypad = None;
         }
+        Some(None) => *keypad = None,
+        None => {}
     }
 }
 
@@ -1256,6 +1332,11 @@ struct Shortcuts {
 /// display window's toolbar.
 fn shortcuts(ui: &egui::Ui, view: &mut View) -> Shortcuts {
     use egui::{Key, Modifiers};
+    // Not while typing in the window (focus is as the last frame left it):
+    // there Ctrl+W deletes a word and Alt+arrows move by word.
+    if ui.ctx().text_edit_focused() {
+        return Shortcuts::default();
+    }
     ui.input_mut(|i| {
         if i.consume_key(Modifiers::COMMAND, Key::R) {
             view.reload();
@@ -1326,9 +1407,14 @@ fn child_ui(
     if w.view.new_display && info.monitor_size.is_some() {
         w.view.new_display = false;
         let zoom = ui.ctx().zoom_factor();
-        if std::mem::replace(&mut w.fit_next, auto_size)
+        let display = w.view.natural_size(zoom);
+        // One that failed to load leaves a window not yet sized to be
+        // sized to the next.
+        let fit = w.fit_next;
+        w.fit_next = auto_size || fit && display.is_none();
+        if fit
             && chrome::can_resize(&info, zoom)
-            && let Some(display) = w.view.natural_size(zoom)
+            && let Some(display) = display
         {
             let size = chrome::window_size(display, panels, info.monitor_size);
             let inner = ui.input(|i| i.content_rect().size());
@@ -1496,12 +1582,16 @@ mod tests {
 
     #[test]
     fn launches_once_and_drops_stale_results() {
-        use super::{BobApp, Launched, Location, WindowKey};
+        use super::{BobApp, Launched, Location, Origin, WindowKey};
         let ctx = eframe::egui::Context::default();
         let mut app = BobApp::new(&ctx, None, Some(1.0), crate::chrome::UiScale::Auto);
         // A double click runs the command once, and counts as loading.
-        app.launch(&ctx, WindowKey::Main, None, None, "no-such-launcher".into());
-        app.launch(&ctx, WindowKey::Main, None, None, "no-such-launcher".into());
+        let main = Origin {
+            window: WindowKey::Main,
+            ctrl: false,
+        };
+        app.launch(&ctx, main, None, None, "no-such-launcher".into());
+        app.launch(&ctx, main, None, None, "no-such-launcher".into());
         assert_eq!(app.main.launching.len(), 1);
         assert!(app.is_loading());
         while app.is_loading() {
@@ -1521,13 +1611,28 @@ mod tests {
             .0
             .send(Launched {
                 key,
-                window: WindowKey::Main,
+                origin: main,
                 shown: stale,
-                target: Some(loc),
+                target: Some(loc.clone()),
             })
             .unwrap();
         app.poll_launched(&ctx);
         assert!(app.main.current.is_none() && !app.is_loading());
+        // In multi-window mode a ctrl+clicked command opens in place, as a
+        // ctrl+clicked link does.
+        app.set_multi_window(true);
+        app.launched
+            .0
+            .send(Launched {
+                key: (None, None, "y".to_string()),
+                origin: Origin { ctrl: true, ..main },
+                shown: app.main.shown,
+                target: Some(loc.clone()),
+            })
+            .unwrap();
+        app.poll_launched(&ctx);
+        assert!(app.windows.is_empty());
+        assert_eq!(app.main.current, Some(loc));
     }
 
     #[test]
