@@ -37,8 +37,9 @@ usage: bobview [options] [display.bob | display.opi | http(s)://host/display.bob
 options:
   -m, --macros P=X,R=Y   macros for the display
   -p, --project DIR      open a display file through the linked folders of the
-                         Eclipse project in DIR (its .project), so that links
-                         between the project's modules work
+                         Eclipse project in DIR (its .project, or the links
+                         of a DLS runcss.sh in DIR), so that links between
+                         the project's modules work
   -z, --zoom FACTOR      fixed zoom instead of fit-to-window
   -f, --fullscreen       start full screen
   -k, --keypad           edit values with an on-screen keypad (automatic on touch)
@@ -69,7 +70,9 @@ been saved (in $XDG_CONFIG_HOME/bobview/layouts, by default
 A display may also be an http:// or https:// URL; files it names are
 fetched relative to it. CS-Studio BOY .opi displays are translated as
 Phoebus does; a path through an Eclipse project's linked folders (such as
-project/module/screen.opi) finds the linked files.
+project/module/screen.opi) finds the linked files. A screen beside a DLS
+runcss.sh launcher is opened through the links that script gives CS-Studio,
+with no .project or -p needed.
 PVs without a prefix use Channel Access; EPICS_CA_ADDR_LIST and
 EPICS_CA_NAME_SERVERS select the IOCs. Set BOBVIEW_LOG=debug for more output.";
 
@@ -163,7 +166,15 @@ fn main() -> eframe::Result {
     }
     let ui_scale = ui_scale.unwrap_or_else(chrome::UiScale::from_env);
     if let (Some(dir), Some(Source::File(path))) = (&project, &file) {
-        match bob::project::virtual_path(dir, path) {
+        let Some(project) = bob::project::project_dir(dir) else {
+            eprintln!(
+                "{} has no .project, nor a {} with links",
+                dir.display(),
+                bob::project::LAUNCHER
+            );
+            std::process::exit(2);
+        };
+        match bob::project::virtual_path(&project, path) {
             Some(p) => file = Some(Source::File(p)),
             None => {
                 eprintln!(
@@ -174,6 +185,13 @@ fn main() -> eframe::Result {
                 std::process::exit(2);
             }
         }
+    } else if let Some(Source::File(path)) = &file
+        && let Some(p) = bob::project::launcher_path(path)
+    {
+        // A DLS screen beside its runcss.sh: through the project that
+        // launcher would give CS-Studio.
+        log::info!("{}: opening as {}", path.display(), p.display());
+        file = Some(Source::File(p));
     }
     // An .opi opened directly (in an Eclipse project) gets the macros its
     // DLS launcher script would give it; those given here override them.

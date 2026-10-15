@@ -229,14 +229,15 @@ fn on_screen(pos: Pos2, size: Option<Vec2>, monitors: &[Rect]) -> bool {
 }
 
 /// The project directory that `path` reaches its file through: the nearest
-/// directory above it holding a `.project`, when `path` itself doesn't exist.
+/// directory above it holding a `.project` (or the virtual project of a DLS
+/// launcher), when `path` itself doesn't exist.
 fn project_of(path: &Path) -> Option<PathBuf> {
     if path.exists() {
         return None;
     }
     path.ancestors()
         .skip(1)
-        .find(|d| d.join(".project").is_file())
+        .find(|d| bob::project::links(d).is_some())
         .map(Path::to_path_buf)
 }
 
@@ -595,6 +596,38 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "two");
         // No temporary file is left behind.
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn round_trips_a_display_through_a_launcher_project() {
+        let dir =
+            std::env::temp_dir().join(format!("bobview-layout-runcss-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("runcss.sh"),
+            "project=m_${version}\nmodule=m\nlinks=\"${SCRIPT_DIR}=${project}/${module}\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("x.opi"), "<display/>").unwrap();
+        let project = dir.join("runcss.sh/m_dev");
+        let virt = bob::project::launcher_path(&dir.join("x.opi")).unwrap();
+        assert_eq!(virt, project.join("m/x.opi"));
+        let loc = Location {
+            source: Source::File(virt.clone()),
+            macros: Macros::default(),
+        };
+        let saved = WindowLayout::new(&loc, Geometry::default());
+        assert_eq!(saved.project.as_ref(), Some(&project));
+        let text = serde_json::to_string(&saved).unwrap();
+        let back: WindowLayout = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.location().source, Source::File(virt.clone()));
+        // A real path saved with the launcher's project goes back through it.
+        let real = WindowLayout {
+            display: dir.join("x.opi").display().to_string(),
+            ..back
+        };
+        assert_eq!(real.location().source, Source::File(virt));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

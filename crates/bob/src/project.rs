@@ -5,6 +5,14 @@
 //! from `proj/vacuum/x.opi` means the `mks937a` link of `proj`. A path
 //! through such a project is kept as written (so `..` keeps working across
 //! links), and [`locate`] finds the real file when it is opened.
+//!
+//! DLS modules have no `.project` on disk: the generated launcher
+//! `runcss.sh` beside a module's screens lists the links, and CS-Studio
+//! builds the project from them when it starts. Such a launcher is read (not
+//! run) as a project of its own, in a virtual directory below the script:
+//! `…/opi/opi/runcss.sh/vacuum_4-100` for project `vacuum_4-100`, which
+//! cannot clash with a real file since `runcss.sh` is a file, not a folder.
+//! See [`launcher_path`].
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -15,6 +23,15 @@ type Links = Vec<(String, PathBuf)>;
 
 /// Folder links of each `.project` read so far, by project directory.
 static PROJECTS: LazyLock<Mutex<HashMap<PathBuf, Links>>> = LazyLock::new(Default::default);
+
+/// The DLS CS-Studio launcher that lists a module's links.
+pub const LAUNCHER: &str = "runcss.sh";
+
+/// The projects a launcher builds: name and links.
+type Projects = Vec<(String, Links)>;
+
+/// Projects of each launcher read so far, by script.
+static LAUNCHERS: LazyLock<Mutex<HashMap<PathBuf, Projects>>> = LazyLock::new(Default::default);
 
 /// The real file for `path`: `path` itself when it exists, else the path
 /// through the linked folder of the Eclipse project it lies in, else `path`
@@ -56,7 +73,14 @@ fn locate_within(path: &Path, hops: usize) -> PathBuf {
 /// The virtual path of `real` in the project at `project_dir`: the first
 /// linked folder holding it, so its `..` names resolve through the project.
 pub fn virtual_path(project_dir: &Path, real: &Path) -> Option<PathBuf> {
-    let real = std::fs::canonicalize(real).unwrap_or_else(|_| real.to_path_buf());
+    // The folder is found on disk, but the file keeps the name it was given
+    // (a symlinked screen is opened by its own name, as CS-Studio does).
+    let real = match (real.parent(), real.file_name()) {
+        (Some(dir), Some(name)) if !dir.as_os_str().is_empty() => std::fs::canonicalize(dir)
+            .map(|d| d.join(name))
+            .unwrap_or_else(|_| real.to_path_buf()),
+        _ => std::fs::canonicalize(real).unwrap_or_else(|_| real.to_path_buf()),
+    };
     links(project_dir)?.iter().find_map(|(name, target)| {
         let target = std::fs::canonicalize(target).unwrap_or_else(|_| target.clone());
         let rest = real.strip_prefix(&target).ok()?;
@@ -64,8 +88,55 @@ pub fn virtual_path(project_dir: &Path, real: &Path) -> Option<PathBuf> {
     })
 }
 
-/// Linked folders of `dir`'s project, by name, when `dir` holds a `.project`.
+/// The project that `-p DIR` names: `dir` when it holds a `.project`, else
+/// the (first) project of the launcher in `dir` (or `dir` itself, when that
+/// is a `runcss.sh`).
+pub fn project_dir(dir: &Path) -> Option<PathBuf> {
+    if links(dir).is_some() {
+        return Some(dir.to_path_buf());
+    }
+    let script = if dir.file_name().is_some_and(|n| n == LAUNCHER) {
+        dir.to_path_buf()
+    } else {
+        dir.join(LAUNCHER)
+    };
+    let (project, _) = launcher_projects(&script).into_iter().next()?;
+    Some(script.join(project))
+}
+
+/// The virtual path of the real file `real` through the projects of the
+/// launcher in its folder (or one above), as CS-Studio would open it from
+/// there: `…/opi/opi/x.opi` is `…/opi/opi/runcss.sh/vacuum_4-100/vacuum/x.opi`.
+/// `None` for a path that is not a real file, one in an Eclipse project
+/// with a `.project` (which wins), and one in no launcher's linked folders.
+pub fn launcher_path(real: &Path) -> Option<PathBuf> {
+    if !real.is_file() {
+        return None;
+    }
+    let abs = normalize(&std::path::absolute(real).ok()?);
+    let dirs = || abs.ancestors().skip(1);
+    let script = dirs().find_map(|d| Some(d.join(LAUNCHER)).filter(|s| s.is_file()))?;
+    if dirs().any(|d| d.join(".project").is_file()) {
+        return None;
+    }
+    launcher_projects(&script)
+        .iter()
+        .find_map(|(project, _)| virtual_path(&script.join(project), real))
+}
+
+/// Linked folders of `dir`'s project, by name, when `dir` holds a `.project`
+/// or is a project of a launcher (`…/runcss.sh/PROJECT`).
 pub fn links(dir: &Path) -> Option<Links> {
+    if let Some(script) = dir
+        .parent()
+        .filter(|s| s.file_name() == Some(LAUNCHER.as_ref()))
+    {
+        let project = dir.file_name()?;
+        return launcher_projects(script)
+            .into_iter()
+            .find(|(name, _)| project == name.as_str())
+            .map(|(_, links)| links);
+    }
     let mut projects = PROJECTS.lock().unwrap();
     if let Some(links) = projects.get(dir) {
         return Some(links.clone());
@@ -74,6 +145,120 @@ pub fn links(dir: &Path) -> Option<Links> {
     let links = parse(&text, dir);
     projects.insert(dir.to_path_buf(), links.clone());
     Some(links)
+}
+
+/// The projects that the launcher `script` builds, as [`parse_launcher`]
+/// finds them; none when it cannot be read.
+fn launcher_projects(script: &Path) -> Projects {
+    let mut launchers = LAUNCHERS.lock().unwrap();
+    if let Some(projects) = launchers.get(script) {
+        return projects.clone();
+    }
+    // Only a file: `x/runcss.sh/p` for a folder `runcss.sh` is a real path.
+    if !script.is_file() {
+        return Vec::new();
+    }
+    let Some(dir) = script.parent() else {
+        return Vec::new();
+    };
+    let projects = std::fs::read_to_string(script)
+        .map(|text| parse_launcher(&text, dir))
+        .unwrap_or_default();
+    launchers.insert(script.to_path_buf(), projects.clone());
+    projects
+}
+
+/// The linked folders that the launcher `text`, in `dir`, passes CS-Studio
+/// as `links="REAL=/PROJECT/NAME,…"`, by project, in order. The script is
+/// not run: its plain `name=value` lines are evaluated, with `SCRIPT_DIR`
+/// as `dir`, `TOP` as `dir/../../..` and `version` from
+/// `$TOP/configure/VERSION` (else `dev`), as the generated scripts set them.
+fn parse_launcher(text: &str, dir: &Path) -> Projects {
+    let dir = normalize(&std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf()));
+    let top = dir.join("../../..");
+    let version = std::fs::read_to_string(top.join("configure/VERSION"))
+        .map(|v| v.trim().to_string())
+        .unwrap_or_else(|_| "dev".into());
+    let mut vars: HashMap<String, String> = HashMap::from([
+        ("SCRIPT_DIR".into(), dir.display().to_string()),
+        ("TOP".into(), top.display().to_string()),
+        ("version".into(), version),
+    ]);
+    let text = text.replace("\\\n", "");
+    for line in text.lines() {
+        let Some((name, value)) = line.trim().split_once('=') else {
+            continue;
+        };
+        let plain = !name.is_empty()
+            && !name.starts_with(|c: char| c.is_ascii_digit())
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        // Command substitutions are not run, and the variables set above
+        // keep their values.
+        let fixed = ["SCRIPT_DIR", "TOP", "version"].contains(&name);
+        if !plain || fixed || value.contains("$(") || value.contains('`') {
+            continue;
+        }
+        let value = match value.strip_prefix('\'') {
+            Some(v) => v.strip_suffix('\'').unwrap_or(v).to_string(),
+            None => {
+                let v = value
+                    .strip_prefix('"')
+                    .map_or(value, |v| v.strip_suffix('"').unwrap_or(v));
+                expand_vars(v, &vars)
+            }
+        };
+        vars.insert(name.to_string(), value);
+    }
+    let mut projects = Projects::new();
+    for entry in vars.get("links").map_or("", String::as_str).split(',') {
+        let Some((real, virt)) = entry.trim().split_once('=') else {
+            continue;
+        };
+        let Some((project, name)) = virt.trim_start_matches('/').split_once('/') else {
+            continue;
+        };
+        let name = name.trim_end_matches('/');
+        let real = PathBuf::from(real);
+        if project.is_empty() || name.is_empty() || name.contains('/') || !real.is_absolute() {
+            continue;
+        }
+        let link = (name.to_string(), real);
+        match projects.iter_mut().find(|(p, _)| p == project) {
+            Some((_, links)) => links.push(link),
+            None => projects.push((project.to_string(), vec![link])),
+        }
+    }
+    projects
+}
+
+/// `text` with `$name` and `${name}` replaced by their `vars` (empty when
+/// unset), as the shell would in double quotes.
+fn expand_vars(text: &str, vars: &HashMap<String, String>) -> String {
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find('$') {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 1..];
+        let (name, next) = match after.strip_prefix('{') {
+            Some(braced) => match braced.split_once('}') {
+                Some((name, next)) => (name, next),
+                None => ("", after),
+            },
+            None => {
+                let end = after.find(|c| !word(c)).unwrap_or(after.len());
+                (&after[..end], &after[end..])
+            }
+        };
+        if name.is_empty() {
+            out.push('$');
+        } else {
+            out.push_str(vars.get(name).map_or("", String::as_str));
+        }
+        rest = next;
+    }
+    out.push_str(rest);
+    out
 }
 
 /// `<link><name>…</name><location>…</location></link>` entries of the
@@ -264,6 +449,124 @@ mod tests {
         ] {
             assert_eq!(loc(bad), None, "{bad}");
         }
+    }
+
+    /// A DLS module's launcher, as generated, with the lines that matter.
+    const RUNCSS: &str = r#"#!/bin/bash
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+TOP=${SCRIPT_DIR}/../../..
+CSS_RUN_SCRIPT=$(configure-ioc s -p CSS-gui)
+opifile="$1"
+if [[ -z $opifile || $opifile == "-h" ]]; then
+    exit 1
+fi
+if [ -e "${TOP}/configure/VERSION" ] ; then
+    version="$(cat "${TOP}"/configure/VERSION)"
+else
+    version="dev"
+fi
+project=vac_${version}
+module=vac
+launch_opi=/${project}/${module}/$opifile
+
+links="${SCRIPT_DIR}=${project}/${module},\
+GAUGE=/${project}/gauge/,\
+/nowhere=/${project}/sub/dir,\
+relative/dir=/${project}/rel,\
+OTHER=/elsewhere/other"
+
+$CSS_RUN_SCRIPT -o "${launch_opi}" -s -l "$links" "$@"
+"#;
+
+    /// A module `top` with its screens (and launcher) in `top/vacApp/opi/opi`,
+    /// and a module `gauge` it links to.
+    fn module(name: &str, version: Option<&str>) -> (PathBuf, PathBuf, PathBuf) {
+        let root = tmp(name);
+        let top = root.join("top");
+        let opi = top.join("vacApp/opi/opi");
+        let gauge = root.join("gauge/opi");
+        std::fs::create_dir_all(opi.join("common")).unwrap();
+        std::fs::create_dir_all(&gauge).unwrap();
+        if let Some(v) = version {
+            std::fs::create_dir_all(top.join("configure")).unwrap();
+            std::fs::write(top.join("configure/VERSION"), format!("{v}\n")).unwrap();
+        }
+        let script = RUNCSS
+            .replace("GAUGE", &gauge.display().to_string())
+            .replace("OTHER", &root.display().to_string());
+        std::fs::write(opi.join(LAUNCHER), script).unwrap();
+        for f in [
+            opi.join("x.opi"),
+            opi.join("common/c.opi"),
+            gauge.join("g.opi"),
+        ] {
+            std::fs::write(f, "<display/>").unwrap();
+        }
+        (root, opi, gauge)
+    }
+
+    #[test]
+    fn a_launcher_is_a_project() {
+        let (root, opi, gauge) = module("runcss", Some("1-2"));
+        let proj = opi.join("runcss.sh/vac_1-2");
+        let x = proj.join("vac/x.opi");
+        assert_eq!(launcher_path(&opi.join("x.opi")), Some(x.clone()));
+        assert_eq!(
+            launcher_path(&opi.join("common/c.opi")),
+            Some(proj.join("vac/common/c.opi"))
+        );
+        assert_eq!(launcher_path(&gauge.join("g.opi")), None);
+        assert_eq!(launcher_path(&x), None);
+        // Links between the modules resolve through the virtual project.
+        assert_eq!(locate(&x), opi.join("x.opi"));
+        assert_eq!(
+            locate(&proj.join("vac/../gauge/g.opi")),
+            gauge.join("g.opi")
+        );
+        assert_eq!(locate(&proj.join("vac/common/../x.opi")), opi.join("x.opi"));
+        // Only links of this project with a usable name and real folder.
+        let names: Vec<String> = links(&proj).unwrap().into_iter().map(|l| l.0).collect();
+        assert_eq!(names, ["vac", "gauge"]);
+        assert_eq!(
+            links(&opi.join("runcss.sh/elsewhere")).unwrap()[0],
+            ("other".to_string(), root.clone())
+        );
+        assert_eq!(links(&opi.join("runcss.sh/vac_dev")), None);
+        // `-p` takes the module's folder or its launcher.
+        assert_eq!(project_dir(&opi), Some(proj.clone()));
+        assert_eq!(project_dir(&opi.join(LAUNCHER)), Some(proj.clone()));
+        assert_eq!(project_dir(&gauge), None);
+        assert_eq!(
+            virtual_path(&proj, &gauge.join("g.opi")),
+            Some(proj.join("gauge/g.opi"))
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_launcher_without_a_version_is_dev() {
+        let (root, opi, _) = module("runcss-dev", None);
+        assert_eq!(
+            launcher_path(&opi.join("x.opi")),
+            Some(opi.join("runcss.sh/vac_dev/vac/x.opi"))
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_project_file_wins_over_a_launcher() {
+        let (root, opi, _) = module("runcss-project", Some("1-2"));
+        std::fs::write(root.join(".project"), "<projectDescription/>").unwrap();
+        assert_eq!(launcher_path(&opi.join("x.opi")), None);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn expands_shell_variables() {
+        let vars = HashMap::from([("a".to_string(), "1".to_string())]);
+        let e = |t: &str| expand_vars(t, &vars);
+        assert_eq!(e("x${a}y$a/$b.$"), "x1y1/.$");
+        assert_eq!(e("${a"), "${a");
     }
 
     #[test]

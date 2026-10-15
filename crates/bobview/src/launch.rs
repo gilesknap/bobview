@@ -206,14 +206,15 @@ pub fn defaults(file: &Path) -> Option<Macros> {
 }
 
 /// Whether `dir` (as written, or where it really is) is in an Eclipse
-/// project: a folder above it has a `.project`.
+/// project: a folder above it has a `.project`, or it is in the project of
+/// a DLS launcher (`…/runcss.sh/PROJECT`).
 fn in_project(dir: &Path) -> bool {
     let dir = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
     let dir = bob::project::normalize(&dir);
     let real = std::fs::canonicalize(bob::project::locate(&dir)).ok();
     std::iter::once(dir)
         .chain(real)
-        .any(|d| d.ancestors().any(|a| a.join(".project").is_file()))
+        .any(|d| d.ancestors().any(|a| bob::project::links(a).is_some()))
 }
 
 /// The runs of digits in `text`, with a `-N` suffix kept (`02-1`).
@@ -427,6 +428,29 @@ exec "${SRC}/runcss.sh" $OPI -m $MACROS "$@"
         let macros = defaults(&dir.join("srCell04Vacuum.opi")).unwrap();
         assert_eq!(macros.get("pcell"), Some("03"));
         assert!(defaults(&dir.join("srCell05Vacuum.opi")).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_display_beside_runcss_gets_its_launcher_macros() {
+        let dir = tmp("runcss");
+        write_executable(&dir.join("srCellVacuum"), LAUNCHER.as_bytes()).unwrap();
+        // The module's own launcher, which lists the project's links.
+        std::fs::write(
+            dir.join("runcss.sh"),
+            "#!/bin/bash\nproject=vac_${version}\nmodule=vac\nlinks=\"${SCRIPT_DIR}=${project}/${module}\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("srCell04Vacuum.opi"), "<display/>").unwrap();
+        let file = bob::project::launcher_path(&dir.join("srCell04Vacuum.opi")).unwrap();
+        assert_eq!(file, dir.join("runcss.sh/vac_dev/vac/srCell04Vacuum.opi"));
+        let macros = defaults(&file).unwrap();
+        assert_eq!(macros.get("cell"), Some("04"));
+        // Its command actions run launchers beside it, and name displays
+        // through the project.
+        let display = Source::File(file);
+        let (target, _) = command_target(Some(&display), None, "./srCellVacuum 04").unwrap();
+        assert_eq!(target, dir.join("runcss.sh/vac_dev/vac/srCell04Vacuum.opi"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
