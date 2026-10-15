@@ -1057,9 +1057,28 @@ fn run_action(node: &Node, action: &Action, cx: &mut Cx) {
                 None => cx.pvs.subscribe(&name).write(value),
             }
         }
-        Action::OpenWebpage { url, .. } => cx.requests.push(Request::Webpage(node.expand(url))),
+        Action::OpenWebpage { url, .. } => {
+            let url = node.expand(url);
+            if webpage_allowed(node.base.as_ref(), &url) {
+                cx.requests.push(Request::Webpage(url));
+            } else {
+                log::warn!("not opening '{url}': a display from the web may only open web pages");
+            }
+        }
         Action::Unsupported { kind, .. } => log::warn!("action '{kind}' is not supported"),
     }
+}
+
+/// Whether a display at `base` may hand `url` to `xdg-open`. One fetched
+/// over HTTP is not trusted with local files or other URL schemes (which
+/// could open or run something on this machine), only with web pages; and
+/// nothing may pass `xdg-open` an option.
+fn webpage_allowed(base: Option<&Source>, url: &str) -> bool {
+    let url = url.trim();
+    if url.is_empty() || url.starts_with('-') {
+        return false;
+    }
+    !base.is_some_and(Source::is_url) || Source::parse(url).is_url()
 }
 
 fn bool_button(
@@ -1850,6 +1869,20 @@ mod tests {
         assert_eq!(20.0 + 2.0 * radius, TOUCH_TARGET);
         touch_targets(&ctx, false);
         assert_eq!(ctx.global_style().interaction.interact_radius, MOUSE_RADIUS);
+    }
+
+    #[test]
+    fn web_displays_only_open_web_pages() {
+        let web = Source::parse("http://h/opi/a.bob");
+        let file = Source::parse("/opi/a.bob");
+        assert!(webpage_allowed(Some(&web), "https://example.com/x"));
+        assert!(!webpage_allowed(Some(&web), "/home/me/run.sh"));
+        assert!(!webpage_allowed(Some(&web), "file:///etc/passwd"));
+        assert!(!webpage_allowed(Some(&web), "ssh://h"));
+        assert!(webpage_allowed(Some(&file), "/opi/manual.pdf"));
+        assert!(webpage_allowed(None, "https://example.com"));
+        assert!(!webpage_allowed(Some(&file), "--help"));
+        assert!(!webpage_allowed(None, " "));
     }
 
     #[test]
