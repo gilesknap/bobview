@@ -346,9 +346,11 @@ name = "bobview"
 version = "0.2.1"
 dependencies = [
  "bob",
+ "chrono",
  "eframe",
  "egui",
  "js-sys",
+ "libc",
  "log",
  "png",
  "pv",

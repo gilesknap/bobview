@@ -1,7 +1,10 @@
 //! Symbol and picture widgets: SVG or PNG images from files or URLs.
 //!
 //! A symbol shows one of its `symbols`, picked by its PV's value, and may run
-//! its actions when clicked; a picture shows one `file`. Images load on a
+//! its actions when clicked; a picture shows one `file`. A symbol translated
+//! from a DLS EDM symbol in an `.opi` has one image, a horizontal strip of
+//! frames `sub_image_width` wide, and shows the frame its rules pick with
+//! `image_index`. Images load on a
 //! thread and are kept, decoded, for every widget that names them; each
 //! widget keeps its own texture at the size it is drawn.
 
@@ -312,13 +315,14 @@ fn fit(native: Vec2, room: Vec2) -> Vec2 {
 }
 
 /// A rectangle of `size` centred on `center`, turned by `angle` about it:
-/// the whole of `mesh`'s texture, or plain colour on an untextured mesh.
-fn quad(mesh: &mut Mesh, center: Pos2, size: Vec2, angle: f32, tint: Color32) {
+/// the `uv` part (default all) of `mesh`'s texture, or plain colour on an
+/// untextured mesh.
+fn quad(mesh: &mut Mesh, center: Pos2, size: Vec2, angle: f32, tint: Color32, uv: Option<Rect>) {
     let start = mesh.vertices.len();
     let uv = if mesh.texture_id == egui::TextureId::default() {
         Rect::from_min_max(egui::epaint::WHITE_UV, egui::epaint::WHITE_UV)
     } else {
-        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0))
+        uv.unwrap_or(Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)))
     };
     mesh.add_rect_with_uv(Rect::from_center_size(center, size), uv, tint);
     let rot = egui::emath::Rot2::from_angle(angle);
@@ -340,9 +344,34 @@ fn value_index(w: &bob::Widget, s: &PvState) -> Option<i64> {
     }
 }
 
-/// The symbol index to show: the PV's value; without a usable one, the
+/// The width of a strip symbol's frames, if it is one.
+fn strip_width(w: &bob::Widget) -> Option<f32> {
+    w.f64("sub_image_width")
+        .filter(|sw| *sw > 0.0)
+        .map(|sw| sw as f32)
+}
+
+/// The part of a strip `width` pixels wide holding frame `index` of frames
+/// `frame` pixels wide; frame 0 for an index out of range.
+fn strip_uv(width: f32, frame: f32, index: i64) -> Rect {
+    let frames = (width / frame).floor().max(1.0) as i64;
+    let i = if (0..frames).contains(&index) {
+        index
+    } else {
+        0
+    };
+    let u = |n: i64| (n as f32 * frame / width).min(1.0);
+    Rect::from_min_max(Pos2::new(u(i), 0.0), Pos2::new(u(i + 1), 1.0))
+}
+
+/// The symbol index to show: for a strip, the frame its group link picks
+/// or else `image_index`; else the PV's value; without a usable one, the
 /// index last shown, else `initial_index`.
 fn index(node: &Node, s: Option<&PvState>) -> i64 {
+    if strip_width(&node.w).is_some() {
+        return crate::group_link::frame(node, s)
+            .unwrap_or_else(|| node.w.i64("image_index").unwrap_or(0));
+    }
     let value = s
         .filter(|s| s.connected)
         .and_then(|s| value_index(&node.w, s));
@@ -380,14 +409,15 @@ pub fn draw_symbol(
             .map(|c| color(&c))
             .unwrap_or(named("Background"));
         let mut mesh = Mesh::default();
-        quad(&mut mesh, rect.center(), rect.size(), angle, bg);
+        quad(&mut mesh, rect.center(), rect.size(), angle, bg, None);
         painter.add(mesh);
     }
 
     let symbols = w.list("symbols", "symbol");
     let idx = index(node, s);
     node.symbol.index = Some(idx);
-    let file = match usize::try_from(idx) {
+    let strip = strip_width(w).map(|sw| (sw, idx));
+    let file = match usize::try_from(if strip.is_some() { 0 } else { idx }) {
         Ok(i) => symbols
             .get(i)
             .cloned()
@@ -401,6 +431,9 @@ pub fn draw_symbol(
         .text("fallback_symbol")
         .map(|f| node.expand(f))
         .filter(|f| !f.trim().is_empty());
+    // An empty fallback, rather than none, means draw nothing for a state
+    // without an image.
+    let blank = w.text("fallback_symbol").is_some() && fallback.is_none();
 
     // Brighter under the pointer and darker while pressed.
     let tint = match &resp {
@@ -423,12 +456,13 @@ pub fn draw_symbol(
             angle,
             tint,
             glow,
+            strip,
             &painter,
         );
-        if !shown {
+        if !shown && !blank {
             placeholder(&painter, rect, "symbol", z);
         }
-    } else if idx >= 0 {
+    } else if idx >= 0 && !blank {
         placeholder(&painter, rect, "symbol", z);
     }
 
@@ -455,7 +489,7 @@ pub fn draw_symbol(
             .map(|c| color(&c))
             .unwrap_or_else(|| named("INVALID").gamma_multiply(0.5));
         let mut mesh = Mesh::default();
-        quad(&mut mesh, rect.center(), rect.size(), angle, overlay);
+        quad(&mut mesh, rect.center(), rect.size(), angle, overlay, None);
         painter.add(mesh);
     }
 
@@ -479,13 +513,14 @@ pub fn draw_picture(ui: &mut egui::Ui, node: &mut Node, rect: Rect, cx: &Cx) {
     let angle = (node.w.f64("rotation").unwrap_or(0.0) as f32).to_radians();
     let opacity = node.w.f64("opacity").unwrap_or(1.0).clamp(0.0, 1.0) as f32;
     let tint = Color32::WHITE.gamma_multiply(opacity);
-    if !show(ui, node, &[&file], rect, angle, tint, false, &painter) {
+    if !show(ui, node, &[&file], rect, angle, tint, false, None, &painter) {
         placeholder(&painter, rect, "picture", cx.view.zoom);
     }
 }
 
 /// Draw the first of `files` that loads, fitted to `rect` and turned by
-/// `angle`. False if none can be shown; true while one is still loading.
+/// `angle`; of a `strip` (frame width, index), only that frame. False if
+/// none can be shown; true while one is still loading.
 #[allow(clippy::too_many_arguments)]
 fn show(
     ui: &egui::Ui,
@@ -495,6 +530,7 @@ fn show(
     angle: f32,
     tint: Color32,
     glow: bool,
+    strip: Option<(f32, i64)>,
     painter: &egui::Painter,
 ) -> bool {
     let ctx = ui.ctx();
@@ -505,12 +541,24 @@ fn show(
             Some(Err(())) => continue,
             Some(Ok(img)) => img,
         };
-        let size = picture_size(&node.w, img.size(), rect.size(), angle);
-        let Some(handle) = texture(ctx, &mut node.symbol.texture, &source, &img, size) else {
+        let (native, uv) = match strip {
+            Some((frame, index)) => (
+                Vec2::new(frame.min(img.size().x), img.size().y),
+                Some(strip_uv(img.size().x, frame, index)),
+            ),
+            None => (img.size(), None),
+        };
+        let size = picture_size(&node.w, native, rect.size(), angle);
+        let tex_size = match uv {
+            // An SVG strip is rendered whole, so its frame comes out at `size`.
+            Some(uv) => size / Vec2::new(uv.width().max(1e-3), 1.0),
+            None => size,
+        };
+        let Some(handle) = texture(ctx, &mut node.symbol.texture, &source, &img, tex_size) else {
             continue;
         };
         let mut mesh = Mesh::with_texture(handle.id());
-        quad(&mut mesh, rect.center(), size, angle, tint);
+        quad(&mut mesh, rect.center(), size, angle, tint, uv);
         if glow {
             // Drawn again additively (zero alpha): 30% brighter.
             quad(
@@ -519,6 +567,7 @@ fn show(
                 size,
                 angle,
                 Color32::from_rgba_premultiplied(77, 77, 77, 0),
+                uv,
             );
         }
         painter.add(mesh);
@@ -603,6 +652,18 @@ mod tests {
         let arr = Value::LongArray(Arc::from([5, 6, 7]));
         assert_eq!(value_index(&w, &state(arr)), Some(6));
         assert_eq!(value_index(&w, &state(Value::None)), None);
+    }
+
+    #[test]
+    fn strips_show_one_frame() {
+        let uv = strip_uv(102.0, 34.0, 1);
+        assert!((uv.min.x - 1.0 / 3.0).abs() < 1e-6 && (uv.max.x - 2.0 / 3.0).abs() < 1e-6);
+        assert_eq!(strip_uv(102.0, 34.0, 7), strip_uv(102.0, 34.0, 0));
+        assert_eq!(strip_uv(102.0, 34.0, -1).min.x, 0.0);
+        assert_eq!(strip_uv(20.0, 34.0, 0).max.x, 1.0);
+        let w = widget(r#"<widget type="symbol"><sub_image_width>34</sub_image_width></widget>"#);
+        assert_eq!(strip_width(&w), Some(34.0));
+        assert_eq!(strip_width(&widget(r#"<widget type="symbol"/>"#)), None);
     }
 
     #[test]

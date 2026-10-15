@@ -103,6 +103,19 @@
     <y>284</y>
     <width>260</width>
   </widget>
+  <widget type="action_button" version="3.0.0">
+    <name>Opi</name>
+    <actions>
+      <action type="open_display">
+        <file>opi/opi-widgets.opi</file>
+        <target>replace</target>
+        <description>BOY .opi widgets</description>
+      </action>
+    </actions>
+    <x>290</x>
+    <y>284</y>
+    <width>120</width>
+  </widget>
   <widget type="textupdate" version="2.0.0">
     <name>Sum</name>
     <pv_name>bl01t:SUM</pv_name>

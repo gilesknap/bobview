@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<display typeId="org.csstudio.opibuilder.Display" version="1.0.0">
+  <name>BOY widgets</name><width>640</width><height>470</height>
+  <background_color><color name="Canvas" red="200" green="200" blue="200" /></background_color>
+  <macros><include_parent_macros>true</include_parent_macros></macros>
+  <widget typeId="org.csstudio.opibuilder.widgets.Label" version="1.0.0">
+    <name>Title</name><x>0</x><y>0</y><width>640</width><height>30</height>
+    <text>BOY .opi widgets</text><font><fontdata fontName="Liberation Sans" height="20" style="1" pixels="true" /></font><background_color><color red="200" green="220" blue="160" /></background_color><transparent>false</transparent><horizontal_alignment>1</horizontal_alignment><vertical_alignment>1</vertical_alignment>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.Label" version="1.0.0">
+    <name>Label</name><x>10</x><y>40</y><width>120</width><height>18</height>
+    <text>Shapes</text><font><fontdata fontName="Liberation Sans" height="12" style="0" pixels="true" /></font><transparent>true</transparent>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.Rectangle" version="1.0.0">
+    <name>Rectangle</name><x>10</x><y>60</y><width>60</width><height>40</height>
+    <background_color><color name="Canvas" /></background_color><line_color><color name="Black" red="0" green="0" blue="0" /></line_color><line_width>1</line_width><transparent>false</transparent><pv_name>loc://opi_rect(1)</pv_name><rules><rule name="c" prop_id="background_color" out_exp="false"><exp bool_exp="pv0==1"><value><color name="Green LED: On" /></value></exp><pv trig="true">$(pv_name)</pv></rule></rules>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.RoundedRectangle" version="1.0.0">
+    <name>RoundedRectangle</name><x>80</x><y>60</y><width>60</width><height>40</height>
+    <background_color><color red="255" green="200" blue="0" /></background_color><corner_width>16</corner_width><corner_height>16</corner_height><border_style>1</border_style><border_width>2</border_width><border_color><color red="0" green="0" blue="180" /></border_color>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.Ellipse" version="1.0.0">
+    <name>Ellipse</name><x>150</x><y>60</y><width>60</width><height>40</height>
+    <background_color><color red="0" green="160" blue="220" /></background_color><line_color><color red="0" green="0" blue="0" /></line_color><line_width>2</line_width>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.arc" version="1.0.0">
+    <name>arc</name><x>220</x><y>55</y><width>50</width><height>50</height>
+    <foreground_color><color red="200" green="0" blue="0" /></foreground_color><background_color><color red="255" green="180" blue="180" /></background_color><fill>true</fill><line_width>2</line_width><start_angle>30</start_angle><total_angle>270</total_angle>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.polyline" version="1.0.0">
+    <name>polyline</name><x>280</x><y>60</y><width>60</width><height>40</height>
+    <background_color><color red="0" green="128" blue="0" /></background_color><line_width>3</line_width><points><point x="280" y="100" /><point x="310" y="60" /><point x="340" y="100" /></points>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.polygon" version="1.0.0">
+    <name>polygon</name><x>350</x><y>60</y><width>60</width><height>40</height>
+    <background_color><color red="180" green="0" blue="180" /></background_color><line_color><color red="0" green="0" blue="0" /></line_color><line_width>1</line_width><points><point x="350" y="100" /><point x="380" y="60" /><point x="410" y="100" /></points>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.Label" version="1.0.0">
+    <name>Label</name><x>420</x><y>60</y><width>20</width><height>60</height>
+    <text>Rotated</text><font><fontdata fontName="Liberation Sans" height="12" style="0" pixels="true" /></font><transparent>true</transparent><rotation_angle>90.0</rotation_angle><horizontal_alignment>1</horizontal_alignment><vertical_alignment>1</vertical_alignment>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.Label" version="1.0.0">
+    <name>Label</name><x>10</x><y>120</y><width>120</width><height>18</height>
+    <text>Monitors</text><font><fontdata fontName="Liberation Sans" height="12" style="0" pixels="true" /></font><transparent>true</transparent>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.TextUpdate" version="1.0.0">
+    <name>TextUpdate</name><x>10</x><y>140</y><width>100</width><height>22</height>
+    <pv_name>loc://opi_value(3.14159)</pv_name><font><fontdata fontName="Liberation Sans" height="14" style="1" pixels="true" /></font><background_color><color red="64" green="64" blue="64" /></background_color><foreground_color><color red="96" green="255" blue="96" /></foreground_color><format_type>1</format_type><precision>2</precision><precision_from_pv>false</precision_from_pv><border_style>1</border_style><border_width>1</border_width><border_color><color red="0" green="0" blue="0" /></border_color><transparent>false</transparent><horizontal_alignment>1</horizontal_alignment>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.TextUpdate" version="1.0.0">
+    <name>TextUpdate</name><x>120</x><y>140</y><width>100</width><height>22</height>
+    <pv_name></pv_name><text>static text</text><font><fontdata fontName="Liberation Sans" height="12" style="0" pixels="true" /></font>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.TextInput" version="1.0.0">
+    <name>TextInput</name><x>230</x><y>140</y><width>100</width><height>22</height>
+    <pv_name>loc://opi_value(3.14159)</pv_name><font><fontdata fontName="Liberation Sans" height="14" style="0" pixels="true" /></font><background_color><color red="230" green="230" blue="230" /></background_color><format_type>0</format_type><precision_from_pv>true</precision_from_pv>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.LED" version="1.0.0">
+    <name>LED</name><x>340</x><y>140</y><width>22</width><height>22</height>
+    <on_color><color red="0" green="255" blue="0" /></on_color><off_color><color red="0" green="96" blue="0" /></off_color><pv_name>loc://opi_bit(1)</pv_name><square_led>false</square_led><bulb_border_color><color red="150" green="150" blue="150" /></bulb_border_color>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.LED" version="1.0.0">
+    <name>MultiLED</name><x>370</x><y>140</y><width>22</width><height>22</height>
+    <pv_name>loc://opi_state(2)</pv_name><state_count>3</state_count><state_value_0>0</state_value_0><state_label_0>S0</state_label_0><state_color_0><color red="0" green="0" blue="200" /></state_color_0><state_value_1>1</state_value_1><state_label_1>S1</state_label_1><state_color_1><color red="100" green="0" blue="110" /></state_color_1><state_value_2>2</state_value_2><state_label_2>S2</state_label_2><state_color_2><color red="200" green="0" blue="20" /></state_color_2><state_color_fallback><color red="128" green="128" blue="128" /></state_color_fallback><state_label_fallback>?</state_label_fallback>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.bytemonitor" version="1.0.0">
+    <name>bytemonitor</name><x>400</x><y>140</y><width>120</width><height>20</height>
+    <pv_name>loc://opi_bits(5)</pv_name><numBits>8</numBits><startBit>0</startBit><horizontal>true</horizontal><square_led>true</square_led><on_color><color red="0" green="255" blue="0" /></on_color><off_color><color red="0" green="96" blue="0" /></off_color>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.progressbar" version="1.0.0">
+    <name>progressbar</name><x>10</x><y>170</y><width>200</width><height>45</height>
+    <pv_name>loc://opi_value(3.14159)</pv_name><limits_from_pv>false</limits_from_pv><minimum>0</minimum><maximum>10</maximum><fill_color><color red="0" green="196" blue="0" /></fill_color><color_fillbackground><color red="102" green="102" blue="102" /></color_fillbackground><font><fontdata fontName="Liberation Sans" height="12" style="0" pixels="true" /></font>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.meter" version="1.0.0">
+    <name>meter</name><x>230</x><y>170</y><width>160</width><height>45</height>
+    <pv_name>loc://opi_value(3.14159)</pv_name><limits_from_pv>false</limits_from_pv><minimum>0</minimum><maximum>10</maximum><scale_font><fontdata fontName="Liberation Sans" height="10" style="0" pixels="true" /></scale_font>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.Label" version="1.0.0">
+    <name>Label</name><x>10</x><y>230</y><width>120</width><height>18</height>
+    <text>Symbols</text><font><fontdata fontName="Liberation Sans" height="12" style="0" pixels="true" /></font><transparent>true</transparent>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.edm.symbolwidget" version="1.0.0">
+    <name>Strip</name><x>10</x><y>250</y><width>20</width><height>20</height>
+    <image_file>strip-symbol-20.png</image_file><sub_image_width>20.0</sub_image_width><image_index>0</image_index><pv_name>loc://opi_state(2)</pv_name><rules><rule name="s" prop_id="image_index" out_exp="true"><exp bool_exp="pvSev0==-1"><value>0</value></exp><exp bool_exp="pv0&gt;=0"><value>pv0</value></exp><pv trig="true">$(pv_name)</pv></rule></rules><actions hook="true" hook_all="false"><action type="OPEN_DISPLAY"><path>opi-embed.opi</path><macros><include_parent_macros>true</include_parent_macros></macros><mode>8</mode><description>Embed</description></action></actions>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.ImageBoolIndicator" version="1.0.0">
+    <name>ImageBoolIndicator</name><x>40</x><y>250</y><width>40</width><height>20</height>
+    <pv_name>loc://opi_bit(1)</pv_name><off_image>../symbols/lamp-off.svg</off_image><on_image>../symbols/lamp-fast.svg</on_image><stretch_to_fit>false</stretch_to_fit>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.Image" version="1.0.0">
+    <name>Image</name><x>90</x><y>250</y><width>40</width><height>20</height>
+    <image_file>strip-symbol-20.png</image_file><stretch_to_fit>true</stretch_to_fit>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.Label" version="1.0.0">
+    <name>Label</name><x>10</x><y>280</y><width>120</width><height>18</height>
+    <text>Controls</text><font><fontdata fontName="Liberation Sans" height="12" style="0" pixels="true" /></font><transparent>true</transparent>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.ActionButton" version="1.0.0">
+    <name>ActionButton</name><x>10</x><y>300</y><width>120</width><height>25</height>
+    <text>Open embed</text><font><fontdata fontName="Liberation Sans" height="14" style="0" pixels="true" /></font><background_color><color red="205" green="205" blue="205" /></background_color><push_action_index>0</push_action_index><actions hook="false" hook_all="false"><action type="OPEN_DISPLAY"><path>opi-embed.opi</path><macros><include_parent_macros>true</include_parent_macros><P>X</P></macros><mode>8</mode><description>Embed</description></action></actions>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.MenuButton" version="1.0.0">
+    <name>MenuButton</name><x>140</x><y>300</y><width>100</width><height>25</height>
+    <label>Menu</label><actions_from_pv>false</actions_from_pv><font><fontdata fontName="Liberation Sans" height="14" style="0" pixels="true" /></font><actions hook="false" hook_all="false"><action type="OPEN_DISPLAY"><path>opi-embed.opi</path><macros><include_parent_macros>true</include_parent_macros></macros><mode>8</mode><description>Embed</description></action><action type="OPEN_DISPLAY"><path>../index.bob</path><macros><include_parent_macros>true</include_parent_macros></macros><mode>8</mode><description>Index</description></action><action type="EXECUTE_CMD"><command>echo hi</command><command_directory>$(opi.dir)</command_directory><description>Command</description></action></actions>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.MenuButton" version="1.0.0">
+    <name>Combo</name><x>250</x><y>300</y><width>100</width><height>25</height>
+    <pv_name>loc://opi_enum&lt;VEnum&gt;(0, "A", "B")</pv_name><actions_from_pv>true</actions_from_pv><font><fontdata fontName="Liberation Sans" height="14" style="0" pixels="true" /></font>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.choiceButton" version="1.0.0">
+    <name>choiceButton</name><x>360</x><y>300</y><width>120</width><height>25</height>
+    <pv_name>loc://opi_choice("Start")</pv_name><items_from_pv>false</items_from_pv><items><s>Start</s><s>Stop</s></items><font><fontdata fontName="Liberation Sans" height="12" style="0" pixels="true" /></font>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.BoolButton" version="1.0.0">
+    <name>BoolButton</name><x>490</x><y>300</y><width>100</width><height>25</height>
+    <pv_name>loc://opi_bit(1)</pv_name><on_label>On</on_label><off_label>Off</off_label><toggle_button>true</toggle_button><font><fontdata fontName="Liberation Sans" height="12" style="0" pixels="true" /></font>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.scaledslider" version="1.0.0">
+    <name>scaledslider</name><x>10</x><y>335</y><width>200</width><height>45</height>
+    <pv_name>loc://opi_value(3.14159)</pv_name><limits_from_pv>false</limits_from_pv><minimum>0</minimum><maximum>10</maximum>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.groupingContainer" version="1.0.0">
+    <name>Group box</name><x>10</x><y>390</y><width>300</width><height>70</height>
+    <border_style>13</border_style><border_color><color red="0" green="0" blue="0" /></border_color><background_color><color red="220" green="220" blue="220" /></background_color><transparent>false</transparent><font><fontdata fontName="Liberation Sans" height="12" style="0" pixels="true" /></font><macros><include_parent_macros>true</include_parent_macros><G>in a group</G></macros>  <widget typeId="org.csstudio.opibuilder.widgets.Label" version="1.0.0">
+      <name>Label</name><x>5</x><y>5</y><width>150</width><height>18</height>
+      <text>$(G)</text><font><fontdata fontName="Liberation Sans" height="12" style="0" pixels="true" /></font><transparent>true</transparent>
+    </widget>
+  
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.linkingContainer" version="1.0.0">
+    <name>Linked</name><x>320</x><y>390</y><width>300</width><height>70</height>
+    <opi_file>opi-embedded.opi</opi_file><group_name>Part</group_name><resize_behaviour>1</resize_behaviour><border_style>12</border_style><macros><include_parent_macros>true</include_parent_macros><M>from the parent</M></macros><background_color><color red="180" green="200" blue="240" /></background_color><font><fontdata fontName="Liberation Sans" height="12" style="0" pixels="true" /></font>
+  </widget>
+</display>

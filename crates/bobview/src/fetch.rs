@@ -31,7 +31,13 @@ static CACHE: LazyLock<Mutex<HashMap<String, Fetched>>> = LazyLock::new(Default:
 pub fn load(source: &Source) -> Result<Display, Error> {
     match source {
         #[cfg(not(target_arch = "wasm32"))]
-        Source::File(path) => Display::load(path),
+        Source::File(path) => match native::bob_instead(path) {
+            Some(bob) => {
+                log::info!("{}: using {}", path.display(), bob.display());
+                Display::load(&bob)
+            }
+            None => Display::load(path),
+        },
         #[cfg(target_arch = "wasm32")]
         Source::File(path) => Err(no_files(path)),
         Source::Url(url) => {
@@ -70,6 +76,7 @@ fn no_files(path: &std::path::Path) -> Error {
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
     use std::io::Read;
+    use std::path::{Path, PathBuf};
     use std::sync::LazyLock;
     use std::time::Duration;
 
@@ -93,7 +100,7 @@ mod native {
         match source {
             Source::File(path) => {
                 let mut data = Vec::new();
-                std::fs::File::open(path)
+                std::fs::File::open(bob::project::locate(path))
                     .and_then(|f| f.take(MAX_SIZE + 1).read_to_end(&mut data))
                     .map_err(|e| Error::Io(path.clone(), e))?;
                 if data.len() as u64 > MAX_SIZE {
@@ -116,6 +123,18 @@ mod native {
                     .map_err(|e| fail(describe(e)))
             }
         }
+    }
+
+    /// The `.bob` next to an `.opi` file, which Phoebus opens in its place.
+    pub(super) fn bob_instead(path: &Path) -> Option<PathBuf> {
+        if !path
+            .extension()
+            .is_some_and(|x| x.eq_ignore_ascii_case("opi"))
+        {
+            return None;
+        }
+        let bob = path.with_extension("bob");
+        bob::project::locate(&bob).exists().then_some(bob)
     }
 
     pub(super) fn get(url: &str) -> Result<Fetched, Error> {

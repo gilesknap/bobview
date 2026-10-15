@@ -1,11 +1,14 @@
-//! bobview: a lean viewer for Phoebus `.bob` displays.
+//! bobview: a lean viewer for Phoebus `.bob` displays (and CS-Studio BOY `.opi`).
 
 mod app;
 mod axis;
 mod chrome;
 mod colormaps;
 mod fetch;
+mod group_link;
 mod image;
+#[cfg(not(target_arch = "wasm32"))]
+mod launch;
 mod meter;
 mod plot;
 mod pvmenu;
@@ -15,6 +18,7 @@ mod screen;
 mod snapshot;
 mod style;
 mod symbol;
+mod trend;
 mod widgets;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -26,10 +30,13 @@ use eframe::egui;
 
 #[cfg(not(target_arch = "wasm32"))]
 const USAGE: &str = "\
-usage: bobview [options] [display.bob | http(s)://host/display.bob]
+usage: bobview [options] [display.bob | display.opi | http(s)://host/display.bob]
 
 options:
   -m, --macros P=X,R=Y   macros for the display
+  -p, --project DIR      open a display file through the linked folders of the
+                         Eclipse project in DIR (its .project), so that links
+                         between the project's modules work
   -z, --zoom FACTOR      fixed zoom instead of fit-to-window
   -f, --fullscreen       start full screen
   -k, --keypad           edit values with an on-screen keypad (automatic on touch)
@@ -45,13 +52,16 @@ options:
   --wait SECONDS         time for PVs to connect before a snapshot (default 2)
   --click X,Y            click here before the snapshot (repeatable)
   --right-click X,Y      right-click here before the snapshot (repeatable)
+  --settle SECONDS       time after the last click before the snapshot (default 1)
   -h, --help             show this help
   -V, --version          show the version
 
 With no display, bobview opens index.bob from the bundled displays
 (~/.local/share/bobview/displays) when present, else a file chooser.
 A display may also be an http:// or https:// URL; files it names are
-fetched relative to it.
+fetched relative to it. CS-Studio BOY .opi displays are translated as
+Phoebus does; a path through an Eclipse project's linked folders (such as
+project/module/screen.opi) finds the linked files.
 PVs without a prefix use Channel Access; EPICS_CA_ADDR_LIST and
 EPICS_CA_NAME_SERVERS select the IOCs. Set BOBVIEW_LOG=debug for more output.";
 
@@ -67,12 +77,15 @@ fn main() -> eframe::Result {
     let mut scale_factor = 1.0;
     let mut ui_scale = None;
     let mut wait = 2.0;
+    let mut settle = 1.0;
     let mut clicks = Vec::new();
     let mut keypad = false;
+    let mut project = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-m" | "--macros" => macros = parse_macros(&args.next().unwrap_or_default()),
+            "-p" | "--project" => project = args.next().map(PathBuf::from),
             "-z" | "--zoom" => zoom = args.next().and_then(|z| z.parse().ok()),
             "-f" | "--fullscreen" => fullscreen = true,
             "-k" | "--keypad" => keypad = true,
@@ -115,7 +128,8 @@ fn main() -> eframe::Result {
                 }
                 None => {}
             },
-            "--wait" => wait = args.next().and_then(|w| w.parse().ok()).unwrap_or(wait),
+            "--wait" => wait = seconds(args.next()).unwrap_or(wait),
+            "--settle" => settle = seconds(args.next()).unwrap_or(settle),
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return Ok(());
@@ -128,6 +142,27 @@ fn main() -> eframe::Result {
         }
     }
     let ui_scale = ui_scale.unwrap_or_else(chrome::UiScale::from_env);
+    if let (Some(dir), Some(Source::File(path))) = (&project, &file) {
+        match bob::project::virtual_path(dir, path) {
+            Some(p) => file = Some(Source::File(p)),
+            None => {
+                eprintln!(
+                    "{} is not in a linked folder of {}",
+                    path.display(),
+                    dir.display()
+                );
+                std::process::exit(2);
+            }
+        }
+    }
+    // An .opi opened directly (in an Eclipse project) gets the macros its
+    // DLS launcher script would give it; those given here override them.
+    if let Some(Source::File(path)) = &file
+        && path.extension().is_some_and(|x| x == "opi")
+        && let Some(defaults) = launch::defaults(path)
+    {
+        macros = defaults.with(&macros);
+    }
     let start = file
         .or_else(|| default_display().map(Source::File))
         .map(|source| app::Location { source, macros });
@@ -144,6 +179,7 @@ fn main() -> eframe::Result {
             zoom,
             wait: std::time::Duration::from_secs_f64(wait),
             clicks,
+            settle: std::time::Duration::from_secs_f64(settle),
             keypad,
         };
         if let Err(e) = snapshot::run(start, &opts, &out) {
@@ -170,6 +206,12 @@ fn main() -> eframe::Result {
             Ok(Box::new(app))
         }),
     )
+}
+
+/// A time in seconds: a number, not negative (nor too big for a Duration).
+#[cfg(not(target_arch = "wasm32"))]
+fn seconds(text: Option<String>) -> Option<f64> {
+    text?.parse::<f64>().ok().filter(|s| (0.0..1e9).contains(s))
 }
 
 /// Parse `P=X,R=Y` into macros; `\,` and `\\` in a value stand for `,`
@@ -335,5 +377,14 @@ mod tests {
         let m = super::parse_macros(r"D=C:\\dir\\,E=a\b");
         assert_eq!(m.get("D"), Some(r"C:\dir\"));
         assert_eq!(m.get("E"), Some(r"a\b"));
+    }
+
+    #[test]
+    fn seconds_are_not_negative() {
+        let s = |t: &str| super::seconds(Some(t.into()));
+        assert_eq!(s("1.5"), Some(1.5));
+        for bad in ["-1", "NaN", "inf", "x"] {
+            assert_eq!(s(bad), None);
+        }
     }
 }
