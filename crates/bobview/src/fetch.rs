@@ -59,8 +59,12 @@ pub fn bytes(source: &Source) -> Result<Vec<u8>, Error> {
         Source::File(path) => {
             let mut data = Vec::new();
             std::fs::File::open(path)
-                .and_then(|f| f.take(MAX_SIZE).read_to_end(&mut data))
+                .and_then(|f| f.take(MAX_SIZE + 1).read_to_end(&mut data))
                 .map_err(|e| Error::Io(path.clone(), e))?;
+            if data.len() as u64 > MAX_SIZE {
+                let why = format!("larger than {} MiB", MAX_SIZE >> 20);
+                return Err(Error::Io(path.clone(), std::io::Error::other(why)));
+            }
             Ok(data)
         }
         Source::Url(url) => {

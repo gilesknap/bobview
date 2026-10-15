@@ -68,10 +68,14 @@ pub fn run(start: Location, opts: &Options, out: &Path) -> Result<(), String> {
         .collect();
     let mut settle_until = None;
 
+    // Images that have not loaded this long after `wait` are left out, so a
+    // file that never finishes reading cannot hold the snapshot up.
+    let images_loading =
+        || crate::symbol::loading() && begin.elapsed() < opts.wait + Duration::from_secs(20);
+
     // Run frames until PVs have had time to connect and clicks have settled.
     let output = loop {
-        let started =
-            begin.elapsed() >= opts.wait && !app.is_loading() && !crate::symbol::loading();
+        let started = begin.elapsed() >= opts.wait && !app.is_loading() && !images_loading();
         let events = if started {
             pending.pop_front().unwrap_or_default()
         } else {
@@ -115,7 +119,7 @@ pub fn run(start: Location, opts: &Options, out: &Path) -> Result<(), String> {
                         Duration::from_secs(1)
                     }
             });
-            if begin.elapsed() >= until && !app.is_loading() && !crate::symbol::loading() {
+            if begin.elapsed() >= until && !app.is_loading() && !images_loading() {
                 break output;
             }
         }

@@ -46,14 +46,53 @@ enum Entry {
     Failed,
 }
 
-static IMAGES: LazyLock<Mutex<HashMap<Source, Entry>>> = LazyLock::new(Default::default);
+/// Images by where they come from, and the count of [`forget`] calls, so a
+/// load started before a reload does not store what it read.
+struct Images {
+    entries: HashMap<Source, Entry>,
+    generation: u64,
+}
 
-/// Drop every loaded image, so they are read again on a reload.
+static IMAGES: LazyLock<Mutex<Images>> = LazyLock::new(|| {
+    Mutex::new(Images {
+        entries: HashMap::new(),
+        generation: 0,
+    })
+});
+
+/// Threads that load images; more images than this wait their turn.
+const LOADERS: usize = 4;
+
+/// The queue the loader threads take images from, started on first use.
+static QUEUE: LazyLock<Mutex<std::sync::mpsc::Sender<Job>>> = LazyLock::new(|| {
+    let (tx, rx) = std::sync::mpsc::channel::<Job>();
+    let rx = Arc::new(Mutex::new(rx));
+    for _ in 0..LOADERS {
+        let rx = rx.clone();
+        std::thread::spawn(move || {
+            loop {
+                let job = rx.lock().unwrap().recv();
+                match job {
+                    Ok(job) => load(job),
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+    Mutex::new(tx)
+});
+
+struct Job {
+    source: Source,
+    generation: u64,
+    ctx: egui::Context,
+}
+
+/// Drop every image, loaded or loading, so they are read again on a reload.
 pub fn forget() {
-    IMAGES
-        .lock()
-        .unwrap()
-        .retain(|_, e| matches!(e, Entry::Loading));
+    let mut images = IMAGES.lock().unwrap();
+    images.entries.clear();
+    images.generation += 1;
 }
 
 /// Whether any image is still loading.
@@ -61,6 +100,7 @@ pub fn loading() -> bool {
     IMAGES
         .lock()
         .unwrap()
+        .entries
         .values()
         .any(|e| matches!(e, Entry::Loading))
 }
@@ -69,34 +109,47 @@ pub fn loading() -> bool {
 /// be, and `None` while it loads (a repaint follows when it has).
 fn image(ctx: &egui::Context, source: &Source) -> Option<Result<Image, ()>> {
     let mut images = IMAGES.lock().unwrap();
-    match images.get(source) {
+    match images.entries.get(source) {
         Some(Entry::Ready(img)) => return Some(Ok(img.clone())),
         Some(Entry::Failed) => return Some(Err(())),
         Some(Entry::Loading) => return None,
         None => {}
     }
-    images.insert(source.clone(), Entry::Loading);
-    let (ctx, source) = (ctx.clone(), source.clone());
-    std::thread::spawn(move || {
-        // A decoder that panics on a bad file must not leave it loading.
-        let load = || match crate::fetch::bytes(&source).map_err(|e| e.to_string()) {
-            Ok(data) => match decode(&source, &data) {
-                Ok(img) => Entry::Ready(img),
-                Err(e) => {
-                    log::warn!("cannot show {}: {e}", describe(&source));
-                    Entry::Failed
-                }
-            },
+    images.entries.insert(source.clone(), Entry::Loading);
+    let job = Job {
+        source: source.clone(),
+        generation: images.generation,
+        ctx: ctx.clone(),
+    };
+    drop(images);
+    let _ = QUEUE.lock().unwrap().send(job);
+    None
+}
+
+/// Read and decode one image on a loader thread.
+fn load(job: Job) {
+    let source = &job.source;
+    // A decoder that panics on a bad file must not leave it loading.
+    let read = || match crate::fetch::bytes(source).map_err(|e| e.to_string()) {
+        Ok(data) => match decode(source, &data) {
+            Ok(img) => Entry::Ready(img),
             Err(e) => {
-                log::warn!("{e}");
+                log::warn!("cannot show {}: {e}", describe(source));
                 Entry::Failed
             }
-        };
-        let entry = std::panic::catch_unwind(load).unwrap_or(Entry::Failed);
-        IMAGES.lock().unwrap().insert(source, entry);
-        ctx.request_repaint();
-    });
-    None
+        },
+        Err(e) => {
+            log::warn!("{e}");
+            Entry::Failed
+        }
+    };
+    let entry = std::panic::catch_unwind(read).unwrap_or(Entry::Failed);
+    let mut images = IMAGES.lock().unwrap();
+    if images.generation == job.generation {
+        images.entries.insert(job.source, entry);
+    }
+    drop(images);
+    job.ctx.request_repaint();
 }
 
 fn describe(source: &Source) -> String {
@@ -117,7 +170,19 @@ fn decode(source: &Source, data: &[u8]) -> Result<Image, String> {
     if !svg {
         return Err("only SVG and PNG images are supported".into());
     }
-    let tree = usvg::Tree::from_data(data, &usvg::Options::default()).map_err(|e| e.to_string())?;
+    // An SVG may embed images as data: URLs, but never names files or URLs:
+    // a display from the web is not trusted with local files.
+    let options = usvg::Options {
+        image_href_resolver: usvg::ImageHrefResolver {
+            resolve_string: Box::new(|href, _| {
+                log::warn!("SVG image '{href}' is not shown: only embedded images are");
+                None
+            }),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let tree = usvg::Tree::from_data(data, &options).map_err(|e| e.to_string())?;
     Ok(Image::Svg(Arc::new(tree)))
 }
 
@@ -546,5 +611,17 @@ mod tests {
         assert_eq!(img.size, [2, 1]);
         assert_eq!(img.pixels[0], Color32::BLUE);
         assert!(decode(&Source::parse("c.gif"), b"GIF89a").is_err());
+
+        // An SVG naming a file draws nothing for it, rather than reading it.
+        let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/displays/symbols/stripe.png");
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><image href="{}" width="4" height="4"/></svg>"#,
+            here.canonicalize().unwrap().display()
+        );
+        let Ok(Image::Svg(tree)) = decode(&src, svg.as_bytes()) else {
+            panic!("not an SVG")
+        };
+        assert!(!tree.root().has_children());
     }
 }

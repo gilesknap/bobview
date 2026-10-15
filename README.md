@@ -86,16 +86,19 @@ name or value, or open the PV details. On a touch screen, pinch to zoom.
 | rectangle, ellipse, arc, polyline, polygon | |
 | group, tabs, embedded, navtabs | macros pass down; embedded resize modes 0–2 |
 | image | PVA NTNDArray (uncompressed, mono or RGB1) or a CA array shaped by `data_width`/`data_height`; Phoebus colour maps, autoscale or fixed range, `unsigned`, colour bar with a scale; toolbar to zoom, pan and place a crosshair that reads out the pixel value |
-| symbol, picture | SVG or PNG files, local or fetched next to the display; the PV value picks the symbol (`initial_index`, `array_index`, `fallback_symbol`), rotation, `preserve_ratio`/`stretch_image`, opacity, overlay for a disconnected PV; `run_actions_on_mouse_click` runs the symbol's actions when clicked |
+| symbol, picture | SVG or PNG files, local or fetched next to the display; the PV value picks the symbol (`initial_index`, `array_index`, `fallback_symbol`), rotation, `preserve_ratio`/`stretch_image`, picture `opacity`, overlay for a disconnected PV; `run_actions_on_mouse_click` runs the symbol's actions when clicked. Images inside an SVG are drawn only when embedded (`data:` URLs) |
 
 Also: macros (`$(X)`, `${X}`, defaults, widget properties such as
-`$(pv_name)`), rules (expressions over `pv0`, `pvStr0`, `pvSev0` … that set any
+`$(pv_name)`, and `$(actions)` in a tooltip), rules (expressions over `pv0`, `pvStr0`, `pvSev0` … that set any
 property, or one item of a list such as `symbols[0]`), alarm borders and dashed borders for disconnected PVs, back and
 forward navigation, `loc://` and `sim://` PVs.
 
 Not yet: compressed (codec) images, image axes, ROIs and cursor PVs, the XY plot
 `markers`, error bars and toolbar, strip chart widgets (drawn as placeholders), GIF and JPEG
-images (symbols and pictures show their fallback or a placeholder).
+images (symbols and pictures show their fallback or a placeholder), text inside
+SVG images, and scripts: an `execute` action logs that it is not supported,
+except the "toggle the widget's PV" script that techui-builder puts in
+synoptic symbols, which bobview recognises and runs itself.
 
 ## Build
 

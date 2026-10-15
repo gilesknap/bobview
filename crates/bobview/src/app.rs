@@ -30,6 +30,8 @@ pub struct BobApp {
     fit: bool,
     error: Option<String>,
     show_open: bool,
+    /// The display being loaded is the current one again: keep the window size.
+    reloading: bool,
     open_path: String,
     /// Use the on-screen keypad for text entries (switched on by the first touch).
     keypad_mode: bool,
@@ -75,6 +77,7 @@ impl BobApp {
             fit: zoom.is_none(),
             error: None,
             show_open: start.is_none(),
+            reloading: false,
             keypad_mode: false,
             keypad: None,
             details: None,
@@ -126,13 +129,17 @@ impl BobApp {
             Ok(screen) => {
                 self.screen = Some(screen);
                 self.error = None;
+                // A reload keeps the size the user gave the window.
+                if !self.reloading {
+                    self.chrome.display_changed();
+                }
             }
             Err(e) => {
                 log::error!("{e}");
                 self.error = Some(e.to_string());
             }
         }
-        self.chrome.display_changed();
+        self.reloading = false;
     }
 
     /// Whether a display is still being fetched.
@@ -295,6 +302,7 @@ impl BobApp {
         if let Some(cur) = self.current.clone() {
             crate::fetch::forget();
             crate::symbol::forget();
+            self.reloading = true;
             self.show(cur);
         }
     }

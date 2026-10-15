@@ -276,7 +276,11 @@ fn tooltip(node: &Node, s: Option<&PvState>) -> String {
             // `$(actions)` lists what the widget's actions do, as in Phoebus.
             let actions = node.w.actions();
             let t = if t.contains("$(actions)") {
-                let list: Vec<&str> = actions.iter().map(|a| a.description()).collect();
+                let list: Vec<&str> = actions
+                    .iter()
+                    .map(|a| a.description())
+                    .filter(|d| !d.trim().is_empty())
+                    .collect();
                 t.replace("$(actions)", &list.join("\n"))
             } else {
                 t.to_string()
@@ -1092,8 +1096,10 @@ pub(crate) fn run_action(node: &Node, action: &Action, cx: &mut Cx) {
         } => {
             if is_toggle_script(text) {
                 if let Some(s) = node.state() {
-                    let on = s.value.as_f64().is_some_and(|v| v != 0.0);
-                    write(node, if on { "0" } else { "1" });
+                    // As `(PVUtil.getDouble(pv) == 0) ? 1 : 0`: a value
+                    // that is not a number is NaN there, so it writes 0.
+                    let zero = s.value.as_f64() == Some(0.0);
+                    write(node, if zero { "1" } else { "0" });
                 }
             } else {
                 log::warn!("script '{description}' is not supported: bobview runs no scripts");
