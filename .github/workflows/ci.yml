@@ -17,7 +17,8 @@ jobs:
       - name: Check the tag matches the crate version
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml)
+          # the [workspace.package] version, ignoring any other version keys
+          version=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml)
           if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
             echo "::error::tag ${GITHUB_REF_NAME} does not match version ${version} in Cargo.toml"
             exit 1
