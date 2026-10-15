@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
@@ -37,7 +38,13 @@ static AGENT: LazyLock<ureq::Agent> = LazyLock::new(|| {
 /// Read and parse the display at `source`.
 pub fn load(source: &Source) -> Result<Display, Error> {
     match source {
-        Source::File(path) => Display::load(path),
+        Source::File(path) => match bob_instead(path) {
+            Some(bob) => {
+                log::info!("{}: using {}", path.display(), bob.display());
+                Display::load(&bob)
+            }
+            None => Display::load(path),
+        },
         Source::Url(url) => {
             let fetched = get(url)?;
             let mut display = Display::parse(&fetched.text)?;
@@ -58,7 +65,7 @@ pub fn bytes(source: &Source) -> Result<Vec<u8>, Error> {
     match source {
         Source::File(path) => {
             let mut data = Vec::new();
-            std::fs::File::open(path)
+            std::fs::File::open(bob::project::locate(path))
                 .and_then(|f| f.take(MAX_SIZE + 1).read_to_end(&mut data))
                 .map_err(|e| Error::Io(path.clone(), e))?;
             if data.len() as u64 > MAX_SIZE {
@@ -81,6 +88,18 @@ pub fn bytes(source: &Source) -> Result<Vec<u8>, Error> {
                 .map_err(|e| fail(describe(e)))
         }
     }
+}
+
+/// The `.bob` next to an `.opi` file, which Phoebus opens in its place.
+fn bob_instead(path: &Path) -> Option<PathBuf> {
+    if !path
+        .extension()
+        .is_some_and(|x| x.eq_ignore_ascii_case("opi"))
+    {
+        return None;
+    }
+    let bob = path.with_extension("bob");
+    bob::project::locate(&bob).exists().then_some(bob)
 }
 
 fn get(url: &str) -> Result<Fetched, Error> {

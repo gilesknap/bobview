@@ -1,4 +1,4 @@
-//! bobview: a lean viewer for Phoebus `.bob` displays.
+//! bobview: a lean viewer for Phoebus `.bob` displays (and CS-Studio BOY `.opi`).
 
 mod app;
 mod axis;
@@ -6,6 +6,7 @@ mod chrome;
 mod colormaps;
 mod fetch;
 mod image;
+mod launch;
 mod meter;
 mod plot;
 mod pvmenu;
@@ -22,10 +23,13 @@ use bob::{Macros, Source};
 use eframe::egui;
 
 const USAGE: &str = "\
-usage: bobview [options] [display.bob | http(s)://host/display.bob]
+usage: bobview [options] [display.bob | display.opi | http(s)://host/display.bob]
 
 options:
   -m, --macros P=X,R=Y   macros for the display
+  -p, --project DIR      open a display file through the linked folders of the
+                         Eclipse project in DIR (its .project), so that links
+                         between the project's modules work
   -z, --zoom FACTOR      fixed zoom instead of fit-to-window
   -f, --fullscreen       start full screen
   -k, --keypad           edit values with an on-screen keypad (automatic on touch)
@@ -47,7 +51,9 @@ options:
 With no display, bobview opens index.bob from the bundled displays
 (~/.local/share/bobview/displays) when present, else a file chooser.
 A display may also be an http:// or https:// URL; files it names are
-fetched relative to it.
+fetched relative to it. CS-Studio BOY .opi displays are translated as
+Phoebus does; a path through an Eclipse project's linked folders (such as
+project/module/screen.opi) finds the linked files.
 PVs without a prefix use Channel Access; EPICS_CA_ADDR_LIST and
 EPICS_CA_NAME_SERVERS select the IOCs. Set BOBVIEW_LOG=debug for more output.";
 
@@ -64,10 +70,12 @@ fn main() -> eframe::Result {
     let mut wait = 2.0;
     let mut clicks = Vec::new();
     let mut keypad = false;
+    let mut project = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-m" | "--macros" => macros = parse_macros(&args.next().unwrap_or_default()),
+            "-p" | "--project" => project = args.next().map(PathBuf::from),
             "-z" | "--zoom" => zoom = args.next().and_then(|z| z.parse().ok()),
             "-f" | "--fullscreen" => fullscreen = true,
             "-k" | "--keypad" => keypad = true,
@@ -123,6 +131,27 @@ fn main() -> eframe::Result {
         }
     }
     let ui_scale = ui_scale.unwrap_or_else(chrome::UiScale::from_env);
+    if let (Some(dir), Some(Source::File(path))) = (&project, &file) {
+        match bob::project::virtual_path(dir, path) {
+            Some(p) => file = Some(Source::File(p)),
+            None => {
+                eprintln!(
+                    "{} is not in a linked folder of {}",
+                    path.display(),
+                    dir.display()
+                );
+                std::process::exit(2);
+            }
+        }
+    }
+    // An .opi opened directly gets the macros its DLS launcher script would
+    // give it; those given here override them.
+    if let Some(Source::File(path)) = &file
+        && path.extension().is_some_and(|x| x == "opi")
+        && let Some(defaults) = launch::defaults(path)
+    {
+        macros = defaults.with(&macros);
+    }
     let start = file
         .or_else(|| default_display().map(Source::File))
         .map(|source| app::Location { source, macros });

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<display typeId="org.csstudio.opibuilder.Display" version="1.0.0">
+  <name>BOY embedding</name><width>400</width><height>150</height>
+  <background_color><color red="230" green="230" blue="230" /></background_color>
+  <macros><M>top</M></macros>
+  <widget typeId="org.csstudio.opibuilder.widgets.Label" version="1.0.0">
+    <name>Label</name><x>10</x><y>10</y><width>300</width><height>20</height>
+    <text>Embedded in a linking container: $(M)</text><font><fontdata fontName="Liberation Sans" height="14" style="0" pixels="true" /></font>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.linkingContainer" version="1.0.0">
+    <name>Whole</name><x>10</x><y>40</y><width>200</width><height>60</height>
+    <opi_file>opi-embedded.opi</opi_file><resize_behaviour>0</resize_behaviour><border_style>1</border_style><border_width>1</border_width><macros><include_parent_macros>true</include_parent_macros><M>resized</M></macros>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.ActionButton" version="1.0.0">
+    <name>ActionButton</name><x>10</x><y>110</y><width>120</width><height>25</height>
+    <text>Back to widgets</text><font><fontdata fontName="Liberation Sans" height="12" style="0" pixels="true" /></font><actions><action type="OPEN_DISPLAY"><path>opi-widgets.opi</path><macros><include_parent_macros>true</include_parent_macros></macros><mode>0</mode><description>Widgets</description></action></actions>
+  </widget>
+</display>

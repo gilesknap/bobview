@@ -40,6 +40,8 @@ pub struct BobApp {
     /// The display at `current`, being fetched and built on a thread.
     loading: Option<std::sync::mpsc::Receiver<Result<Screen, bob::Error>>>,
     chrome: Chrome,
+    /// The window title last set, the shown display's title.
+    window_title: String,
 }
 
 struct Keypad {
@@ -83,6 +85,7 @@ impl BobApp {
             details: None,
             loading: None,
             chrome: Chrome::new(ui_scale),
+            window_title: String::new(),
             open_path: start
                 .as_ref()
                 .map(|l| l.source.to_string())
@@ -283,8 +286,8 @@ impl BobApp {
                 }
             }
             if let Some(s) = &self.screen {
-                ui.add(egui::Label::new(egui::RichText::new(&s.display.name).strong()).truncate())
-                    .on_hover_text(&s.display.name);
+                ui.add(egui::Label::new(egui::RichText::new(&s.title).strong()).truncate())
+                    .on_hover_text(&s.title);
             }
         });
     }
@@ -325,7 +328,7 @@ impl BobApp {
         // Nothing to list for a URL (an empty path lists nothing).
         let dir = match Source::parse(&self.open_path) {
             Source::Url(_) => PathBuf::new(),
-            Source::File(path) if path.is_dir() => path,
+            Source::File(path) if bob::project::locate(&path).is_dir() => path,
             Source::File(path) => path
                 .parent()
                 .map(Path::to_path_buf)
@@ -390,44 +393,56 @@ impl BobApp {
     }
 }
 
-/// `.bob` files and subdirectories of `dir`, directories first.
+/// Display files (`.bob`, `.opi`) and subdirectories of `dir`, directories
+/// first. The linked folders of an Eclipse project in `dir` are listed as
+/// directories, and those are listed as if they were where they are linked.
 fn list_dir(dir: &Path) -> Vec<(PathBuf, bool)> {
-    let mut out: Vec<(PathBuf, bool)> = std::fs::read_dir(dir)
+    let real = bob::project::locate(dir);
+    let mut out: Vec<(PathBuf, bool)> = std::fs::read_dir(&real)
         .map(|rd| {
             rd.filter_map(Result::ok)
-                .map(|e| (e.path(), e.path().is_dir()))
+                .map(|e| (dir.join(e.file_name()), e.path().is_dir()))
                 .filter(|(p, d)| {
                     let hidden = p
                         .file_name()
                         .is_some_and(|n| n.to_string_lossy().starts_with('.'));
-                    !hidden && (*d || p.extension().is_some_and(|x| x == "bob"))
+                    let display = p.extension().is_some_and(|x| x == "bob" || x == "opi");
+                    !hidden && (*d || display)
                 })
                 .collect()
         })
         .unwrap_or_default();
+    for (name, _) in bob::project::links(&real).unwrap_or_default() {
+        let link = dir.join(name);
+        if !out.iter().any(|(p, _)| *p == link) {
+            out.push((link, true));
+        }
+    }
     out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     out
 }
 
+/// How many of the distinct PVs that widgets, plots and rules use are
+/// connected, and how many there are.
 fn count_pvs(nodes: &[Node]) -> (usize, usize) {
-    let mut acc = (0, 0);
-    for n in nodes {
-        let traces = n.traces.iter().flat_map(|t| t.x.iter().chain(&t.y));
-        for pv in n.pv.iter().chain(traces) {
-            acc.1 += 1;
-            if pv.state().connected {
-                acc.0 += 1;
+    fn walk(nodes: &[Node], seen: &mut std::collections::HashMap<String, bool>) {
+        for n in nodes {
+            let traces = n.traces.iter().flat_map(|t| t.x.iter().chain(&t.y));
+            let rules = n.rules.iter().flat_map(|r| r.pvs());
+            for pv in n.pv.iter().chain(traces).chain(rules) {
+                seen.entry(pv.name().to_string())
+                    .or_insert_with(|| pv.state().connected);
+            }
+            walk(&n.children, seen);
+            n.tabs.iter().for_each(|t| walk(t, seen));
+            if let Some(s) = &n.embedded {
+                walk(&s.nodes, seen);
             }
         }
-        for (c, t) in std::iter::once(count_pvs(&n.children))
-            .chain(n.tabs.iter().map(|t| count_pvs(t)))
-            .chain(n.embedded.iter().map(|s| count_pvs(&s.nodes)))
-        {
-            acc.0 += c;
-            acc.1 += t;
-        }
     }
-    acc
+    let mut seen = std::collections::HashMap::new();
+    walk(nodes, &mut seen);
+    (seen.values().filter(|c| **c).count(), seen.len())
 }
 
 impl eframe::App for BobApp {
@@ -444,6 +459,13 @@ impl BobApp {
         }
         widgets::touch_targets(ui.ctx(), self.keypad_mode);
         self.chrome.begin(ui.ctx());
+        if let Some(s) = &self.screen
+            && s.title != self.window_title
+        {
+            self.window_title = s.title.clone();
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::Title(self.window_title.clone()));
+        }
         let toolbar = egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
         self.chrome.toolbar = toolbar.response.rect.height();
         let mut panels = self.chrome.toolbar;
@@ -523,6 +545,8 @@ impl BobApp {
                 }
                 Request::Keypad { pv, text } => self.keypad = Some(Keypad { pv, text }),
                 Request::Details(details) => self.details = Some(details),
+                Request::Close if !self.back.is_empty() => self.go_back(),
+                Request::Close => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
                 Request::Webpage(url) => {
                     if let Err(e) = std::process::Command::new("xdg-open").arg(&url).spawn() {
                         log::warn!("cannot open {url}: {e}");
@@ -636,6 +660,41 @@ pub(crate) fn plain_name(name: &pv::PvName) -> String {
 mod tests {
     use super::plain_name;
     use pv::PvName;
+
+    #[test]
+    fn lists_displays_and_project_links() {
+        let tmp = std::env::temp_dir().join(format!("bobview-list-{}", std::process::id()));
+        let (real, proj) = (tmp.join("real"), tmp.join("proj"));
+        std::fs::create_dir_all(real.join("sub")).unwrap();
+        std::fs::create_dir_all(&proj).unwrap();
+        for f in ["a.opi", "b.bob", "c.txt"] {
+            std::fs::write(real.join(f), "").unwrap();
+        }
+        std::fs::write(
+            proj.join(".project"),
+            format!(
+                "<projectDescription><linkedResources><link><name>m</name><location>{}</location></link></linkedResources></projectDescription>",
+                real.display()
+            ),
+        )
+        .unwrap();
+        let names = |dir: &std::path::Path| -> Vec<(String, bool)> {
+            super::list_dir(dir)
+                .into_iter()
+                .map(|(p, d)| (p.strip_prefix(&tmp).unwrap().display().to_string(), d))
+                .collect()
+        };
+        assert_eq!(names(&proj), [("proj/m".to_string(), true)]);
+        assert_eq!(
+            names(&proj.join("m")),
+            [
+                ("proj/m/sub".to_string(), true),
+                ("proj/m/a.opi".to_string(), false),
+                ("proj/m/b.bob".to_string(), false)
+            ]
+        );
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
 
     #[test]
     fn keypad_title_is_the_plain_name() {

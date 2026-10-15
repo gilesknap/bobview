@@ -184,7 +184,18 @@ pub enum Action {
         text: String,
         description: String,
     },
-    /// Anything else (commands, …): shown but does nothing.
+    /// An external command, run in `directory` (the display's own when empty).
+    Command {
+        command: String,
+        directory: String,
+        description: String,
+    },
+    /// Close the display, as BOY's `ScriptUtil.closeAssociatedOPI` scripts
+    /// (EDM "Exit" buttons) do: type `close_display`, bobview's own.
+    CloseDisplay {
+        description: String,
+    },
+    /// Anything else (other scripts, …): shown but does nothing.
     Unsupported {
         kind: String,
         description: String,
@@ -228,6 +239,12 @@ impl Action {
                     description,
                 }
             }
+            "command" => Action::Command {
+                command: text("command"),
+                directory: text("command_directory"),
+                description,
+            },
+            "close_display" => Action::CloseDisplay { description },
             other => Action::Unsupported {
                 kind: other.to_string(),
                 description,
@@ -241,6 +258,8 @@ impl Action {
             | Action::WritePv { description, .. }
             | Action::OpenWebpage { description, .. }
             | Action::Execute { description, .. }
+            | Action::Command { description, .. }
+            | Action::CloseDisplay { description }
             | Action::Unsupported { description, .. } => description,
         }
     }
@@ -260,7 +279,8 @@ pub struct Rule {
 #[derive(Clone, Debug, PartialEq)]
 pub struct RuleExpr {
     pub condition: String,
-    /// The `<value>` element: text, or a nested `<color>`/`<font>`.
+    /// The `<value>` element: text, or a nested `<color>`/`<font>`; for an
+    /// output expression rule, the `<expression>` (or BOY's `<value>`).
     pub value: Element,
 }
 
@@ -276,7 +296,11 @@ impl Rule {
                 .filter(|c| c.name == "exp")
                 .map(|e| RuleExpr {
                     condition: e.attr("bool_exp").unwrap_or("false").to_string(),
-                    value: e.child("value").cloned().unwrap_or_default(),
+                    value: e
+                        .child("expression")
+                        .or_else(|| e.child("value"))
+                        .cloned()
+                        .unwrap_or_default(),
                 })
                 .collect(),
             pv_names: el

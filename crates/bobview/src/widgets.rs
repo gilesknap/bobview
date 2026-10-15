@@ -26,6 +26,8 @@ pub enum Request {
     },
     /// Show the details of a widget's PV, from its context menu.
     Details(crate::pvmenu::Details),
+    /// Close the display: go back to the one before, or close the window.
+    Close,
 }
 
 /// Per-frame drawing context.
@@ -162,7 +164,11 @@ fn draw_node(ui: &mut Ui, node: &mut Node, cx: &mut Cx, id: Id) {
             crate::plot::draw(&painter, node, rect, z);
             None
         }
-        "progressbar" | "tank" | "thermometer" | "meter" => {
+        "meter" => {
+            crate::meter::dial(&painter, &node.w, state.as_ref(), rect, z);
+            None
+        }
+        "progressbar" | "tank" | "thermometer" => {
             bar(&painter, &node.w, state.as_ref(), rect, z);
             None
         }
@@ -210,14 +216,28 @@ fn draw_node(ui: &mut Ui, node: &mut Node, cx: &mut Cx, id: Id) {
         }
     };
 
+    if matches!(
+        node.w.kind.as_str(),
+        "label" | "textupdate" | "textentry" | "embedded"
+    ) {
+        border(&painter, &node.w, rect, z);
+    }
     if let Some(state) = &state {
         alarm_border(&painter, &node.w, state, rect, z);
     }
+    // A shape or monitor (such as an EDM related-display hotspot from an
+    // `.opi`) that runs its actions when clicked.
+    let control = response.is_some();
+    let response = match response {
+        None if !is_container(&node.w.kind) => click_hook(ui, node, rect, cx, id),
+        r => r,
+    };
 
     // A control that is disabled or whose PV is read-only is greyed out and
     // shows a "not allowed" cursor; its writes are refused in `write`. The
-    // image and symbol widgets respond to the pointer but are not controls.
-    let disabled = response.is_some()
+    // image and symbol widgets respond to the pointer but are not controls,
+    // nor is a monitor that only runs actions when clicked.
+    let disabled = control
         && !matches!(node.w.kind.as_str(), "image" | "symbol")
         && is_disabled(&node.w, state.as_ref());
     // A slide button greys only its track: the rest of its box is see-through.
@@ -255,6 +275,46 @@ fn draw_node(ui: &mut Ui, node: &mut Node, cx: &mut Cx, id: Id) {
             resp.on_hover_text(text);
         }
     }
+}
+
+/// The widget's `border_width` and `border_color`, drawn around it.
+fn border(painter: &egui::Painter, w: &Widget, rect: Rect, z: f32) {
+    let width = w.f64("border_width").unwrap_or(0.0) as f32 * z;
+    if width <= 0.0 {
+        return;
+    }
+    let c = w
+        .color("border_color")
+        .map(|c| color(&c))
+        .unwrap_or_else(|| named("Text"));
+    painter.rect_stroke(
+        rect,
+        CornerRadius::ZERO,
+        Stroke::new(width, c),
+        StrokeKind::Outside,
+    );
+}
+
+/// Run the actions of a widget with `run_actions_on_mouse_click` when it is
+/// clicked; its response, if it has any such actions.
+fn click_hook(ui: &mut Ui, node: &Node, rect: Rect, cx: &mut Cx, id: Id) -> Option<Response> {
+    let w = &node.w;
+    if w.bool("run_actions_on_mouse_click") != Some(true) || w.bool("enabled") == Some(false) {
+        return None;
+    }
+    let actions = w.actions();
+    if actions.is_empty() {
+        return None;
+    }
+    let resp = ui
+        .interact(rect.intersect(cx.clip), id.with("click"), Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    if resp.clicked() {
+        for a in &actions {
+            run_action(node, a, cx);
+        }
+    }
+    Some(resp)
 }
 
 /// Widgets that hold others; their tooltips would cover their children's.
@@ -359,23 +419,58 @@ pub(crate) fn text_in(
     align: Align2,
     wrap: bool,
 ) {
+    text_turned(painter, rect, text, font, c, align, wrap, 0);
+}
+
+/// [`text_in`], turned by Phoebus `rotation_step`: 1 is 90° anticlockwise
+/// (reading upwards), 2 is 180° and 3 is 90° clockwise.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn text_turned(
+    painter: &egui::Painter,
+    rect: Rect,
+    text: &str,
+    font: FontId,
+    c: Color32,
+    align: Align2,
+    wrap: bool,
+    step: i64,
+) {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let angle = match step {
+        1 => -FRAC_PI_2,
+        2 => PI,
+        3 => FRAC_PI_2,
+        _ => 0.0,
+    };
+    // Laid out in the box the text has before turning.
+    let size = if step == 1 || step == 3 {
+        Vec2::new(rect.height(), rect.width())
+    } else {
+        rect.size()
+    };
+    let area = Rect::from_center_size(rect.center(), size);
     let row_height = painter.fonts_mut(|f| f.row_height(&font));
-    let job = text_job(text, font, c, rect.size(), row_height, align.x(), wrap);
+    let job = text_job(text, font, c, size, row_height, align.x(), wrap);
     let galley = painter.layout_job(job);
     let x = match align.x() {
-        egui::Align::Min => rect.left() + 1.0,
-        egui::Align::Center => rect.center().x,
-        egui::Align::Max => rect.right() - 1.0,
+        egui::Align::Min => area.left() + 1.0,
+        egui::Align::Center => area.center().x,
+        egui::Align::Max => area.right() - 1.0,
     };
     let height = galley.size().y;
     let y = match align.y() {
-        egui::Align::Min => rect.top(),
-        egui::Align::Center => rect.center().y - height / 2.0,
-        egui::Align::Max => rect.bottom() - height,
+        egui::Align::Min => area.top(),
+        egui::Align::Center => area.center().y - height / 2.0,
+        egui::Align::Max => area.bottom() - height,
     };
-    painter
-        .with_clip_rect(rect.intersect(painter.clip_rect()))
-        .galley(Pos2::new(x, y), galley, c);
+    let painter = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
+    if angle == 0.0 {
+        painter.galley(Pos2::new(x, y), galley, c);
+    } else {
+        let center = rect.center();
+        let pos = center + egui::emath::Rot2::from_angle(angle) * (Pos2::new(x, y) - center);
+        painter.add(egui::epaint::TextShape::new(pos, galley, c).with_angle(angle));
+    }
 }
 
 /// The layout for [`text_in`]: rows aligned on their own and limited to what
@@ -485,7 +580,7 @@ pub(crate) fn placeholder(painter: &egui::Painter, rect: Rect, what: &str, z: f3
 }
 
 /// Value text as Phoebus formats it for the widget's `format` and `precision`.
-fn format_value(w: &Widget, s: &PvState) -> String {
+pub(crate) fn format_value(w: &Widget, s: &PvState) -> String {
     let precision = w.i64("precision").filter(|p| *p >= 0).map(|p| p as i32);
     let units = w.bool("show_units").unwrap_or(true);
     let format = w.i64("format").unwrap_or(0);
@@ -578,7 +673,7 @@ fn label(painter: &egui::Painter, node: &Node, rect: Rect, z: f32) {
     }
     let text = node.prop("text");
     let wrap = w.bool("wrap_words").unwrap_or(true);
-    text_in(
+    text_turned(
         painter,
         rect,
         &text,
@@ -586,6 +681,7 @@ fn label(painter: &egui::Painter, node: &Node, rect: Rect, z: f32) {
         fg(w),
         alignment(w, 0),
         wrap,
+        w.i64("rotation_step").unwrap_or(0),
     );
 }
 
@@ -599,7 +695,7 @@ fn text_update(painter: &egui::Painter, node: &Node, state: Option<&PvState>, re
         _ => format!("<{}>", node.pv_name),
     };
     let wrap = w.bool("wrap_words").unwrap_or(true);
-    text_in(
+    text_turned(
         painter,
         rect.shrink(1.0),
         &text,
@@ -607,6 +703,7 @@ fn text_update(painter: &egui::Painter, node: &Node, state: Option<&PvState>, re
         fg(w),
         alignment(w, 1),
         wrap,
+        w.i64("rotation_step").unwrap_or(0),
     );
 }
 
@@ -777,7 +874,32 @@ fn shape(painter: &egui::Painter, w: &Widget, rect: Rect, z: f32) {
     } else {
         Stroke::NONE
     };
-    if w.kind == "rectangle" {
+    if w.kind == "arc" {
+        let start = w.f64("start_angle").unwrap_or(0.0) as f32;
+        let total = w.f64("total_angle").unwrap_or(90.0) as f32;
+        let inner = rect.shrink(lw / 2.0);
+        let points = arc_points(inner, start, total);
+        if !transparent && fill_c.a() > 0 {
+            // A pie wedge, as a fan from the centre (it may be concave).
+            let mut mesh = egui::Mesh::default();
+            mesh.colored_vertex(inner.center(), fill_c);
+            for p in &points {
+                mesh.colored_vertex(*p, fill_c);
+            }
+            for i in 1..points.len() as u32 {
+                mesh.add_triangle(0, i, i + 1);
+            }
+            painter.add(mesh);
+        }
+        if lw > 0.0 {
+            let mut line = points;
+            if !transparent {
+                line.insert(0, inner.center());
+                line.push(inner.center());
+            }
+            painter.add(Shape::line(line, stroke));
+        }
+    } else if w.kind == "rectangle" {
         let cr = w
             .f64("corner_width")
             .unwrap_or(0.0)
@@ -785,7 +907,21 @@ fn shape(painter: &egui::Painter, w: &Widget, rect: Rect, z: f32) {
             * z
             / 2.0;
         let r = CornerRadius::same(cr.min(255.0) as u8);
-        painter.rect(rect, r, fill_c, stroke, StrokeKind::Inside);
+        let style = w.i64("line_style").unwrap_or(0);
+        if style == 0 || cr > 0.0 || lw <= 0.0 {
+            painter.rect(rect, r, fill_c, stroke, StrokeKind::Inside);
+        } else {
+            painter.rect_filled(rect, r, fill_c);
+            let inner = rect.shrink(lw / 2.0);
+            let corners = [
+                inner.left_top(),
+                inner.right_top(),
+                inner.right_bottom(),
+                inner.left_bottom(),
+                inner.left_top(),
+            ];
+            crate::plot::line(painter, corners.to_vec(), stroke, style);
+        }
     } else {
         let inner = rect.shrink(lw / 2.0);
         painter.add(Shape::ellipse_filled(
@@ -799,6 +935,19 @@ fn shape(painter: &egui::Painter, w: &Widget, rect: Rect, z: f32) {
             stroke,
         ));
     }
+}
+
+/// Points along the arc of the ellipse in `rect` from `start` degrees over
+/// `total` degrees, anticlockwise from three o'clock, as Phoebus draws arcs.
+fn arc_points(rect: Rect, start: f32, total: f32) -> Vec<Pos2> {
+    let n = ((total.abs() / 5.0).ceil() as usize).clamp(2, 73);
+    let (c, r) = (rect.center(), rect.size() / 2.0);
+    (0..=n)
+        .map(|i| {
+            let a = (start + total * i as f32 / n as f32).to_radians();
+            Pos2::new(c.x + r.x * a.cos(), c.y - r.y * a.sin())
+        })
+        .collect()
 }
 
 fn poly(painter: &egui::Painter, w: &Widget, view: View, r: &[f64; 4]) {
@@ -825,7 +974,8 @@ fn poly(painter: &egui::Painter, w: &Widget, view: View, r: &[f64; 4]) {
         closed.push(closed[0]);
         painter.add(Shape::line(closed, Stroke::new(lw, line)));
     } else {
-        painter.add(Shape::line(points, Stroke::new(lw, line)));
+        let style = w.i64("line_style").unwrap_or(0);
+        crate::plot::line(painter, points, Stroke::new(lw, line), style);
     }
 }
 
@@ -874,18 +1024,6 @@ fn bar(painter: &egui::Painter, w: &Widget, s: Option<&PvState>, rect: Rect, z: 
         )
     };
     fill(painter, filled, fill_c);
-    if w.kind == "meter" {
-        let text = format_value(w, s);
-        text_in(
-            painter,
-            rect,
-            &text,
-            FontId::proportional(12.0 * z),
-            Color32::BLACK,
-            Align2::CENTER_CENTER,
-            false,
-        );
-    }
 }
 
 // --- controls ----------------------------------------------------------------
@@ -1105,6 +1243,23 @@ pub(crate) fn run_action(node: &Node, action: &Action, cx: &mut Cx) {
                 log::warn!("script '{description}' is not supported: bobview runs no scripts");
             }
         }
+        Action::Command {
+            command, directory, ..
+        } => {
+            let command = node.expand(command);
+            let directory = node.expand(directory);
+            let directory = (!directory.trim().is_empty()).then(|| node.resolve(&directory));
+            // Only DLS launcher scripts of local displays, which open a display.
+            match crate::launch::command_target(node.base.as_ref(), directory, &command) {
+                Some((file, macros)) => cx.requests.push(Request::Open {
+                    source: Source::File(file),
+                    macros,
+                    target: "window".into(),
+                }),
+                None => log::warn!("command '{command}' is not supported"),
+            }
+        }
+        Action::CloseDisplay { .. } => cx.requests.push(Request::Close),
         Action::Unsupported { kind, .. } => log::warn!("action '{kind}' is not supported"),
     }
 }
@@ -1711,12 +1866,7 @@ fn tabs(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut Cx, id: Id) {
 /// Draw an embedded screen into `area`, scaled per the widget's resize mode.
 fn draw_embedded(ui: &mut Ui, w: &Widget, screen: &mut Screen, area: Rect, cx: &mut Cx, id: Id) {
     let z = cx.view.zoom;
-    let scale = match w.i64("resize").unwrap_or(0) {
-        1 | 4 if screen.width > 0.0 && screen.height > 0.0 => (area.width()
-            / (screen.width as f32 * z))
-            .min(area.height() / (screen.height as f32 * z)),
-        _ => 1.0,
-    };
+    let scale = embed_scale(w, screen, area.size() / z);
     if w.bool("transparent") != Some(true) {
         fill(
             &ui.painter().with_clip_rect(cx.clip),
@@ -1730,6 +1880,18 @@ fn draw_embedded(ui: &mut Ui, w: &Widget, screen: &mut Screen, area: Rect, cx: &
     };
     let clip = cx.clip.intersect(area);
     draw_screen(ui, screen, &mut cx.sub(view, clip), id);
+}
+
+/// How much an embedded display is scaled to fit a widget `size` (unzoomed):
+/// resize mode 1 scales the content to fit; the others draw it 1:1, clipped
+/// to the widget (4, Crop, included).
+fn embed_scale(w: &Widget, screen: &Screen, size: Vec2) -> f32 {
+    match w.i64("resize").unwrap_or(0) {
+        1 if screen.width > 0.0 && screen.height > 0.0 => {
+            (size.x / screen.width as f32).min(size.y / screen.height as f32)
+        }
+        _ => 1.0,
+    }
 }
 
 fn embedded(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut Cx, id: Id) {
@@ -1845,7 +2007,80 @@ pub(crate) fn alarm_border(painter: &egui::Painter, w: &Widget, s: &PvState, rec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_resize_mode_1_scales_embedded_content() {
+        let d = bob::Display::parse(
+            "<display><width>400</width><height>100</height><widget type='label'/></display>",
+        )
+        .unwrap();
+        let pvs = PvManager::new();
+        let screen =
+            crate::screen::Builder { pvs: &pvs }.screen(d, &bob::Macros::default(), None, 0);
+        let widget = |resize: i64| {
+            bob::Display::parse(&format!(
+                "<display><widget type='embedded'><resize>{resize}</resize></widget></display>"
+            ))
+            .unwrap()
+            .widgets[0]
+                .clone()
+        };
+        let size = Vec2::new(200.0, 100.0);
+        assert_eq!(embed_scale(&widget(1), &screen, size), 0.5);
+        assert_eq!(embed_scale(&widget(4), &screen, size), 1.0);
+        assert_eq!(embed_scale(&widget(0), &screen, size), 1.0);
+    }
+    #[test]
+    fn commands_of_a_display_from_the_web_do_nothing() {
+        let actions = |dir: &str| {
+            format!(
+                "<display><widget type='action_button'><actions><action type='command'>
+                <command>./launch 04</command><command_directory>{dir}</command_directory>
+                </action></actions></widget></display>"
+            )
+        };
+        let pvs = PvManager::new();
+        for dir in ["", "/tmp", "file:///tmp"] {
+            let mut d = bob::Display::parse(&actions(dir)).unwrap();
+            d.source = Some(Source::Url("https://example.com/x.bob".into()));
+            let screen =
+                crate::screen::Builder { pvs: &pvs }.screen(d, &Macros::default(), None, 0);
+            let node = &screen.nodes[0];
+            let mut requests = Vec::new();
+            let mut cx = Cx {
+                view: View {
+                    origin: Pos2::ZERO,
+                    zoom: 1.0,
+                },
+                clip: Rect::EVERYTHING,
+                pvs: &pvs,
+                requests: &mut requests,
+                depth: 0,
+                keypad: false,
+            };
+            let actions = node.w.actions();
+            assert_eq!(actions.len(), 1);
+            for a in actions {
+                assert!(matches!(a, Action::Command { .. }));
+                run_action(node, &a, &mut cx);
+            }
+            assert!(requests.is_empty(), "{dir}");
+        }
+    }
+
     use std::sync::Arc;
+
+    #[test]
+    fn arcs_go_anticlockwise_from_three_o_clock() {
+        let rect = Rect::from_center_size(Pos2::ZERO, Vec2::new(20.0, 10.0));
+        let p = arc_points(rect, 0.0, 90.0);
+        let near = |a: Pos2, b: Pos2| (a - b).length() < 1e-4;
+        assert!(near(p[0], Pos2::new(10.0, 0.0)));
+        assert!(near(*p.last().unwrap(), Pos2::new(0.0, -5.0)));
+        let full = arc_points(rect, 90.0, -360.0);
+        assert!(near(full[0], *full.last().unwrap()));
+        assert!(full.len() > 60);
+    }
 
     #[test]
     fn rows_that_fit() {

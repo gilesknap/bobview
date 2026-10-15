@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<display typeId="org.csstudio.opibuilder.Display" version="1.0.0">
+  <name>BOY embedded</name><width>300</width><height>60</height>
+  <background_color><color red="240" green="240" blue="200" /></background_color>
+  <widget typeId="org.csstudio.opibuilder.widgets.groupingContainer" version="1.0.0">
+    <name>Part</name><x>0</x><y>0</y><width>280</width><height>40</height>
+    <border_style>0</border_style><transparent>true</transparent>  <widget typeId="org.csstudio.opibuilder.widgets.Label" version="1.0.0">
+    <name>Label</name><x>0</x><y>0</y><width>200</width><height>18</height>
+    <text>Part: $(M)</text><font><fontdata fontName="Liberation Sans" height="12" style="0" pixels="true" /></font><transparent>true</transparent>
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.Ellipse" version="1.0.0">
+    <name>Ellipse</name><x>220</x><y>5</y><width>20</width><height>20</height>
+    <background_color><color red="0" green="200" blue="0" /></background_color>
+  </widget>
+
+  </widget>
+  <widget typeId="org.csstudio.opibuilder.widgets.Rectangle" version="1.0.0">
+    <name>Rectangle</name><x>0</x><y>45</y><width>280</width><height>10</height>
+    <background_color><color red="0" green="0" blue="200" /></background_color>
+  </widget>
+</display>

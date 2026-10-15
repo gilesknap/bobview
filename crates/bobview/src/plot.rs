@@ -666,7 +666,7 @@ fn decimate(run: Vec<Pos2>) -> Vec<Pos2> {
     out
 }
 
-fn line(painter: &egui::Painter, pts: Vec<Pos2>, stroke: Stroke, style: i64) {
+pub(crate) fn line(painter: &egui::Painter, pts: Vec<Pos2>, stroke: Stroke, style: i64) {
     if pts.len() < 2 {
         if let Some(p) = pts.first() {
             painter.circle_filled(*p, stroke.width, stroke.color);

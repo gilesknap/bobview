@@ -14,6 +14,8 @@ pub struct Screen {
     pub nodes: Vec<Node>,
     pub width: f64,
     pub height: f64,
+    /// The display's name with macros expanded, or else its file name.
+    pub title: String,
 }
 
 /// One widget instance.
@@ -105,6 +107,24 @@ fn expand_for(w: &Widget, macros: &Macros, text: &str) -> String {
     })
 }
 
+/// The display's name with `macros` expanded; a display with no name is
+/// called after its file, as in BOY and Phoebus.
+fn title(display: &Display, macros: &Macros) -> String {
+    let name = bob::expand(&display.name, &|n| macros.get(n).map(str::to_string));
+    if !name.trim().is_empty() {
+        return name;
+    }
+    let file = match &display.source {
+        Some(Source::File(p)) => p.to_string_lossy().into_owned(),
+        Some(Source::Url(u)) => u.split(['?', '#']).next().unwrap_or("").to_string(),
+        None => String::new(),
+    };
+    let base = file.rsplit('/').next().unwrap_or("");
+    base.rsplit_once('.')
+        .map_or(base, |(stem, _)| stem)
+        .to_string()
+}
+
 /// Phoebus default sizes by widget type.
 fn default_size(kind: &str) -> (f64, f64) {
     match kind {
@@ -164,18 +184,22 @@ impl Builder<'_> {
             None => (display.widgets.clone(), display.width, display.height),
         };
         let nodes = self.nodes(&widgets, (0.0, 0.0), &macros, base.as_ref(), depth);
-        // Phoebus shows widgets beyond the declared display size, so grow to fit them.
+        // Phoebus shows widgets beyond the declared display size, so grow to
+        // fit them. BOY clipped them, and EDM conversions leave stray widgets
+        // far outside the display, so an `.opi` keeps its declared size.
         let (width, height) = nodes
             .iter()
-            .filter(|n| n.w.bool("visible") != Some(false))
+            .filter(|n| !display.legacy && n.w.bool("visible") != Some(false))
             .fold((width, height), |(w, h), n| {
                 (w.max(n.rect[0] + n.rect[2]), h.max(n.rect[1] + n.rect[3]))
             });
+        let title = title(&display, &macros);
         Screen {
             display,
             nodes,
             width,
             height,
+            title,
         }
     }
 
@@ -323,7 +347,15 @@ impl Builder<'_> {
         }
         let source = node.resolve(file);
         match crate::fetch::load(&source) {
-            Ok(d) => node.embedded = Some(Box::new(self.screen(d, macros, Some(group), depth + 1))),
+            Ok(d) => {
+                let screen = self.screen(d, macros, Some(group), depth + 1);
+                // Resize mode 2 sizes the widget to its content.
+                if node.w.i64("resize") == Some(2) {
+                    node.rect[2] = screen.width;
+                    node.rect[3] = screen.height;
+                }
+                node.embedded = Some(Box::new(screen));
+            }
             Err(e) => {
                 log::warn!("{e}");
                 node.error = Some(match e {
@@ -403,6 +435,46 @@ mod tests {
     }
 
     #[test]
+    fn titles_expand_macros_or_use_the_file_name() {
+        let pvs = PvManager::new();
+        let b = Builder { pvs: &pvs };
+        let d = Display::parse("<display><name>RGA - $(device)</name></display>").unwrap();
+        let s = b.screen(
+            d,
+            &Macros::from_pairs([("device", "BR-VA-RGA-01")]),
+            None,
+            0,
+        );
+        assert_eq!(s.title, "RGA - BR-VA-RGA-01");
+        let mut d = Display::parse("<display><name> </name></display>").unwrap();
+        d.source = Some(Source::File("/a/boosterVacuum.opi".into()));
+        assert_eq!(
+            b.screen(d, &Macros::default(), None, 0).title,
+            "boosterVacuum"
+        );
+    }
+
+    #[test]
+    fn opi_screens_keep_their_declared_size() {
+        let pvs = PvManager::new();
+        let b = Builder { pvs: &pvs };
+        let xml = |root: &str| {
+            format!(
+                "<display {root}><width>300</width><height>200</height>
+                 <widget type='label'><x>10</x><y>5000</y></widget></display>"
+            )
+        };
+        let opi = Display::parse(&xml(
+            "typeId='org.csstudio.opibuilder.Display' version='1.0'",
+        ));
+        let s = b.screen(opi.unwrap(), &Macros::default(), None, 0);
+        assert_eq!((s.width, s.height), (300.0, 200.0));
+        let bob = Display::parse(&xml("")).unwrap();
+        let s = b.screen(bob, &Macros::default(), None, 0);
+        assert_eq!((s.width, s.height), (300.0, 5020.0));
+    }
+
+    #[test]
     fn display_macros_are_overridden_by_callers() {
         let d = Display::parse(
             "<display><macros><P>A</P><Q>q</Q></macros><widget type='led'><pv_name>loc://$(P)$(Q)</pv_name></widget></display>",
@@ -464,7 +536,7 @@ pub mod display_set {
                 let p = e.path();
                 if p.is_dir() {
                     walk(&p, out);
-                } else if p.extension().is_some_and(|x| x == "bob") {
+                } else if p.extension().is_some_and(|x| x == "bob" || x == "opi") {
                     out.push(p);
                 }
             }
@@ -511,6 +583,84 @@ pub mod display_set {
             assert!(!s.nodes.is_empty(), "{} is empty", f.display());
             check(&s.nodes, &f);
         }
+    }
+
+    /// Load every `.opi` in the linked folders of the Eclipse project in
+    /// `$OPI_SWEEP` and report what does not translate: run with
+    /// `OPI_SWEEP=/path/to/project cargo test -- --ignored opi_sweep --nocapture`.
+    #[test]
+    #[ignore]
+    fn opi_sweep() {
+        use std::collections::BTreeMap;
+        let Some(project) = std::env::var_os("OPI_SWEEP").map(PathBuf::from) else {
+            panic!("set OPI_SWEEP to an Eclipse project directory");
+        };
+        fn walk(virt: &Path, out: &mut Vec<PathBuf>) {
+            let Ok(rd) = std::fs::read_dir(bob::project::locate(virt)) else {
+                return;
+            };
+            for e in rd.flatten() {
+                let p = virt.join(e.file_name());
+                if e.path().is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "opi") {
+                    out.push(p);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        for (name, _) in bob::project::links(&project).unwrap_or_default() {
+            walk(&project.join(name), &mut files);
+        }
+        files.sort();
+        let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
+        let mut problems: BTreeMap<String, usize> = BTreeMap::new();
+        let mut failed = Vec::new();
+        fn tally(
+            nodes: &[Node],
+            kinds: &mut BTreeMap<String, usize>,
+            problems: &mut BTreeMap<String, usize>,
+        ) {
+            for n in nodes {
+                if !KNOWN.contains(&n.w.kind.as_str()) {
+                    *kinds.entry(n.w.kind.clone()).or_default() += 1;
+                }
+                if let Some(e) = &n.error {
+                    *problems.entry(e.clone()).or_default() += 1;
+                }
+                if n.w.kind == "symbol" {
+                    for f in n.w.list("symbols", "symbol") {
+                        let f = n.expand(&f);
+                        if let Source::File(p) = n.resolve(&f)
+                            && !f.contains("$(")
+                            && !bob::project::locate(&p).exists()
+                        {
+                            *problems
+                                .entry(format!("{}: not found", p.display()))
+                                .or_default() += 1;
+                        }
+                    }
+                }
+                tally(&n.children, kinds, problems);
+                if let Some(s) = &n.embedded {
+                    tally(&s.nodes, kinds, problems);
+                }
+            }
+        }
+        let pvs = PvManager::new();
+        for f in &files {
+            match Screen::load(&f.clone().into(), &Macros::default(), &pvs) {
+                Ok(s) => tally(&s.nodes, &mut kinds, &mut problems),
+                Err(e) => failed.push(format!("{}: {e}", f.display())),
+            }
+        }
+        println!("{} files, {} failed to load", files.len(), failed.len());
+        failed.iter().for_each(|f| println!("  {f}"));
+        println!("widgets drawn as placeholders:");
+        kinds.iter().for_each(|(k, n)| println!("  {n:6} {k}"));
+        println!("problems:");
+        problems.iter().for_each(|(k, n)| println!("  {n:6} {k}"));
+        assert!(failed.is_empty());
     }
 
     #[test]

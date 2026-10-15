@@ -105,6 +105,8 @@ fn apply(shared: &Shared, snap: &Snapshot, metadata: bool) {
             s.units = d.units.as_str_lossy().into_owned();
             s.precision = Some(d.precision as i32);
             s.display_range = Some((d.lower_disp_limit, d.upper_disp_limit));
+            s.alarm_range = Some((d.lower_alarm_limit, d.upper_alarm_limit));
+            s.warning_range = Some((d.lower_warning_limit, d.upper_warning_limit));
         }
         if let Some(c) = &snap.control {
             s.control_range = Some((c.lower_ctrl_limit, c.upper_ctrl_limit));
