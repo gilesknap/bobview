@@ -1,0 +1,20 @@
+#!/bin/bash
+# Run bobview over ssh -X/-Y forwarding.
+#
+# Forwarded GL goes to the local X server as indirect GLX, which current X
+# servers refuse ("BadValue ... X_GLXCreateNewContext"). This makes Mesa
+# render in software on this machine and send the window as images instead,
+# even where libglvnd would otherwise pick a GPU vendor's GL (e.g. NVIDIA).
+# Needs Mesa (mesa-dri-drivers on RHEL, libgl1-mesa-dri on Debian).
+set -euo pipefail
+
+export LIBGL_ALWAYS_SOFTWARE=1
+export __GLX_VENDOR_LIBRARY_NAME=mesa
+for json in /usr/share/glvnd/egl_vendor.d/50_mesa.json /etc/glvnd/egl_vendor.d/50_mesa.json; do
+    if [[ -f "${json}" ]]; then
+        export __EGL_VENDOR_LIBRARY_FILENAMES=${json}
+        break
+    fi
+done
+
+exec "$(dirname "$(readlink -f "$0")")/bobview" "$@"
