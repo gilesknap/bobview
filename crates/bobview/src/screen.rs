@@ -655,7 +655,7 @@ mod tests {
         )
         .unwrap();
         let pvs = PvManager::new();
-        let s = Builder { pvs: &pvs }.screen(d, &Macros::default(), None, 0);
+        let s = Builder::new(&pvs).screen(d, &Macros::default(), None, 0);
         let c = Compat::of(&s.nodes);
         assert_eq!(
             c,
@@ -676,7 +676,7 @@ mod tests {
         let one = |xml: &str| {
             let d = Display::parse(&format!("<display>{xml}</display>")).unwrap();
             let pvs = PvManager::new();
-            Builder { pvs: &pvs }.screen(d, &Macros::default(), None, 0)
+            Builder::new(&pvs).screen(d, &Macros::default(), None, 0)
         };
         let s = one(r#"<widget type="table"/>"#);
         assert_eq!(
