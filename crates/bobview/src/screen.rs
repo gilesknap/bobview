@@ -1,7 +1,8 @@
 //! A loaded display: widgets with resolved positions, macros and PVs.
 
 use bob::{Display, Macros, Source, Widget};
-use std::cell::Cell;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use pv::{Pv, PvManager};
 
@@ -66,21 +67,49 @@ pub struct Node {
     pub series: Vec<Option<crate::trend::Series>>,
     /// The vacuum-space link field that points this widget at a group.
     pub link: Option<crate::group_link::Link>,
+    /// What the load that made this node may still build.
+    budget: Arc<Budget>,
+}
+
+/// Embedded displays and widgets that a load may still make. It belongs to
+/// the root screen and is shared with its nodes, so that displays embedded
+/// later (as the web build fetches them) draw on the same budget.
+struct Budget {
+    screens: AtomicU32,
+    widgets: AtomicU32,
+}
+
+impl Budget {
+    /// Take one from `left`, or fail if none is left.
+    fn take(left: &AtomicU32) -> bool {
+        loop {
+            let n = left.load(Ordering::Relaxed);
+            if n == 0 {
+                return false;
+            }
+            if left
+                .compare_exchange(n, n - 1, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return true;
+            }
+        }
+    }
 }
 
 pub struct Builder<'a> {
     pub pvs: &'a PvManager,
-    /// Embedded displays and widgets this builder may still make.
-    screens: Cell<u32>,
-    widgets: Cell<u32>,
+    budget: Arc<Budget>,
 }
 
 impl<'a> Builder<'a> {
     pub fn new(pvs: &'a PvManager) -> Self {
         Self {
             pvs,
-            screens: Cell::new(MAX_SCREENS),
-            widgets: Cell::new(MAX_WIDGETS),
+            budget: Arc::new(Budget {
+                screens: AtomicU32::new(MAX_SCREENS),
+                widgets: AtomicU32::new(MAX_WIDGETS),
+            }),
         }
     }
 }
@@ -270,13 +299,16 @@ impl Builder<'_> {
     ) -> Vec<Node> {
         let mut nodes = Vec::new();
         for w in widgets {
-            // Widgets past the budget are left out.
-            let Some(left) = self.widgets.get().checked_sub(1) else {
+            // Widgets past the budget are left out, after one that says so.
+            let over = !Budget::take(&self.budget.widgets);
+            let mut node = self.node(w, origin, macros, base, depth);
+            if over {
                 log::warn!("too many widgets; the rest are left out");
+                node.error = Some("too many widgets; the rest are left out".into());
+                nodes.push(node);
                 break;
-            };
-            self.widgets.set(left);
-            nodes.push(self.node(w, origin, macros, base, depth));
+            }
+            nodes.push(node);
         }
         nodes
     }
@@ -343,6 +375,7 @@ impl Builder<'_> {
             traces: Vec::new(),
             series: Vec::new(),
             link,
+            budget: self.budget.clone(),
         };
 
         match w.kind.as_str() {
@@ -423,15 +456,19 @@ impl Builder<'_> {
             node.error = Some("embedded displays nested too deeply".into());
             return;
         }
-        let Some(left) = self.screens.get().checked_sub(1) else {
+        // The node's budget, not this builder's, which may be a fresh one.
+        let this = Builder {
+            pvs: self.pvs,
+            budget: node.budget.clone(),
+        };
+        if !Budget::take(&this.budget.screens) {
             node.error = Some("too many embedded displays".into());
             return;
-        };
-        self.screens.set(left);
+        }
         let source = node.resolve(file);
         match crate::fetch::load(&source) {
             Ok(d) => {
-                let screen = self.screen(d, macros, Some(group), depth + 1);
+                let screen = this.screen(d, macros, Some(group), depth + 1);
                 // Resize mode 2 sizes the widget to its content.
                 if node.w.i64("resize") == Some(2) {
                     node.rect[2] = screen.width;

@@ -1,69 +1,101 @@
+use std::sync::Arc;
+
 use crate::Element;
 
 /// An ordered set of macro definitions. Later definitions win.
+///
+/// A set layered over another (see [`Macros::with`]) shares it rather than
+/// copying it, so each widget of a large display costs only its own macros.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct Macros(Vec<(String, String)>);
+pub struct Macros {
+    parent: Option<Arc<Macros>>,
+    own: Vec<(String, String)>,
+}
+
+/// The most expanded text one layer of macros holds. Later definitions in a
+/// layer past it are kept as written, not expanded, so nested definitions
+/// that each double the last can't use memory without bound.
+const MAX_LAYER_BYTES: usize = 1 << 20;
 
 impl Macros {
     pub fn from_element(el: &Element) -> Self {
-        Self(
-            el.children
-                .iter()
-                .map(|c| (c.name.clone(), c.text.clone()))
-                .collect(),
-        )
+        Self::from_pairs(el.children.iter().map(|c| (c.name.clone(), c.text.clone())))
     }
 
     pub fn from_pairs<K: Into<String>, V: Into<String>>(
         pairs: impl IntoIterator<Item = (K, V)>,
     ) -> Self {
-        Self(
-            pairs
+        Self {
+            parent: None,
+            own: pairs
                 .into_iter()
                 .map(|(k, v)| (k.into(), v.into()))
                 .collect(),
-        )
+        }
     }
 
     pub fn get(&self, name: &str) -> Option<&str> {
-        self.0
+        self.own
             .iter()
             .rev()
             .find(|(k, _)| k == name)
             .map(|(_, v)| v.as_str())
+            .or_else(|| self.parent.as_ref()?.get(name))
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.own.is_empty() && self.parent.as_ref().is_none_or(|p| p.is_empty())
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.0.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+        let mut layers = vec![self];
+        while let Some(p) = &layers[layers.len() - 1].parent {
+            layers.push(p);
+        }
+        layers
+            .into_iter()
+            .rev()
+            .flat_map(|m| m.own.iter().map(|(k, v)| (k.as_str(), v.as_str())))
     }
 
     /// These macros with `inner` layered on top. Values in `inner` are first
     /// expanded against `self`, so `<P>$(P):SUB</P>` works.
     pub fn with(&self, inner: &Macros) -> Macros {
-        let mut out = self.clone();
-        for (k, v) in &inner.0 {
-            let v = expand(v, &|name| self.get(name).map(str::to_string));
-            out.0.push((k.clone(), v));
+        let mut held = 0;
+        let own = inner
+            .iter()
+            .map(|(k, v)| {
+                let v = if held < MAX_LAYER_BYTES {
+                    expand(v, &|name| self.get(name).map(str::to_string))
+                } else {
+                    v.to_string()
+                };
+                held += v.len();
+                (k.to_string(), v)
+            })
+            .collect();
+        if inner.is_empty() {
+            return self.clone();
         }
-        out
+        Macros {
+            parent: Some(Arc::new(self.clone())),
+            own,
+        }
     }
 }
 
 /// Replace `$(NAME)` and `${NAME}` using `lookup`. `$(NAME=default)` falls back
 /// to the default; unknown names are left as written, like Phoebus does.
-/// Text whose expansion would take more than [`MAX_WORK`] bytes of output,
-/// such as nested `$(M)` that each name `$(M)` several times, is left as written.
+/// Text whose expansion would take more than [`MAX_WORK`] (16 KiB) of output,
+/// such as nested `$(M)` that each name `$(M)` several times, is returned
+/// unexpanded, as written, rather than truncated.
 pub fn expand(text: &str, lookup: &dyn Fn(&str) -> Option<String>) -> String {
     let mut work = 0;
     expand_depth(text, lookup, 0, &mut work).unwrap_or_else(|| text.to_string())
 }
 
 /// The most output, counted over every nested expansion, that [`expand`] builds.
-const MAX_WORK: usize = 64 << 10;
+const MAX_WORK: usize = 16 << 10;
 
 /// [`expand`] one level down, adding the size of what it builds to `work`;
 /// `None` once that passes [`MAX_WORK`].
@@ -176,6 +208,23 @@ mod tests {
             expand("$(L)", &|n| m.get(n).map(str::to_string)).len(),
             10_000
         );
+    }
+
+    #[test]
+    fn macro_sets_stay_bounded() {
+        // Layers that each double a value, then 1500 macros naming V11:
+        // about 58 MB if every one were stored expanded.
+        let mut set = Macros::from_pairs([("V0", "x".repeat(4))]);
+        for i in 1..=13 {
+            let v = format!("$(V{})$(V{})", i - 1, i - 1);
+            set = set.with(&Macros::from_pairs([(format!("V{i}"), v)]));
+        }
+        let many = Macros::from_pairs((0..1500).map(|i| (format!("N{i}"), "$(V11)")));
+        let set = set.with(&many);
+        let held: usize = set.iter().map(|(k, v)| k.len() + v.len()).sum();
+        assert!(held <= 2 * MAX_LAYER_BYTES, "{held} bytes");
+        // Sharing: layering nothing, or something, doesn't copy the set.
+        assert_eq!(set.with(&Macros::default()), set);
     }
 
     #[test]

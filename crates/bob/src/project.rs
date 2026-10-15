@@ -7,6 +7,7 @@
 //! links), and [`locate`] finds the real file when it is opened.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
@@ -64,13 +65,18 @@ pub fn virtual_path(project_dir: &Path, real: &Path) -> Option<PathBuf> {
     })
 }
 
+/// The most of a `.project` file that is read.
+const MAX_PROJECT_SIZE: u64 = 1 << 20;
+
 /// Linked folders of `dir`'s project, by name, when `dir` holds a `.project`.
 pub fn links(dir: &Path) -> Option<Links> {
     let mut projects = PROJECTS.lock().unwrap();
     if let Some(links) = projects.get(dir) {
         return Some(links.clone());
     }
-    let text = std::fs::read_to_string(dir.join(".project")).ok()?;
+    let file = std::fs::File::open(dir.join(".project")).ok()?;
+    let mut text = String::new();
+    file.take(MAX_PROJECT_SIZE).read_to_string(&mut text).ok()?;
     let links = parse(&text, dir);
     projects.insert(dir.to_path_buf(), links.clone());
     Some(links)
@@ -79,7 +85,13 @@ pub fn links(dir: &Path) -> Option<Links> {
 /// `<link><name>…</name><location>…</location></link>` entries of the
 /// `.project` in `dir` (or `<locationURI>`), resolved by [`location`].
 fn parse(text: &str, dir: &Path) -> Links {
-    let Ok(doc) = roxmltree::Document::parse(text) else {
+    let Ok(doc) = roxmltree::Document::parse_with_options(
+        text,
+        roxmltree::ParsingOptions {
+            nodes_limit: 1 << 16,
+            ..Default::default()
+        },
+    ) else {
         return Vec::new();
     };
     doc.descendants()
