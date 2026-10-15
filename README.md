@@ -4,10 +4,14 @@ A lean viewer for [Phoebus Display Builder](https://control-system-studio.readth
 `.bob` screens, written in Rust with [egui](https://github.com/emilk/egui).
 It also opens the older CS-Studio BOY `.opi` screens (see [BOY `.opi` displays](#boy-opi-displays)).
 It shows live EPICS Channel Access and PV Access values, including areaDetector
-images, and is small enough to run on a phone, in the Android 16 Linux Terminal (Debian 13, aarch64).
+images (decimated when a side is over 2048 pixels, to keep drawing fast), and is small enough to run on a phone, in the Android 16 Linux Terminal (Debian 13, aarch64).
 
 Scripts (Jython/JavaScript), display editing, alarm and archiver services are
-out of scope.
+out of scope. The status line shows "N scripts ignored" and "N unsupported
+widgets" for a display that uses them.
+
+Fidelity to Phoebus is approximate: sizes, fonts (scaled by 0.95) and layout
+were tuned by eye, and output has not been compared with Phoebus's own.
 
 ## Install
 
@@ -100,7 +104,7 @@ name or value, open the PV details, or trend it (see [Trends](#trends)). On a to
 | scaledslider, scrollbar, spinner | |
 | linearmeter | scale, warning regions from the levels (the PV's alarm limits with `limits_from_pv`), limit markers, needle; horizontal or vertical |
 | meter | a dial: scale (linear or `log_scale`), warning regions from the levels (the PV's alarm limits with `limits_from_pv`), needle |
-| progressbar, tank, thermometer | drawn as bars for now |
+| progressbar, tank, thermometer | one shared bar renderer (tank and thermometer are vertical bars with their own default fill colours) |
 | xyplot | line, step and bar traces with markers against index or an x PV; several y axes, autoscale, log scale, grid, legend |
 | stripchart | its traces' PVs over the last `time_range`, sampled from when the display opened, on the first y axis (autoscale or fixed, log scale, grid), legend |
 | rectangle, ellipse, arc, polyline, polygon | dashed and dotted `line_style` for rectangles and polylines |
@@ -116,6 +120,10 @@ property, or one item of a list such as `symbols[0]`; output expression rules),
 alarm borders and dashed borders for disconnected PVs, back and
 forward navigation, `loc://` and `sim://` PVs. The display name, with macros
 expanded (or the file name if it has none), is the window title.
+
+Unsupported widgets, such as table, webbrowser, array, fileselector and
+byte-array, are drawn as a grey placeholder labelled with the widget type
+and PV name.
 
 Not yet: compressed (codec) images, image axes, ROIs and cursor PVs, the XY plot
 `markers`, error bars and toolbar, the strip chart's toolbar and second y axes, GIF and JPEG
