@@ -2,7 +2,9 @@
 
 mod app;
 mod axis;
+mod chrome;
 mod colormaps;
+mod fetch;
 mod image;
 mod meter;
 mod plot;
@@ -15,19 +17,26 @@ mod widgets;
 
 use std::path::PathBuf;
 
-use bob::Macros;
+use bob::{Macros, Source};
 use eframe::egui;
 
 const USAGE: &str = "\
-usage: bobview [options] [display.bob]
+usage: bobview [options] [display.bob | http(s)://host/display.bob]
 
 options:
   -m, --macros P=X,R=Y   macros for the display
   -z, --zoom FACTOR      fixed zoom instead of fit-to-window
   -f, --fullscreen       start full screen
   -k, --keypad           edit values with an on-screen keypad (automatic on touch)
+  --ui-scale F|auto      size of the toolbar and menus relative to the desktop's
+                         scale (default auto: smaller on a small high-DPI screen;
+                         also set by BOBVIEW_UI_SCALE)
   --snapshot OUT.png     render to a PNG without a window and exit
-  --size WxH             snapshot size (default 1280x800)
+  --size WxH             snapshot size in pixels (default 1280x800); 'auto' starts at
+                         the window's default size and resizes it as a window
+                         manager would, on a monitor of 1920x1080 points
+  --scale-factor F       snapshot as on a screen with this desktop scale (default 1),
+                         e.g. 2.75 for a phone; --click positions are in pixels
   --wait SECONDS         time for PVs to connect before a snapshot (default 2)
   --click X,Y            click here before the snapshot (repeatable)
   --right-click X,Y      right-click here before the snapshot (repeatable)
@@ -36,6 +45,8 @@ options:
 
 With no display, bobview opens index.bob from the bundled displays
 (~/.local/share/bobview/displays) when present, else a file chooser.
+A display may also be an http:// or https:// URL; files it names are
+fetched relative to it.
 PVs without a prefix use Channel Access; EPICS_CA_ADDR_LIST and
 EPICS_CA_NAME_SERVERS select the IOCs. Set BOBVIEW_LOG=debug for more output.";
 
@@ -46,7 +57,9 @@ fn main() -> eframe::Result {
     let mut zoom = None;
     let mut fullscreen = false;
     let mut snapshot = None;
-    let mut size = [1280, 800];
+    let mut size = Some([1280, 800]);
+    let mut scale_factor = 1.0;
+    let mut ui_scale = None;
     let mut wait = 2.0;
     let mut clicks = Vec::new();
     let mut keypad = false;
@@ -57,6 +70,21 @@ fn main() -> eframe::Result {
             "-z" | "--zoom" => zoom = args.next().and_then(|z| z.parse().ok()),
             "-f" | "--fullscreen" => fullscreen = true,
             "-k" | "--keypad" => keypad = true,
+            "--ui-scale" => {
+                let text = args.next().unwrap_or_default();
+                ui_scale = chrome::UiScale::parse(&text);
+                if ui_scale.is_none() {
+                    eprintln!("--ui-scale: expected a number or auto, not {text:?}");
+                    std::process::exit(2);
+                }
+            }
+            "--scale-factor" => {
+                scale_factor = args
+                    .next()
+                    .and_then(|s| s.parse::<f32>().ok())
+                    .filter(|s| *s > 0.0)
+                    .unwrap_or(scale_factor)
+            }
             "--click" | "--right-click" => {
                 let button = if arg == "--click" {
                     egui::PointerButton::Primary
@@ -70,11 +98,17 @@ fn main() -> eframe::Result {
                 }
             }
             "--snapshot" => snapshot = args.next().map(PathBuf::from),
-            "--size" => {
-                if let Some((w, h)) = args.next().as_deref().and_then(|s| s.split_once('x')) {
-                    size = [w.parse().unwrap_or(size[0]), h.parse().unwrap_or(size[1])];
+            "--size" => match args.next().as_deref() {
+                Some("auto") => size = None,
+                Some(s) => {
+                    if let Some((w, h)) = s.split_once('x')
+                        && let (Ok(w), Ok(h)) = (w.parse(), h.parse())
+                    {
+                        size = Some([w, h]);
+                    }
                 }
-            }
+                None => {}
+            },
             "--wait" => wait = args.next().and_then(|w| w.parse().ok()).unwrap_or(wait),
             "-h" | "--help" => {
                 println!("{USAGE}");
@@ -84,12 +118,13 @@ fn main() -> eframe::Result {
                 println!("bobview {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
-            _ => file = Some(PathBuf::from(arg)),
+            _ => file = Some(Source::parse(&arg)),
         }
     }
+    let ui_scale = ui_scale.unwrap_or_else(chrome::UiScale::from_env);
     let start = file
-        .or_else(default_display)
-        .map(|path| app::Location { path, macros });
+        .or_else(|| default_display().map(Source::File))
+        .map(|source| app::Location { source, macros });
 
     if let Some(out) = snapshot {
         let Some(start) = start else {
@@ -98,6 +133,8 @@ fn main() -> eframe::Result {
         };
         let opts = snapshot::Options {
             size,
+            scale_factor,
+            ui_scale,
             zoom,
             wait: std::time::Duration::from_secs_f64(wait),
             clicks,
@@ -114,7 +151,7 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("bobview")
             .with_app_id("bobview")
-            .with_inner_size([1024.0, 720.0])
+            .with_inner_size(chrome::DEFAULT_WINDOW)
             .with_fullscreen(fullscreen),
         ..Default::default()
     };
@@ -122,7 +159,7 @@ fn main() -> eframe::Result {
         "bobview",
         options,
         Box::new(move |cc| {
-            let mut app = app::BobApp::new(&cc.egui_ctx, start, zoom);
+            let mut app = app::BobApp::new(&cc.egui_ctx, start, zoom, ui_scale);
             app.set_keypad(keypad);
             Ok(Box::new(app))
         }),

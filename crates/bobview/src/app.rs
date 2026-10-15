@@ -3,10 +3,11 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use bob::Macros;
+use bob::{Macros, Source};
 use eframe::egui::{self, Color32, Id, Vec2};
 use pv::PvManager;
 
+use crate::chrome::{self, Chrome, UiScale};
 use crate::pvmenu;
 use crate::screen::{Node, Screen};
 use crate::style::{self, View};
@@ -14,7 +15,7 @@ use crate::widgets::{self, Cx, Request};
 
 #[derive(Clone, Debug)]
 pub struct Location {
-    pub path: PathBuf,
+    pub source: Source,
     pub macros: Macros,
 }
 
@@ -34,6 +35,9 @@ pub struct BobApp {
     keypad_mode: bool,
     keypad: Option<Keypad>,
     details: Option<pvmenu::Details>,
+    /// The display at `current`, being fetched and built on a thread.
+    loading: Option<std::sync::mpsc::Receiver<Result<Screen, bob::Error>>>,
+    chrome: Chrome,
 }
 
 struct Keypad {
@@ -42,9 +46,16 @@ struct Keypad {
 }
 
 impl BobApp {
-    pub fn new(ctx: &egui::Context, start: Option<Location>, zoom: Option<f32>) -> Self {
+    pub fn new(
+        ctx: &egui::Context,
+        start: Option<Location>,
+        zoom: Option<f32>,
+        ui_scale: UiScale,
+    ) -> Self {
         style::install_fonts(ctx);
         ctx.set_theme(egui::Theme::Light);
+        // The controls' zoom is ours (see `chrome`), not ctrl+plus/minus.
+        ctx.options_mut(|o| o.zoom_with_keyboard = false);
 
         let pvs = PvManager::new();
         // Coalesce PV updates into at most ~10 repaints a second.
@@ -67,9 +78,11 @@ impl BobApp {
             keypad_mode: false,
             keypad: None,
             details: None,
+            loading: None,
+            chrome: Chrome::new(ui_scale),
             open_path: start
                 .as_ref()
-                .map(|l| l.path.display().to_string())
+                .map(|l| l.source.to_string())
                 .unwrap_or_default(),
         };
         if let Some(loc) = start {
@@ -86,7 +99,30 @@ impl BobApp {
     fn show(&mut self, loc: Location) {
         // Drop the old screen first so its PVs disconnect before the new ones start.
         self.screen = None;
-        match Screen::load(&loc.path, &loc.macros, &self.pvs) {
+        self.open_path = loc.source.to_string();
+        self.loading = None;
+        if loc.source.is_url() {
+            // Build a fetched display on a thread, embedded displays and all,
+            // so a slow server doesn't freeze the window; `poll_loading`
+            // shows it once it arrives.
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (source, macros, pvs) = (loc.source.clone(), loc.macros.clone(), self.pvs.clone());
+            std::thread::spawn(move || {
+                tx.send(Screen::load(&source, &macros, &pvs)).ok();
+            });
+            self.loading = Some(rx);
+            self.error = None;
+            self.current = Some(loc);
+            return;
+        }
+        let loaded = Screen::load(&loc.source, &loc.macros, &self.pvs);
+        self.current = Some(loc);
+        self.loaded(loaded);
+    }
+
+    /// Show a loaded display, or why it could not be loaded.
+    fn loaded(&mut self, loaded: Result<Screen, bob::Error>) {
+        match loaded {
             Ok(screen) => {
                 self.screen = Some(screen);
                 self.error = None;
@@ -96,8 +132,27 @@ impl BobApp {
                 self.error = Some(e.to_string());
             }
         }
-        self.open_path = loc.path.display().to_string();
-        self.current = Some(loc);
+        self.chrome.display_changed();
+    }
+
+    /// Whether a display is still being fetched.
+    pub fn is_loading(&self) -> bool {
+        self.loading.is_some()
+    }
+
+    /// Show the display being fetched, or its error, once the fetch is done.
+    fn poll_loading(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.loading else { return };
+        match rx.try_recv() {
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint_after(Duration::from_millis(50));
+            }
+            Ok(loaded) => {
+                self.loading = None;
+                self.loaded(loaded);
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.loading = None,
+        }
     }
 
     /// Navigate to a display, recording where we came from.
@@ -129,14 +184,17 @@ impl BobApp {
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         // One row whatever the width, so a window sized to the display shows it
-        // near 100%; the display name is elided when there is no room.
+        // near 100%; the display name is elided when there is no room. A narrow
+        // window (a phone) keeps the navigation and Fit, and moves the rest
+        // into a menu.
+        let compact = ui.available_width() < chrome::FULL_TOOLBAR_WIDTH;
         ui.horizontal(|ui| {
             ui.spacing_mut().button_padding = Vec2::new(10.0, 6.0);
-            if ui
+            let back = ui
                 .add_enabled(!self.back.is_empty(), egui::Button::new("◀"))
-                .on_hover_text("Back")
-                .clicked()
-            {
+                .on_hover_text("Back");
+            self.chrome.button = back.rect.height();
+            if back.clicked() {
                 self.go_back();
             }
             if ui
@@ -154,34 +212,55 @@ impl BobApp {
             {
                 self.open(home);
             }
-            if ui.button("⟳").on_hover_text("Reload").clicked()
-                && let Some(cur) = self.current.clone()
-            {
-                self.show(cur);
-            }
-            ui.separator();
-            if ui.button("−").clicked() {
-                self.fit = false;
-                self.zoom = (self.zoom / 1.25).max(0.2);
-            }
-            if ui.selectable_label(self.fit, "Fit").clicked() {
-                self.fit = !self.fit;
-            }
-            if ui.button("+").clicked() {
-                self.fit = false;
-                self.zoom = (self.zoom * 1.25).min(5.0);
-            }
-            ui.label(format!("{:.0}%", self.zoom * 100.0));
-            ui.separator();
-            if ui
-                .selectable_label(self.keypad_mode, "⌨")
-                .on_hover_text("Edit values with an on-screen keypad")
-                .clicked()
-            {
-                self.keypad_mode = !self.keypad_mode;
-            }
-            if ui.selectable_label(self.show_open, "Open…").clicked() {
-                self.show_open = !self.show_open;
+            if compact {
+                ui.separator();
+                if ui.selectable_label(self.fit, "Fit").clicked() {
+                    self.fit = !self.fit;
+                }
+                ui.label(format!("{:.0}%", self.zoom * 100.0));
+                ui.menu_button("☰", |ui| {
+                    if ui.button("⟳ Reload").clicked() {
+                        self.reload();
+                    }
+                    if ui.button("+ Zoom in").clicked() {
+                        self.zoom_by(1.25);
+                    }
+                    if ui.button("− Zoom out").clicked() {
+                        self.zoom_by(1.0 / 1.25);
+                    }
+                    if ui.selectable_label(self.keypad_mode, "⌨ Keypad").clicked() {
+                        self.keypad_mode = !self.keypad_mode;
+                    }
+                    if ui.selectable_label(self.show_open, "Open…").clicked() {
+                        self.show_open = !self.show_open;
+                    }
+                });
+            } else {
+                if ui.button("⟳").on_hover_text("Reload").clicked() {
+                    self.reload();
+                }
+                ui.separator();
+                if ui.button("−").clicked() {
+                    self.zoom_by(1.0 / 1.25);
+                }
+                if ui.selectable_label(self.fit, "Fit").clicked() {
+                    self.fit = !self.fit;
+                }
+                if ui.button("+").clicked() {
+                    self.zoom_by(1.25);
+                }
+                ui.label(format!("{:.0}%", self.zoom * 100.0));
+                ui.separator();
+                if ui
+                    .selectable_label(self.keypad_mode, "⌨")
+                    .on_hover_text("Edit values with an on-screen keypad")
+                    .clicked()
+                {
+                    self.keypad_mode = !self.keypad_mode;
+                }
+                if ui.selectable_label(self.show_open, "Open…").clicked() {
+                    self.show_open = !self.show_open;
+                }
             }
             if let Some(s) = &self.screen {
                 ui.add(egui::Label::new(egui::RichText::new(&s.display.name).strong()).truncate())
@@ -190,26 +269,40 @@ impl BobApp {
         });
     }
 
+    fn reload(&mut self) {
+        if let Some(cur) = self.current.clone() {
+            crate::fetch::forget();
+            self.show(cur);
+        }
+    }
+
+    fn zoom_by(&mut self, factor: f32) {
+        self.fit = false;
+        self.zoom = (self.zoom * factor).clamp(0.2, 5.0);
+    }
+
     fn open_panel(&mut self, ui: &mut egui::Ui) {
         let mut chosen = None;
         ui.horizontal(|ui| {
-            ui.label("File:");
+            ui.label("File or URL:");
             let edit = ui
                 .add(egui::TextEdit::singleline(&mut self.open_path).desired_width(f32::INFINITY));
             if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                chosen = Some(PathBuf::from(self.open_path.trim()));
+                chosen = Some(Source::parse(&self.open_path));
             }
         });
-        let path = PathBuf::from(self.open_path.trim());
-        let dir = if path.is_dir() {
-            path
-        } else {
-            path.parent()
+        // Nothing to list for a URL (an empty path lists nothing).
+        let dir = match Source::parse(&self.open_path) {
+            Source::Url(_) => PathBuf::new(),
+            Source::File(path) if path.is_dir() => path,
+            Source::File(path) => path
+                .parent()
                 .map(Path::to_path_buf)
-                .unwrap_or_else(|| PathBuf::from("."))
+                .unwrap_or_else(|| PathBuf::from(".")),
         };
         egui::ScrollArea::vertical()
-            .max_height(200.0)
+            // Leave most of a short (landscape phone) window to the display.
+            .max_height(200f32.min(ui.ctx().content_rect().height() * 0.35))
             .show(ui, |ui| {
                 if let Some(parent) = dir.parent()
                     && ui.button("📁 ..").clicked()
@@ -227,20 +320,20 @@ impl BobApp {
                             self.open_path = format!("{}/", entry.display());
                         }
                     } else if ui.button(format!("🗋 {name}")).clicked() {
-                        chosen = Some(entry);
+                        chosen = Some(Source::File(entry));
                     }
                 }
             });
-        if let Some(path) = chosen {
+        if let Some(source) = chosen {
             self.show_open = false;
             if self.home.is_none() {
                 self.home = Some(Location {
-                    path: path.clone(),
+                    source: source.clone(),
                     macros: Macros::default(),
                 });
             }
             self.open(Location {
-                path,
+                source,
                 macros: Macros::default(),
             });
         }
@@ -250,11 +343,16 @@ impl BobApp {
         ui.horizontal(|ui| {
             if let Some(e) = &self.error {
                 ui.colored_label(Color32::RED, e);
+            } else if self.loading.is_some()
+                && let Some(cur) = &self.current
+            {
+                ui.spinner();
+                ui.label(format!("Loading {}", cur.source));
             } else if let Some(s) = &self.screen {
                 let (connected, total) = count_pvs(&s.nodes);
                 ui.label(format!("PVs {connected}/{total} connected"));
                 if let Some(cur) = &self.current {
-                    ui.weak(cur.path.display().to_string());
+                    ui.weak(cur.source.to_string());
                 }
             }
         });
@@ -309,14 +407,30 @@ impl eframe::App for BobApp {
 
 impl BobApp {
     pub fn draw(&mut self, ui: &mut egui::Ui) {
+        self.poll_loading(ui.ctx());
         if !self.keypad_mode && ui.input(|i| i.any_touches()) {
             self.keypad_mode = true;
         }
-        egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
+        widgets::touch_targets(ui.ctx(), self.keypad_mode);
+        self.chrome.begin(ui.ctx());
+        let toolbar = egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
+        self.chrome.toolbar = toolbar.response.rect.height();
+        let mut panels = self.chrome.toolbar;
         if self.show_open {
-            egui::Panel::top("open").show(ui, |ui| self.open_panel(ui));
+            panels += egui::Panel::top("open")
+                .show(ui, |ui| self.open_panel(ui))
+                .response
+                .rect
+                .height();
         }
-        egui::Panel::bottom("status").show(ui, |ui| self.status(ui));
+        panels += egui::Panel::bottom("status")
+            .show(ui, |ui| self.status(ui))
+            .response
+            .rect
+            .height();
+        self.chrome.panels = panels;
+        // The display's zoom is relative to the desktop's scale, not the controls'.
+        let ui_zoom = ui.ctx().zoom_factor();
 
         let mut requests = Vec::new();
         egui::CentralPanel::default()
@@ -329,7 +443,7 @@ impl BobApp {
                 if self.fit && screen.width > 0.0 {
                     let fit = (avail.x / screen.width as f32)
                         .min(avail.y / screen.height.max(1.0) as f32);
-                    self.zoom = fit.clamp(0.2, 5.0);
+                    self.zoom = (fit * ui_zoom).clamp(0.2, 5.0);
                 }
                 // Pinch to zoom on a touch screen (or ctrl+scroll).
                 let pinch = ui.input(|i| i.zoom_delta());
@@ -337,7 +451,8 @@ impl BobApp {
                     self.fit = false;
                     self.zoom = (self.zoom * pinch).clamp(0.2, 5.0);
                 }
-                let size = Vec2::new(screen.width as f32, screen.height as f32) * self.zoom;
+                let zoom = self.zoom / ui_zoom;
+                let size = Vec2::new(screen.width as f32, screen.height as f32) * zoom;
                 egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
                     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
                     ui.painter()
@@ -345,7 +460,7 @@ impl BobApp {
                     let mut cx = Cx {
                         view: View {
                             origin: rect.min,
-                            zoom: self.zoom,
+                            zoom,
                         },
                         clip: ui.clip_rect().intersect(rect),
                         pvs: &self.pvs,
@@ -357,15 +472,23 @@ impl BobApp {
                 });
             });
 
+        // A new display sizes the window to show it at 100% (or the fixed zoom).
+        let shown = if self.fit { 1.0 } else { self.zoom } / ui_zoom;
+        let display = self
+            .screen
+            .as_ref()
+            .map(|s| Vec2::new(s.width as f32, s.height as f32) * shown);
+        self.chrome.end(ui.ctx(), display);
+
         for req in requests {
             match req {
                 Request::Open {
-                    path,
+                    source,
                     macros,
                     target,
                 } => {
-                    log::info!("open {} ({target})", path.display());
-                    self.open(Location { path, macros });
+                    log::info!("open {source} ({target})");
+                    self.open(Location { source, macros });
                 }
                 Request::Keypad { pv, text } => self.keypad = Some(Keypad { pv, text }),
                 Request::Details(details) => self.details = Some(details),
@@ -467,7 +590,7 @@ impl BobApp {
 
 /// A PV's name as a user would type it: no `ca://` prefix, and no type or
 /// initial value for a local PV (`loc://x`, not `loc://x<VDouble>(1.5)`).
-fn plain_name(name: &pv::PvName) -> String {
+pub(crate) fn plain_name(name: &pv::PvName) -> String {
     match name.scheme {
         pv::Scheme::Ca => name.base().to_string(),
         _ => {

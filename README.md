@@ -33,7 +33,14 @@ This installs into `~/.local`:
 bobview-testioc &                    # simulated BL01T IOCs on this machine
 EPICS_CA_ADDR_LIST=127.0.0.1 bobview # opens share/bobview/displays/index.bob
 bobview path/to/screen.bob -m P=BL01T,R=:DET:
+bobview http://host:8080/opi/demo.bob  # displays can be served over http(s)
 ```
+
+A display can be a file or an `http://` / `https://` URL, on the command line
+or typed into Open…. Files it names (buttons, embedded displays, navigation
+tabs) are found relative to it, so a directory of screens served by any web
+server (e.g. `python3 -m http.server`) works as it does from disk. Fetched
+screens are kept in memory for Back and Forward; Reload fetches them again.
 
 `bobview-testioc` serves the PVs of the
 [epics-containers example-services](https://github.com/epics-containers/example-services)
@@ -53,8 +60,13 @@ Access.
 
 Options: `-z ZOOM` fixes the zoom instead of fitting the window, `-f` starts
 full screen, `--snapshot out.png` renders headless and exits (with `--size WxH`
-and `--wait SECONDS`, and `--click X,Y` or `--right-click X,Y` to interact
-first), `BOBVIEW_LOG=debug` gives more output. Hover over a widget to see its
+or `--size auto`, `--scale-factor F` to render as on a high-DPI screen,
+`--wait SECONDS`, and `--click X,Y` or `--right-click X,Y` to interact
+first), `BOBVIEW_LOG=debug` gives more output. The window opens at the size
+of the first display (when the screen has room) and follows the display while
+you leave its size alone. The toolbar, menus and keypad are scaled down on a
+small high-DPI screen so that they take a small share of it; `--ui-scale F`
+(or `BOBVIEW_UI_SCALE=F`) fixes their size, 1 being the desktop's own scale. Hover over a widget to see its
 PV and value; right-click it (long-press on a touch screen) to copy the PV
 name or value, or open the PV details. On a touch screen, pinch to zoom.
 
