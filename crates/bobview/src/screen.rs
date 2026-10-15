@@ -98,11 +98,29 @@ impl Node {
 }
 
 fn expand_for(w: &Widget, macros: &Macros, text: &str) -> String {
+    expand_props(w, macros, text, &std::cell::RefCell::new(Vec::new()))
+}
+
+/// [`expand_for`], with the properties being expanded in `active`. A widget
+/// property may name others, as BOY's rule PV `$(pv_name)` does with
+/// `$(name):STA` and the name `$(prefix)$(cell)S-VA-PIRG-01`; one that names
+/// itself, directly or not, or anything unknown is left as written.
+fn expand_props(
+    w: &Widget,
+    macros: &Macros,
+    text: &str,
+    active: &std::cell::RefCell<Vec<String>>,
+) -> String {
     bob::expand(text, &|name| {
         macros.get(name).map(str::to_string).or_else(|| {
-            w.text(name)
-                .filter(|t| !t.contains('$'))
-                .map(str::to_string)
+            if active.borrow().iter().any(|a| a == name) {
+                return None;
+            }
+            let prop = w.text(name)?;
+            active.borrow_mut().push(name.to_string());
+            let value = expand_props(w, macros, prop, active);
+            active.borrow_mut().pop();
+            Some(value).filter(|v| !v.contains('$'))
         })
     })
 }
@@ -432,6 +450,24 @@ mod tests {
         let button = &s.nodes[1];
         assert_eq!(button.expand("$(pv_name)"), "loc://b");
         assert_eq!(button.rect[2..], [100.0, 30.0]);
+    }
+
+    #[test]
+    fn property_macros_expand_their_own_macros() {
+        let d = Display::parse(
+            r#"<display><macros><cell>04</cell></macros>
+            <widget type="symbol"><name>SR$(cell)S-PIRG</name><pv_name>loc://$(name):STA</pv_name></widget>
+            <widget type="symbol"><name>$(name)x</name><pv_name>$(pv_name)</pv_name></widget>
+            </display>"#,
+        )
+        .unwrap();
+        let pvs = PvManager::new();
+        let s = Builder { pvs: &pvs }.screen(d, &Macros::default(), None, 0);
+        assert_eq!(s.nodes[0].pv_name, "loc://SR04S-PIRG:STA");
+        // Through two properties, as a BOY symbol's rule PV `$(pv_name)` is.
+        assert_eq!(s.nodes[0].expand("$(pv_name)"), "loc://SR04S-PIRG:STA");
+        // Properties naming themselves are left alone, not expanded forever.
+        assert_eq!(s.nodes[1].expand("$(name)"), "$(name)");
     }
 
     #[test]
