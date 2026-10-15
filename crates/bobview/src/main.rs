@@ -19,6 +19,7 @@ mod snapshot;
 mod style;
 mod symbol;
 mod trend;
+mod view;
 mod widgets;
 
 #[cfg(not(target_arch = "wasm32"))]

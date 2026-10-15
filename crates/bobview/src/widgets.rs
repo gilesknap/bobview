@@ -10,6 +10,7 @@ use pv::{PvManager, PvState, Value};
 use crate::rules::{self, Outcome};
 use crate::screen::{Builder, Node, Screen, group_inset, tab_elements};
 use crate::style::{self, View, color, named, severity_color};
+use crate::view::WindowKey;
 
 /// Requests that widgets pass up to the application.
 pub enum Request {
@@ -53,6 +54,8 @@ pub struct Cx<'a> {
     /// The open trend windows, (id, title), that a PV's context menu can
     /// add it to.
     pub trends: &'a [(u64, String)],
+    /// The window being drawn, which its requests act on.
+    pub window: WindowKey,
 }
 
 impl Cx<'_> {
@@ -65,6 +68,7 @@ impl Cx<'_> {
             depth: self.depth + 1,
             keypad: self.keypad,
             trends: self.trends,
+            window: self.window,
         }
     }
 }
@@ -2115,6 +2119,7 @@ mod tests {
                 depth: 0,
                 keypad: false,
                 trends: &[],
+                window: WindowKey::Main,
             };
             let actions = node.w.actions();
             assert_eq!(actions.len(), 1);
@@ -2441,6 +2446,7 @@ mod tests {
             depth: 0,
             keypad: false,
             trends: &[],
+            window: WindowKey::Main,
         };
         run_action(node, &node.w.actions()[0], &mut cx);
         let Some(Request::Open { source, macros, .. }) = requests.first() else {
@@ -2474,6 +2480,7 @@ mod tests {
             depth: 0,
             keypad: false,
             trends: &[],
+            window: WindowKey::Main,
         };
         for a in node.w.actions() {
             run_action(node, &a, &mut cx);
