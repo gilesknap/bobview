@@ -166,7 +166,7 @@ impl PvState {
                 .unwrap_or_else(|| i.to_string()),
             Value::DoubleArray(a) => join(a.iter().map(|v| format_double(*v, prec))),
             Value::LongArray(a) => join(a.iter().map(|v| v.to_string())),
-            Value::StrArray(a) => join(a.iter().cloned()),
+            Value::StrArray(a) => join(a.iter().map(|s| format!("\"{}\"", s.replace('"', "\\\"")))),
             Value::Image(img) => format!("{}x{} image #{}", img.width, img.height, img.unique_id),
         };
         let numeric = matches!(
@@ -228,6 +228,49 @@ pub fn split_array(text: &str) -> Vec<&str> {
     t.split([' ', ',']).filter(|x| !x.is_empty()).collect()
 }
 
+/// The elements of a string array typed as text, as Phoebus's `StringList`
+/// reads it: `["a b", "c"]`, with `\"` for a quote inside a quoted item, or
+/// unquoted items separated by commas.
+pub fn split_strings(text: &str) -> Vec<String> {
+    let t = text.trim();
+    let t = t.strip_prefix('[').unwrap_or(t);
+    let t = t.strip_suffix(']').unwrap_or(t);
+    let mut items = Vec::new();
+    let mut chars = t.chars().peekable();
+    while let Some(&c) = chars.peek() {
+        match c {
+            ' ' | '\t' => {
+                chars.next();
+            }
+            '"' => {
+                chars.next();
+                let mut item = String::new();
+                while let Some(c) = chars.next() {
+                    match c {
+                        '\\' if chars.peek() == Some(&'"') => {
+                            item.push(chars.next().unwrap_or('"'))
+                        }
+                        '"' => break,
+                        c => item.push(c),
+                    }
+                }
+                items.push(item);
+                // skip to just past the next comma
+                for c in chars.by_ref() {
+                    if c == ',' {
+                        break;
+                    }
+                }
+            }
+            _ => {
+                let item: String = chars.by_ref().take_while(|c| *c != ',').collect();
+                items.push(item.trim().to_string());
+            }
+        }
+    }
+    items
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,10 +319,11 @@ mod tests {
         assert!(text.starts_with("[0, 1, 2,"));
         assert!(text.ends_with("254, 255, ...]"));
         let s = PvState {
-            value: Value::StrArray(Arc::from(vec!["a".to_string(), "b".to_string()])),
+            value: Value::StrArray(Arc::from(vec!["a b".to_string(), "say \"hi\"".to_string()])),
             ..Default::default()
         };
-        assert_eq!(s.format(None, true), "[a, b]");
+        // Strings are quoted, as Phoebus's StringList.join does.
+        assert_eq!(s.format(None, true), r#"["a b", "say \"hi\""]"#);
     }
 
     #[test]
@@ -287,5 +331,21 @@ mod tests {
         assert_eq!(split_array("[1024, 1024]"), ["1024", "1024"]);
         assert_eq!(split_array(" 1 2,3 "), ["1", "2", "3"]);
         assert!(split_array("[]").is_empty());
+    }
+
+    #[test]
+    fn splits_typed_string_arrays_like_phoebus() {
+        assert_eq!(
+            split_strings(r#"["a b", "say \"hi\"", c d , e]"#),
+            ["a b", r#"say "hi""#, "c d", "e"]
+        );
+        assert_eq!(split_strings("one"), ["one"]);
+        assert!(split_strings("[]").is_empty());
+        // What format shows reads back as the same array.
+        let s = PvState {
+            value: Value::StrArray(Arc::from(vec!["x, y".to_string(), "z".to_string()])),
+            ..Default::default()
+        };
+        assert_eq!(split_strings(&s.format(None, false)), ["x, y", "z"]);
     }
 }
