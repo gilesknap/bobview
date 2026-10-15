@@ -4,8 +4,9 @@
 //! rest of this crate reads: BOY widget types become Phoebus ones, and their
 //! properties are renamed and converted as Phoebus's own legacy import does
 //! it (in its widgets' `CustomConfigurator`s), so nothing downstream needs to
-//! know where a display came from. Scripts are not translated; script actions
-//! stay as unsupported actions unless [`action`] recognises them.
+//! know where a display came from. Scripts are not translated, except the
+//! DLS `get_pv_name.py` widget script (see [`crate::group_link`]); script
+//! actions stay as unsupported actions unless [`action`] recognises them.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -393,7 +394,10 @@ fn widget(mut el: Element) -> Vec<Element> {
     let (kids, props): (Vec<Element>, Vec<Element>) =
         el.children.drain(..).partition(|c| c.name == "widget");
     el.children = props;
+    // Read before the scripts and widget type are dropped as noise.
+    let group_link = crate::group_link::from_opi(&el);
     remove(&mut el, NOISE);
+    el.children.extend(group_link);
     let mut children: Vec<Element> = kids.into_iter().flat_map(widget).collect();
 
     let kind = kind(&short, &el);
@@ -1370,7 +1374,7 @@ fn rules(el: &mut Element, renames: &[(&str, &str)]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Action, Display, FontStyle, Widget};
+    use crate::{Action, Display, FontStyle, GroupLink, LinkSets, Widget};
 
     /// Parse an `.opi` display holding `widgets`.
     fn opi(widgets: &str) -> Display {
@@ -2054,5 +2058,58 @@ ScriptUtil.executeEclipseCommand(command_id, ['pvnames', '$(dom)-VA-GAUGE-01:PLO
         assert_eq!(d.macros.get("dom"), Some("SR"));
         let w = &d.widgets[0];
         assert!(w.get("wuid").is_none() && w.get("widget_type").is_none() && !w.has_scripts());
+    }
+
+    #[test]
+    fn get_pv_name_scripts_become_group_links() {
+        let script = |pv: &str| {
+            format!(
+                r#"<scripts><path pathString="../../scripts/get_pv_name.py" checkConnect="false" sfe="false" seoe="false">
+                <pv trig="true">sim://ramp(0,1,1,1)</pv><pv trig="true">{pv}</pv></path></scripts>"#
+            )
+        };
+        let sym = one(
+            "edm.symbolwidget",
+            &format!(
+                "<widget_type>Edm Symbol Widget</widget_type><name>LOOKATME</name><pv_name></pv_name>
+                <image_file>../../../digitelMpc/digitelMpcIonp-symbol-34.png</image_file>{}",
+                script("$(device):MAXSTA.INP$(inp)")
+            ),
+        );
+        assert_eq!(
+            sym.group_link(),
+            Some(GroupLink {
+                pv_name: "$(device):MAXSTA.INP$(inp)".into(),
+                sets: LinkSets::Pv,
+                frames: Some(9),
+            })
+        );
+        assert!(!sym.has_scripts());
+        let label = one(
+            "Label",
+            &format!(
+                "<widget_type>Label</widget_type><text>SRXXC-VA-GXXX-YY</text>{}",
+                script("$(dom)-VA-SPACE-$(id):IONPSTA.INPA")
+            ),
+        );
+        let link = label.group_link().unwrap();
+        assert_eq!(link.sets, LinkSets::Text);
+        assert_eq!(link.pv_name, "$(dom)-VA-SPACE-$(id):IONPSTA.INPA");
+        // A strip it has no frame count for keeps its image_index.
+        let other = one(
+            "edm.symbolwidget",
+            &format!(
+                "<widget_type>Edm Symbol Widget</widget_type><image_file>x-symbol.png</image_file>{}",
+                script("L")
+            ),
+        );
+        assert_eq!(other.group_link().unwrap().frames, None);
+        // Other scripts, or this one without its link PV, are ignored.
+        let none = one(
+            "Label",
+            r#"<scripts><path pathString="scripts/other.py"><pv>A</pv><pv>B</pv></path>
+            <path pathString="get_pv_name.py"><pv>A</pv></path></scripts>"#,
+        );
+        assert_eq!(none.group_link(), None);
     }
 }

@@ -110,6 +110,7 @@ fn update_rules(node: &mut Node) {
 }
 
 fn draw_node(ui: &mut Ui, node: &mut Node, cx: &mut Cx, id: Id) {
+    crate::group_link::update(node, cx.pvs);
     update_rules(node);
     if node.w.bool("visible") == Some(false) {
         return;

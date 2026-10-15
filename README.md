@@ -151,7 +151,15 @@ actions are not run, except that the EDM "Exit" button's script
 closes the window, and a script that opens a Data Browser on some PVs
 (`ScriptUtil.executeEclipseCommand` of
 `org.csstudio.trends.databrowser2.newWindow` with `['pvnames', 'A,B']`, as
-the DLS vacuum "Graph" buttons do) opens a [trend](#trends) of them. Other scripts
+the DLS vacuum "Graph" buttons do) opens a [trend](#trends) of them. The
+DLS vacuum widget script `get_pv_name.py`, recognised by its file name, is
+done natively: its second PV, a vacuum space's link field such as
+`SR03S-VA-SPACE-01:IONPSTA.INPA`, names a group (`SR03S-VA-GIONP-01:STA NPP
+NMS` names `SR03S-VA-GIONP-01`), and each time it names a different one a
+label shows the group's name, and any other widget reads the group's `:STA`
+and takes its name, so its tooltip, right-click menu and the `$(name)` its
+click passes as `device` follow; an EDM symbol of a gauge, ion pump or valve
+strip shows the frame for that status (0 when disconnected). Other scripts
 are ignored. A disconnected EDM symbol shows its first frame inside
 the disconnected border, without Phoebus' overlay.
 

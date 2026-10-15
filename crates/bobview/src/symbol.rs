@@ -346,11 +346,13 @@ fn strip_uv(width: f32, frame: f32, index: i64) -> Rect {
     Rect::from_min_max(Pos2::new(u(i), 0.0), Pos2::new(u(i + 1), 1.0))
 }
 
-/// The symbol index to show: for a strip, `image_index`; else the PV's
-/// value; without a usable one, the index last shown, else `initial_index`.
+/// The symbol index to show: for a strip, the frame its group link picks
+/// or else `image_index`; else the PV's value; without a usable one, the
+/// index last shown, else `initial_index`.
 fn index(node: &Node, s: Option<&PvState>) -> i64 {
     if strip_width(&node.w).is_some() {
-        return node.w.i64("image_index").unwrap_or(0);
+        return crate::group_link::frame(node, s)
+            .unwrap_or_else(|| node.w.i64("image_index").unwrap_or(0));
     }
     let value = s
         .filter(|s| s.connected)

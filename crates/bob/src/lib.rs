@@ -7,6 +7,7 @@
 //! display, because their values depend on where a widget sits.
 
 mod element;
+mod group_link;
 mod macros;
 mod model;
 mod opi;
@@ -17,6 +18,7 @@ mod trend;
 use std::path::{Path, PathBuf};
 
 pub use element::Element;
+pub use group_link::{GroupLink, LinkSets, group_device, group_frame};
 pub use macros::{Macros, expand};
 pub use model::{Action, Color, Font, FontStyle, Rule, RuleExpr, named_color};
 pub use source::Source;

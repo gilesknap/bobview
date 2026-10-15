@@ -52,6 +52,8 @@ pub struct Node {
     pub traces: Vec<crate::plot::TracePvs>,
     /// The samples of each trace of a strip chart.
     pub series: Vec<Option<crate::trend::Series>>,
+    /// The vacuum-space link field that points this widget at a group.
+    pub link: Option<crate::group_link::Link>,
 }
 
 pub struct Builder<'a> {
@@ -264,6 +266,7 @@ impl Builder<'_> {
             .map(|r| CompiledRule::new(r, &|t| expand_for(w, &macros, t), self.pvs))
             .collect();
 
+        let link = crate::group_link::Link::new(w, &|t| expand_for(w, &macros, t), self.pvs);
         let action_pvs = w
             .actions()
             .iter()
@@ -296,6 +299,7 @@ impl Builder<'_> {
             symbol: Default::default(),
             traces: Vec::new(),
             series: Vec::new(),
+            link,
         };
 
         match w.kind.as_str() {
