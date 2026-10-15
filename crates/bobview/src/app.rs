@@ -21,6 +21,17 @@ pub struct Location {
     pub macros: Macros,
 }
 
+impl Location {
+    /// The same display with the same effective macros, however they were
+    /// layered (later definitions win).
+    fn same_display(&self, other: &Location) -> bool {
+        fn effective(m: &Macros) -> std::collections::BTreeMap<&str, &str> {
+            m.iter().collect()
+        }
+        self.source == other.source && effective(&self.macros) == effective(&other.macros)
+    }
+}
+
 pub struct BobApp {
     pvs: PvManager,
     /// The main window's display.
@@ -243,12 +254,13 @@ impl BobApp {
 
     /// The window showing `loc` (the same display and macros), if any.
     fn showing(&self, loc: &Location) -> Option<WindowKey> {
-        if self.main.current.as_ref() == Some(loc) {
+        let same = |cur: Option<&Location>| cur.is_some_and(|c| c.same_display(loc));
+        if same(self.main.current.as_ref()) {
             return Some(WindowKey::Main);
         }
         self.windows
             .iter()
-            .find(|w| !w.close && w.view.current.as_ref() == Some(loc))
+            .find(|w| !w.close && same(w.view.current.as_ref()))
             .map(|w| WindowKey::Child(w.id))
     }
 
@@ -1653,6 +1665,24 @@ mod tests {
         // Ctrl+click navigates in place.
         assert_eq!(route(true, true, None), Route::InPlace);
         assert_eq!(route(true, true, Some(child)), Route::InPlace);
+    }
+
+    #[test]
+    fn same_display_compares_effective_macros() {
+        use super::Location;
+        use bob::{Macros, Source};
+        let loc = |pairs: &[(&str, &str)]| Location {
+            source: Source::parse("a.bob"),
+            macros: Macros::from_pairs(pairs.iter().copied()),
+        };
+        let flat = loc(&[("P", "X"), ("R", "1")]);
+        assert!(flat.same_display(&loc(&[("R", "0"), ("P", "X"), ("R", "1")])));
+        assert!(!flat.same_display(&loc(&[("P", "X"), ("R", "2")])));
+        let other = Location {
+            source: Source::parse("b.bob"),
+            ..flat.clone()
+        };
+        assert!(!flat.same_display(&other));
     }
 
     #[test]
