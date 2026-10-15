@@ -5,6 +5,7 @@
 //! reload. Fetching blocks, so the app builds a fetched display on a thread.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
@@ -55,7 +56,13 @@ pub fn forget() {
 /// Nothing is cached here: the caller keeps what it decodes.
 pub fn bytes(source: &Source) -> Result<Vec<u8>, Error> {
     match source {
-        Source::File(path) => std::fs::read(path).map_err(|e| Error::Io(path.clone(), e)),
+        Source::File(path) => {
+            let mut data = Vec::new();
+            std::fs::File::open(path)
+                .and_then(|f| f.take(MAX_SIZE).read_to_end(&mut data))
+                .map_err(|e| Error::Io(path.clone(), e))?;
+            Ok(data)
+        }
         Source::Url(url) => {
             log::info!("fetching {url}");
             let fail = |why: String| Error::Fetch(url.to_string(), why);

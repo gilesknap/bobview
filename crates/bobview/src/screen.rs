@@ -44,8 +44,8 @@ pub struct Node {
     pub base: Option<Source>,
     /// The image widget's texture and the frame it shows.
     pub image: Option<crate::image::ImageCache>,
-    /// The symbol or picture widget's texture.
-    pub symbol: Option<crate::symbol::Texture>,
+    /// The symbol or picture widget's texture and index.
+    pub symbol: crate::symbol::State,
     /// The x and y PVs of each trace of an XY plot.
     pub traces: Vec<crate::plot::TracePvs>,
 }
@@ -244,7 +244,7 @@ impl Builder<'_> {
             error: None,
             base: base.cloned(),
             image: None,
-            symbol: None,
+            symbol: Default::default(),
             traces: Vec::new(),
         };
 

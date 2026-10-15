@@ -78,7 +78,8 @@ fn image(ctx: &egui::Context, source: &Source) -> Option<Result<Image, ()>> {
     images.insert(source.clone(), Entry::Loading);
     let (ctx, source) = (ctx.clone(), source.clone());
     std::thread::spawn(move || {
-        let entry = match crate::fetch::bytes(&source).map_err(|e| e.to_string()) {
+        // A decoder that panics on a bad file must not leave it loading.
+        let load = || match crate::fetch::bytes(&source).map_err(|e| e.to_string()) {
             Ok(data) => match decode(&source, &data) {
                 Ok(img) => Entry::Ready(img),
                 Err(e) => {
@@ -91,6 +92,7 @@ fn image(ctx: &egui::Context, source: &Source) -> Option<Result<Image, ()>> {
                 Entry::Failed
             }
         };
+        let entry = std::panic::catch_unwind(load).unwrap_or(Entry::Failed);
         IMAGES.lock().unwrap().insert(source, entry);
         ctx.request_repaint();
     });
@@ -147,8 +149,16 @@ fn decode_png(data: &[u8]) -> Result<ColorImage, String> {
     Ok(ColorImage::from_rgba_unmultiplied(size, &rgba))
 }
 
+/// What a symbol or picture widget keeps between frames.
+#[derive(Default)]
+pub struct State {
+    texture: Option<Texture>,
+    /// The symbol index last shown, kept while the PV has no usable value.
+    index: Option<i64>,
+}
+
 /// A widget's texture and what is on it: the image and its size in pixels.
-pub struct Texture {
+struct Texture {
     key: (Source, [usize; 2]),
     handle: TextureHandle,
 }
@@ -160,14 +170,19 @@ fn texture<'a>(
     source: &Source,
     img: &Image,
     size: Vec2,
-) -> &'a TextureHandle {
+) -> Option<&'a TextureHandle> {
+    let max_side = ctx.input(|i| i.max_texture_side) as f32;
     let px = match img {
+        Image::Raster(r) if r.size.into_iter().any(|n| n as f32 > max_side) => {
+            log::warn!("cannot show {}: too large for a texture", describe(source));
+            return None;
+        }
         Image::Raster(r) => r.size,
         Image::Svg(_) => {
             let px = (size * ctx.pixels_per_point())
                 .round()
                 .max(Vec2::splat(1.0));
-            let px = px * (MAX_SIDE / px.max_elem()).min(1.0);
+            let px = px * (MAX_SIDE.min(max_side) / px.max_elem()).min(1.0);
             [px.x as usize, px.y as usize]
         }
     };
@@ -191,7 +206,7 @@ fn texture<'a>(
             }
         }
     }
-    &slot.as_ref().unwrap().handle
+    slot.as_ref().map(|t| &t.handle)
 }
 
 fn render_svg(tree: &usvg::Tree, [w, h]: [usize; 2]) -> ColorImage {
@@ -242,13 +257,15 @@ fn value_index(w: &bob::Widget, s: &PvState) -> Option<i64> {
     }
 }
 
-/// The symbol index to show: the PV's value, else `initial_index`.
+/// The symbol index to show: the PV's value; without a usable one, the
+/// index last shown, else `initial_index`.
 fn index(node: &Node, s: Option<&PvState>) -> i64 {
-    let initial = node.w.i64("initial_index").unwrap_or(0);
-    match s {
-        Some(s) if s.connected => value_index(&node.w, s).unwrap_or(initial),
-        _ => initial,
-    }
+    let value = s
+        .filter(|s| s.connected)
+        .and_then(|s| value_index(&node.w, s));
+    value
+        .or(node.symbol.index)
+        .unwrap_or_else(|| node.w.i64("initial_index").unwrap_or(0))
 }
 
 pub fn draw_symbol(
@@ -286,6 +303,7 @@ pub fn draw_symbol(
 
     let symbols = w.list("symbols", "symbol");
     let idx = index(node, s);
+    node.symbol.index = Some(idx);
     let file = match usize::try_from(idx) {
         Ok(i) => symbols
             .get(i)
@@ -314,7 +332,10 @@ pub fn draw_symbol(
         let shown = show(
             ui,
             node,
-            &[&file, fallback.as_deref().unwrap_or("")],
+            &[
+                &file,
+                fallback.as_deref().filter(|f| *f != file).unwrap_or(""),
+            ],
             rect,
             angle,
             tint,
@@ -402,7 +423,9 @@ fn show(
             Some(Ok(img)) => img,
         };
         let size = picture_size(&node.w, img.size(), rect.size(), angle);
-        let handle = texture(ctx, &mut node.symbol, &source, &img, size);
+        let Some(handle) = texture(ctx, &mut node.symbol.texture, &source, &img, size) else {
+            continue;
+        };
         let mut mesh = Mesh::with_texture(handle.id());
         quad(&mut mesh, rect.center(), size, angle, tint);
         if glow {

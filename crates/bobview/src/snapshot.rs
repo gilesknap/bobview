@@ -115,7 +115,7 @@ pub fn run(start: Location, opts: &Options, out: &Path) -> Result<(), String> {
                         Duration::from_secs(1)
                     }
             });
-            if begin.elapsed() >= until && !app.is_loading() {
+            if begin.elapsed() >= until && !app.is_loading() && !crate::symbol::loading() {
                 break output;
             }
         }
