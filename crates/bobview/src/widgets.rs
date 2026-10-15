@@ -187,8 +187,10 @@ fn draw_node(ui: &mut Ui, node: &mut Node, cx: &mut Cx, id: Id) {
     }
 
     // A control that is disabled or whose PV is read-only is greyed out and
-    // shows a "not allowed" cursor; its writes are refused in `write`.
-    let disabled = response.is_some() && is_disabled(&node.w, state.as_ref());
+    // shows a "not allowed" cursor; its writes are refused in `write`. The
+    // image widget responds to the pointer but is not a control.
+    let disabled =
+        response.is_some() && node.w.kind != "image" && is_disabled(&node.w, state.as_ref());
     if disabled {
         painter.rect_filled(rect, CornerRadius::ZERO, Color32::from_white_alpha(110));
     }
@@ -446,11 +448,11 @@ fn format_value(w: &Widget, s: &PvState) -> String {
     }
 }
 
-/// The `bit` property: Phoebus defaults it to 0 for checkbox and slide_button,
-/// -1 (whole value) for LEDs and bool buttons.
+/// The `bit` property: Phoebus defaults it to 0 for checkbox, slide_button and
+/// bool_button, and to -1 (the whole value) for LEDs.
 fn bit(w: &Widget) -> i64 {
     let default = match w.kind.as_str() {
-        "checkbox" | "slide_button" => 0,
+        "checkbox" | "slide_button" | "bool_button" => 0,
         _ => -1,
     };
     w.i64("bit").unwrap_or(default)
@@ -1031,7 +1033,8 @@ fn bool_button(
         m @ (1 | 2) => {
             let v = s.and_then(|s| s.value.as_i64()).unwrap_or(0);
             let value = |pressed: bool| with_bit(bit, v, pressed == (m == 1)).to_string();
-            let down = resp.is_pointer_button_down_on();
+            // Only the primary button pushes; a right-click opens the PV menu.
+            let down = resp.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_down());
             let was_down = ui.data(|d| d.get_temp::<bool>(id).unwrap_or(false));
             if down != was_down {
                 ui.data_mut(|d| d.insert_temp(id, down));
@@ -1284,9 +1287,9 @@ fn checkbox(
     resp
 }
 
-/// Phoebus SlideButton (a JavaFX ToggleSwitch): the label, then a pill-shaped
-/// track in off_color/on_color with a round thumb that slides to the right
-/// when the selected bit is set. A click toggles the bit like a checkbox.
+/// Phoebus SlideButton (a JavaFX ToggleSwitch): a pill-shaped track in
+/// off_color/on_color with a round thumb that slides to the right when the
+/// selected bit is set, then the label. A click toggles the bit like a checkbox.
 fn slide_button(
     ui: &mut Ui,
     node: &mut Node,
@@ -1300,15 +1303,19 @@ fn slide_button(
     let on = s.is_some_and(|s| s.connected && is_on(&w, s));
     let resp = ui.interact(rect.intersect(cx.clip), id, Sense::click());
     let painter = ui.painter().with_clip_rect(cx.clip);
-    let (track, label_rect) = slide_layout(rect, z, !node.prop("label").is_empty());
+    // Phoebus labels a slide button "Label" unless the file says otherwise.
+    let label = w
+        .text("label")
+        .map_or_else(|| "Label".to_string(), |t| node.expand(t));
+    let (track, label_rect) = slide_layout(rect, z, !label.is_empty());
     let track_color = if on {
         w.color("on_color")
             .map(|c| color(&c))
-            .unwrap_or(Color32::from_rgb(60, 255, 60))
+            .unwrap_or_else(|| named("OK"))
     } else {
         w.color("off_color")
             .map(|c| color(&c))
-            .unwrap_or(Color32::from_rgb(60, 100, 60))
+            .unwrap_or_else(|| named("Button_Background"))
     };
     let r = CornerRadius::same((track.height() / 2.0).min(255.0) as u8);
     painter.rect(
@@ -1335,7 +1342,7 @@ fn slide_button(
         text_in(
             &painter,
             lr,
-            &node.prop("label"),
+            &label,
             font(&w, z),
             fg(&w),
             Align2::LEFT_CENTER,
@@ -1350,27 +1357,21 @@ fn slide_button(
 
 /// Track rect and optional label rect of a slide button. The track is a
 /// pill 1.8 times as wide as it is tall, at most 16px tall at zoom 1,
-/// fitted into the widget; with a label, the label is left and the track
-/// right, otherwise the track is centred.
+/// fitted into the widget at its left, with the label to its right, as
+/// Phoebus lays out its toggle switch and label.
 fn slide_layout(rect: Rect, z: f32, has_label: bool) -> (Rect, Option<Rect>) {
     let h = (16.0 * z)
         .min(rect.height() - 2.0)
         .min((rect.width() - 2.0) / 1.8)
         .max(2.0);
     let tw = h * 1.8;
-    if has_label {
-        let track = Rect::from_min_size(
-            Pos2::new(rect.right() - 1.0 - tw, rect.center().y - h / 2.0),
-            Vec2::new(tw, h),
-        );
-        let label = Rect::from_min_max(rect.min, Pos2::new(track.left() - 4.0 * z, rect.bottom()));
-        (track, Some(label))
-    } else {
-        (
-            Rect::from_center_size(rect.center(), Vec2::new(tw, h)),
-            None,
-        )
-    }
+    let track = Rect::from_min_size(
+        Pos2::new(rect.left() + 1.0, rect.center().y - h / 2.0),
+        Vec2::new(tw, h),
+    );
+    let label = has_label
+        .then(|| Rect::from_min_max(Pos2::new(track.right() + 6.0 * z, rect.top()), rect.max));
+    (track, label)
 }
 
 fn slider(
@@ -1867,22 +1868,36 @@ mod tests {
     }
 
     #[test]
+    fn bit_defaults_follow_phoebus() {
+        let kind = |k: &str| {
+            let xml = format!(r#"<display><widget type="{k}"/></display>"#);
+            bit(&bob::Display::parse(&xml).unwrap().widgets[0])
+        };
+        assert_eq!(kind("bool_button"), 0);
+        assert_eq!(kind("checkbox"), 0);
+        assert_eq!(kind("slide_button"), 0);
+        assert_eq!(kind("led"), -1);
+    }
+
+    #[test]
     fn slide_track_fits_small_widget() {
         let rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::splat(20.0));
         let (track, label) = slide_layout(rect, 1.0, false);
         assert!(label.is_none());
         assert!(rect.contains_rect(track));
         assert!(track.width() > track.height());
-        assert_eq!(track.center(), rect.center());
+        assert_eq!(track.center().y, rect.center().y);
+        assert_eq!(track.left(), rect.left() + 1.0);
     }
 
     #[test]
-    fn slide_track_right_of_label() {
+    fn slide_track_left_of_label() {
         let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(120.0, 30.0));
         let (track, label) = slide_layout(rect, 1.0, true);
         let label = label.unwrap();
         assert!(rect.contains_rect(track));
-        assert!(label.right() < track.left());
+        assert!(track.right() < label.left());
+        assert_eq!(label.right(), rect.right());
         assert_eq!(track.height(), 16.0);
     }
 }

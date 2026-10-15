@@ -381,7 +381,13 @@ pub fn draw(
         (body, None)
     };
 
-    let resp = ui.interact(area.intersect(clip), id, Sense::click_and_drag());
+    // Only the zoom-in and pan modes take drags, so that otherwise a drag on
+    // the image scrolls the display, as it must on a touch screen.
+    let sense = match cache.mode {
+        Mode::ZoomIn | Mode::Pan => Sense::click_and_drag(),
+        Mode::Pointer | Mode::ZoomOut => Sense::click(),
+    };
+    let resp = ui.interact(area.intersect(clip), id, sense);
     mouse(ui, cache, &resp, area, crosshair);
 
     let img = state.filter(|s| s.connected).and_then(|s| image_of(&w, s));
