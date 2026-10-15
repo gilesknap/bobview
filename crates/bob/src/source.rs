@@ -17,7 +17,7 @@ impl Source {
     pub fn parse(text: &str) -> Self {
         let text = text.trim();
         if is_http(text) {
-            Source::Url(text.to_string())
+            Source::Url(encode(text))
         } else if let Some(path) = text.strip_prefix("file://") {
             Source::File(PathBuf::from(path))
         } else {
@@ -34,7 +34,7 @@ impl Source {
     pub fn resolve(&self, file: &str) -> Source {
         let file = file.trim();
         if is_http(file) {
-            return Source::Url(file.to_string());
+            return Source::Url(encode(file));
         }
         match self {
             Source::Url(base) => Source::Url(join_url(base, file)),
@@ -162,6 +162,10 @@ mod tests {
             Source::Url("http://h/opi/demo.bob".into())
         );
         assert!(Source::parse("HTTPS://h/a.bob").is_url());
+        assert_eq!(
+            Source::parse("http://h/My Screen.bob"),
+            Source::Url("http://h/My%20Screen.bob".into())
+        );
         assert_eq!(
             Source::parse("file:///tmp/a.bob"),
             Source::File("/tmp/a.bob".into())

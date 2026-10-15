@@ -35,8 +35,8 @@ pub struct BobApp {
     keypad_mode: bool,
     keypad: Option<Keypad>,
     details: Option<pvmenu::Details>,
-    /// A URL being fetched for `current`, shown once it arrives.
-    loading: Option<std::sync::mpsc::Receiver<Result<(), bob::Error>>>,
+    /// The display at `current`, being fetched and built on a thread.
+    loading: Option<std::sync::mpsc::Receiver<Result<Screen, bob::Error>>>,
     chrome: Chrome,
 }
 
@@ -100,14 +100,29 @@ impl BobApp {
         // Drop the old screen first so its PVs disconnect before the new ones start.
         self.screen = None;
         self.open_path = loc.source.to_string();
-        // Fetch a URL on a thread first; `poll_loading` shows it once it arrives.
-        self.loading = crate::fetch::prefetch(&loc.source);
-        if self.loading.is_some() {
+        self.loading = None;
+        if loc.source.is_url() {
+            // Build a fetched display on a thread, embedded displays and all,
+            // so a slow server doesn't freeze the window; `poll_loading`
+            // shows it once it arrives.
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (source, macros, pvs) = (loc.source.clone(), loc.macros.clone(), self.pvs.clone());
+            std::thread::spawn(move || {
+                tx.send(Screen::load(&source, &macros, &pvs)).ok();
+            });
+            self.loading = Some(rx);
             self.error = None;
             self.current = Some(loc);
             return;
         }
-        match Screen::load(&loc.source, &loc.macros, &self.pvs) {
+        let loaded = Screen::load(&loc.source, &loc.macros, &self.pvs);
+        self.current = Some(loc);
+        self.loaded(loaded);
+    }
+
+    /// Show a loaded display, or why it could not be loaded.
+    fn loaded(&mut self, loaded: Result<Screen, bob::Error>) {
+        match loaded {
             Ok(screen) => {
                 self.screen = Some(screen);
                 self.error = None;
@@ -117,7 +132,6 @@ impl BobApp {
                 self.error = Some(e.to_string());
             }
         }
-        self.current = Some(loc);
         self.chrome.display_changed();
     }
 
@@ -133,15 +147,9 @@ impl BobApp {
             Err(std::sync::mpsc::TryRecvError::Empty) => {
                 ctx.request_repaint_after(Duration::from_millis(50));
             }
-            Ok(Ok(())) => {
-                if let Some(cur) = self.current.clone() {
-                    self.show(cur);
-                }
-            }
-            Ok(Err(e)) => {
-                log::error!("{e}");
-                self.error = Some(e.to_string());
+            Ok(loaded) => {
                 self.loading = None;
+                self.loaded(loaded);
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => self.loading = None,
         }
@@ -283,16 +291,14 @@ impl BobApp {
                 chosen = Some(Source::parse(&self.open_path));
             }
         });
-        let path = PathBuf::from(self.open_path.trim());
         // Nothing to list for a URL (an empty path lists nothing).
-        let dir = if Source::parse(&self.open_path).is_url() {
-            PathBuf::new()
-        } else if path.is_dir() {
-            path
-        } else {
-            path.parent()
+        let dir = match Source::parse(&self.open_path) {
+            Source::Url(_) => PathBuf::new(),
+            Source::File(path) if path.is_dir() => path,
+            Source::File(path) => path
+                .parent()
                 .map(Path::to_path_buf)
-                .unwrap_or_else(|| PathBuf::from("."))
+                .unwrap_or_else(|| PathBuf::from(".")),
         };
         egui::ScrollArea::vertical()
             // Leave most of a short (landscape phone) window to the display.

@@ -2,20 +2,27 @@
 //!
 //! Fetched displays are kept in memory, so going back and forward or
 //! reopening a screen doesn't fetch it again; [`forget`] clears them for a
-//! reload. The first fetch of a display can run on a thread ([`prefetch`])
-//! so a slow server doesn't freeze the window.
+//! reload. Fetching blocks, so the app builds a fetched display on a thread.
 
 use std::collections::HashMap;
-use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use bob::{Display, Error, Source};
+use ureq::ResponseExt;
 
 /// Largest display file we will read.
 const MAX_SIZE: u64 = 16 << 20;
 
-static CACHE: LazyLock<Mutex<HashMap<String, Arc<str>>>> = LazyLock::new(Default::default);
+/// A fetched display: the URL it was finally served from (after any
+/// redirects, for resolving the files it names) and its text.
+#[derive(Clone)]
+struct Fetched {
+    url: String,
+    text: Arc<str>,
+}
+
+static CACHE: LazyLock<Mutex<HashMap<String, Fetched>>> = LazyLock::new(Default::default);
 
 static AGENT: LazyLock<ureq::Agent> = LazyLock::new(|| {
     ureq::Agent::config_builder()
@@ -31,29 +38,12 @@ pub fn load(source: &Source) -> Result<Display, Error> {
     match source {
         Source::File(path) => Display::load(path),
         Source::Url(url) => {
-            let text = get(url)?;
-            let mut display = Display::parse(&text)?;
-            display.source = Some(source.clone());
+            let fetched = get(url)?;
+            let mut display = Display::parse(&fetched.text)?;
+            display.source = Some(Source::Url(fetched.url));
             Ok(display)
         }
     }
-}
-
-/// Start fetching `source` on a thread when it is a URL not yet cached;
-/// the receiver gets the outcome, after which [`load`] won't block.
-pub fn prefetch(source: &Source) -> Option<Receiver<Result<(), Error>>> {
-    let Source::Url(url) = source else {
-        return None;
-    };
-    if cached(url).is_some() {
-        return None;
-    }
-    let (tx, rx) = mpsc::channel();
-    let url = url.clone();
-    std::thread::spawn(move || {
-        tx.send(get(&url).map(drop)).ok();
-    });
-    Some(rx)
 }
 
 /// Drop every cached display, so the next load fetches it again.
@@ -61,17 +51,14 @@ pub fn forget() {
     CACHE.lock().unwrap().clear();
 }
 
-fn cached(url: &str) -> Option<Arc<str>> {
-    CACHE.lock().unwrap().get(url).cloned()
-}
-
-fn get(url: &str) -> Result<Arc<str>, Error> {
-    if let Some(text) = cached(url) {
-        return Ok(text);
+fn get(url: &str) -> Result<Fetched, Error> {
+    if let Some(fetched) = CACHE.lock().unwrap().get(url).cloned() {
+        return Ok(fetched);
     }
     log::info!("fetching {url}");
     let fail = |why: String| Error::Fetch(url.to_string(), why);
     let mut resp = AGENT.get(url).call().map_err(|e| fail(describe(e)))?;
+    let served = resp.get_uri().to_string();
     let text: Arc<str> = resp
         .body_mut()
         .with_config()
@@ -79,8 +66,12 @@ fn get(url: &str) -> Result<Arc<str>, Error> {
         .read_to_string()
         .map_err(|e| fail(describe(e)))?
         .into();
-    CACHE.lock().unwrap().insert(url.to_string(), text.clone());
-    Ok(text)
+    let fetched = Fetched { url: served, text };
+    CACHE
+        .lock()
+        .unwrap()
+        .insert(url.to_string(), fetched.clone());
+    Ok(fetched)
 }
 
 fn describe(e: ureq::Error) -> String {
@@ -118,6 +109,8 @@ mod tests {
                 *count.lock().unwrap() += 1;
                 let (status, body) = if first.starts_with("GET /opi/a.bob ") {
                     ("200 OK", DISPLAY)
+                } else if first.starts_with("GET /old/a.bob ") {
+                    ("301 Moved Permanently\r\nLocation: /opi/a.bob", "")
                 } else {
                     ("404 Not Found", "")
                 };
@@ -137,9 +130,7 @@ mod tests {
     fn fetches_caches_and_reports_errors() {
         let (base, hits) = serve();
         let src = Source::parse(&format!("{base}/opi/a.bob"));
-        let rx = prefetch(&src).expect("not cached yet");
-        rx.recv().unwrap().unwrap();
-        assert!(prefetch(&src).is_none(), "now cached");
+        load(&src).unwrap();
         let d = load(&src).unwrap();
         assert_eq!(d.name, "Served");
         assert_eq!(d.source.as_ref(), Some(&src));
@@ -148,6 +139,14 @@ mod tests {
         let missing = src.resolve("../missing.bob");
         let err = load(&missing).unwrap_err().to_string();
         assert_eq!(err, format!("cannot fetch {base}/missing.bob: HTTP 404"));
+    }
+
+    #[test]
+    fn names_resolve_from_where_a_redirect_lands() {
+        let (base, _) = serve();
+        let d = load(&Source::parse(&format!("{base}/old/a.bob"))).unwrap();
+        assert_eq!(d.name, "Served");
+        assert_eq!(d.resolve("b.bob"), Source::Url(format!("{base}/opi/b.bob")));
     }
 
     #[test]
