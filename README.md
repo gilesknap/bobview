@@ -14,8 +14,13 @@ out of scope.
 On the phone (Android Linux Terminal) or an x86_64 Linux desktop; `install.sh`
 picks the aarch64 or x86_64 release build to match the machine:
 
+Pre-requisites on debian distros:
 ```bash
 sudo apt install libxkbcommon0 libwayland-client0 libegl1 libgl1-mesa-dri
+```
+
+Install:
+```
 curl -sSfL https://raw.githubusercontent.com/gilesknap/bobview/main/install.sh | bash
 ```
 
