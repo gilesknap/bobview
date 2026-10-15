@@ -408,10 +408,16 @@ impl Trend {
             log: false,
             adding: String::new(),
         };
-        for name in names {
-            t.add(name, pvs);
-        }
+        t.extend(names, pvs);
         t
+    }
+
+    /// Add the PVs `names` that it doesn't have yet, each taking the next
+    /// line colour as a new trend's PVs do.
+    pub fn extend(&mut self, names: &[String], pvs: &PvManager) {
+        for name in names {
+            self.add(name, pvs);
+        }
     }
 
     fn add(&mut self, name: &str, pvs: &PvManager) {
@@ -778,6 +784,23 @@ mod tests {
         assert_eq!(t.series.len(), 1, "each PV once");
         assert_eq!(t.title(), "Trend: A:B");
         let t = Trend::new(1, &names(&["A", "B", "C"]), &pvs);
+        assert_eq!(t.title(), "Trend: A and 2 more");
+    }
+
+    #[test]
+    fn extending_adds_new_pvs_after_the_others() {
+        let pvs = PvManager::new();
+        let names = |n: &[&str]| -> Vec<String> { n.iter().map(|s| s.to_string()).collect() };
+        let mut t = Trend::new(0, &names(&["A"]), &pvs);
+        t.extend(&names(&["ca://A", "B", "B", " ", "C"]), &pvs);
+        // Each PV once, in the order added, so the new ones take the next
+        // colours as in a new trend of all three.
+        let shown: Vec<String> = t
+            .series
+            .iter()
+            .map(|s| crate::app::plain_name(s.pv.name()))
+            .collect();
+        assert_eq!(shown, ["A", "B", "C"]);
         assert_eq!(t.title(), "Trend: A and 2 more");
     }
 }

@@ -28,6 +28,8 @@ pub enum Request {
     Details(crate::pvmenu::Details),
     /// Open a trend window of these PVs.
     Trend(Vec<String>),
+    /// Add these PVs to the open trend window with this id.
+    TrendAdd(u64, Vec<String>),
     /// Close the display: go back to the one before, or close the window.
     Close,
     /// Run a command action of the display at `base` (see
@@ -48,6 +50,9 @@ pub struct Cx<'a> {
     pub depth: u32,
     /// Text entries open the on-screen keypad instead of taking keyboard focus.
     pub keypad: bool,
+    /// The open trend windows, (id, title), that a PV's context menu can
+    /// add it to.
+    pub trends: &'a [(u64, String)],
 }
 
 impl Cx<'_> {
@@ -59,6 +64,7 @@ impl Cx<'_> {
             requests: self.requests,
             depth: self.depth + 1,
             keypad: self.keypad,
+            trends: self.trends,
         }
     }
 }
@@ -276,7 +282,7 @@ fn draw_node(ui: &mut Ui, node: &mut Node, cx: &mut Cx, id: Id) {
         // combo or action button's own menu (which uses the default id).
         egui::Popup::context_menu(&resp)
             .id(id.with("context-menu"))
-            .show(|ui| crate::pvmenu::menu(ui, node, state.as_ref(), cx.requests));
+            .show(|ui| crate::pvmenu::menu(ui, node, state.as_ref(), cx.trends, cx.requests));
         let text = tooltip(node, state.as_ref());
         if !text.is_empty() {
             resp.on_hover_text(text);
@@ -2083,6 +2089,7 @@ mod tests {
                 requests: &mut requests,
                 depth: 0,
                 keypad: false,
+                trends: &[],
             };
             let actions = node.w.actions();
             assert_eq!(actions.len(), 1);
@@ -2408,6 +2415,7 @@ mod tests {
             requests: &mut requests,
             depth: 0,
             keypad: false,
+            trends: &[],
         };
         run_action(node, &node.w.actions()[0], &mut cx);
         let Some(Request::Open { source, macros, .. }) = requests.first() else {
@@ -2440,6 +2448,7 @@ mod tests {
             requests: &mut requests,
             depth: 0,
             keypad: false,
+            trends: &[],
         };
         for a in node.w.actions() {
             run_action(node, &a, &mut cx);

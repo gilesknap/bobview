@@ -17,8 +17,15 @@ pub struct Details {
     pub file: Option<bob::Source>,
 }
 
-/// Fill the context menu for a widget's PV.
-pub fn menu(ui: &mut Ui, node: &Node, state: Option<&PvState>, requests: &mut Vec<Request>) {
+/// Fill the context menu for a widget's PV. `trends` are the open trend
+/// windows, (id, title), that the PV can be added to.
+pub fn menu(
+    ui: &mut Ui,
+    node: &Node,
+    state: Option<&PvState>,
+    trends: &[(u64, String)],
+    requests: &mut Vec<Request>,
+) {
     let name = node.pv_name.as_str();
     let value = state.filter(|s| s.connected).map(|s| s.format(None, true));
 
@@ -52,7 +59,12 @@ pub fn menu(ui: &mut Ui, node: &Node, state: Option<&PvState>, requests: &mut Ve
                 .button(format!("Trend with rule PVs ({})", all.len()))
                 .clicked()
         {
-            requests.push(Request::Trend(all));
+            requests.push(Request::Trend(all.clone()));
+        }
+        add_to_trend(ui, "", &[name.to_string()], trends, requests);
+        if all.len() > 1 {
+            let with = format!(" with rule PVs ({})", all.len());
+            add_to_trend(ui, &with, &all, trends, requests);
         }
         if ui.button("PV details…").clicked() {
             requests.push(Request::Details(Details {
@@ -60,6 +72,34 @@ pub fn menu(ui: &mut Ui, node: &Node, state: Option<&PvState>, requests: &mut Ve
                 widget: widget_label(node),
                 file: node.base.clone(),
             }));
+        }
+    }
+}
+
+/// "Add to trend" entries: a button for the one open trend window, or a
+/// submenu listing them when there are several.
+fn add_to_trend(
+    ui: &mut Ui,
+    what: &str,
+    names: &[String],
+    trends: &[(u64, String)],
+    requests: &mut Vec<Request>,
+) {
+    match trends {
+        [] => {}
+        [(id, title)] => {
+            if ui.button(format!("Add{what} to \"{title}\"")).clicked() {
+                requests.push(Request::TrendAdd(*id, names.to_vec()));
+            }
+        }
+        _ => {
+            ui.menu_button(format!("Add{what} to trend"), |ui| {
+                for (id, title) in trends {
+                    if ui.button(title).clicked() {
+                        requests.push(Request::TrendAdd(*id, names.to_vec()));
+                    }
+                }
+            });
         }
     }
 }

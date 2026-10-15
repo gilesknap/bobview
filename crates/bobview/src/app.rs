@@ -567,6 +567,7 @@ impl BobApp {
         let ui_zoom = ui.ctx().zoom_factor();
 
         let mut requests = Vec::new();
+        let trends: Vec<(u64, String)> = self.trends.iter().map(|t| (t.id, t.title())).collect();
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(Color32::from_gray(200)))
             .show(ui, |ui| {
@@ -601,6 +602,7 @@ impl BobApp {
                         requests: &mut requests,
                         depth: 0,
                         keypad: self.keypad_mode,
+                        trends: &trends,
                     };
                     widgets::draw_screen(ui, screen, &mut cx, Id::new("display"));
                 });
@@ -632,6 +634,13 @@ impl BobApp {
                         .push(Trend::new(self.next_trend, &names, &self.pvs));
                     self.next_trend += 1;
                 }
+                Request::TrendAdd(id, names) => {
+                    if let Some(trend) = self.trends.iter_mut().find(|t| t.id == id) {
+                        log::info!("add {} to trend {id}", names.join(", "));
+                        trend.extend(&names, &self.pvs);
+                        raise_trend(ui.ctx(), id);
+                    }
+                }
                 Request::Command {
                     base,
                     directory,
@@ -651,23 +660,48 @@ impl BobApp {
         self.trend_windows(ui);
     }
 
-    /// Each trend in its own window, until it is closed.
+    /// Each trend in its own native window, until it is closed, or in a
+    /// window inside this one where there's only one native window (the
+    /// browser, snapshots).
     fn trend_windows(&mut self, ui: &mut egui::Ui) {
         let pvs = &self.pvs;
-        let screen = ui.ctx().content_rect();
+        let ctx = ui.ctx();
+        if ctx.embed_viewports() {
+            let screen = ctx.content_rect();
+            self.trends.retain_mut(|trend| {
+                let mut open = true;
+                // Each new window a little below and right of the one before.
+                let step = (trend.id % 8) as f32 * 24.0;
+                let size = Vec2::new(640.0, 420.0).min(screen.size() * 0.9);
+                egui::Window::new(trend.title())
+                    .id(trend_window_id(trend.id))
+                    .open(&mut open)
+                    .collapsible(false)
+                    .default_pos(screen.left_top() + Vec2::new(40.0, 60.0) + Vec2::splat(step))
+                    .default_size(size)
+                    .show(ctx, |ui| trend.ui(ui, pvs));
+                open
+            });
+            return;
+        }
         self.trends.retain_mut(|trend| {
-            let mut open = true;
-            // Each new window a little below and right of the one before.
-            let step = (trend.id % 8) as f32 * 24.0;
-            let size = Vec2::new(640.0, 420.0).min(screen.size() * 0.9);
-            egui::Window::new(trend.title())
-                .id(Id::new(("trend", trend.id)))
-                .open(&mut open)
-                .collapsible(false)
-                .default_pos(screen.left_top() + Vec2::new(40.0, 60.0) + Vec2::splat(step))
-                .default_size(size)
-                .show(ui.ctx(), |ui| trend.ui(ui, pvs));
-            open
+            // The window manager places it: Wayland won't let us.
+            let builder = egui::ViewportBuilder::default()
+                .with_title(trend.title())
+                .with_app_id("bobview")
+                .with_inner_size([640.0, 420.0])
+                .with_min_inner_size([320.0, 200.0]);
+            ctx.show_viewport_immediate(trend_viewport(trend.id), builder, |ui, class| {
+                if class == egui::ViewportClass::EmbeddedWindow {
+                    // No native windows after all: a window in this one,
+                    // which can't be closed.
+                    trend.ui(ui, pvs);
+                    return true;
+                }
+                egui::CentralPanel::default().show(ui, |ui| trend.ui(ui, pvs));
+                // Closing the window drops the trend, and its PVs with it.
+                !ui.input(|i| i.viewport().close_requested())
+            })
         });
     }
 
@@ -753,6 +787,25 @@ impl BobApp {
             Some(None) => self.keypad = None,
             None => {}
         }
+    }
+}
+
+/// The native window of the trend `id`.
+fn trend_viewport(id: u64) -> egui::ViewportId {
+    egui::ViewportId::from_hash_of(("trend", id))
+}
+
+/// The trend `id`'s window inside the main one, where windows are embedded.
+fn trend_window_id(id: u64) -> Id {
+    Id::new(("trend", id))
+}
+
+/// Bring the trend `id`'s window to the front, as a PV is added to it.
+fn raise_trend(ctx: &egui::Context, id: u64) {
+    if ctx.embed_viewports() {
+        ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, trend_window_id(id)));
+    } else {
+        ctx.send_viewport_cmd_to(trend_viewport(id), egui::ViewportCommand::Focus);
     }
 }
 
