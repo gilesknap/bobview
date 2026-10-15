@@ -158,7 +158,8 @@ fn percent_decode(text: &str) -> std::ffi::OsString {
     }
     #[cfg(unix)]
     return std::os::unix::ffi::OsStringExt::from_vec(out);
-    // Elsewhere (the browser, which has no files anyway) paths are text.
+    // Elsewhere (Windows, and the browser, which has no files anyway) paths
+    // are text.
     #[cfg(not(unix))]
     return String::from_utf8_lossy(&out).into_owned().into();
 }

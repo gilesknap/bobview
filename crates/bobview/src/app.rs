@@ -601,6 +601,8 @@ impl BobApp {
             && s.title != self.window_title
         {
             self.window_title = s.title.clone();
+            // A browser page's title is set when the display loads instead.
+            #[cfg(not(target_arch = "wasm32"))]
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::Title(self.window_title.clone()));
         }

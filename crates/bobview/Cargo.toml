@@ -21,6 +21,8 @@ libc = "0.2.190"
 
 # The browser build: see web/index.html.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+# Local time for trend axes from the browser's time zone.
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "wasmbind"] }
 js-sys = "0.3.106"
 wasm-bindgen = "0.2.129"
 wasm-bindgen-futures = "0.4.79"
