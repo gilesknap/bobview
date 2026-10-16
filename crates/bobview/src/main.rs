@@ -418,6 +418,8 @@ fn unescape_macro(text: &str) -> String {
 /// `?display=https://host/opi/index.bob&macros=P=X&pvws=pvws.host:443`
 /// (and `zoom=1.5`, `token=SECRET` for a server with `--write`).
 /// A relative display is found next to the page; the default is `index.bob`.
+/// With a token, displays come only from the page's server, and writes
+/// carry the token only to a PVWS there.
 #[cfg(target_arch = "wasm32")]
 fn main() {
     use wasm_bindgen::JsCast;
@@ -437,7 +439,10 @@ fn main() {
         pv::set_pvws(&pvws);
     }
     if let Some(token) = query.get("token") {
+        // The token goes only to the page's own server, and only its
+        // displays may use it.
         pv::set_write_token(&token);
+        fetch::same_origin_only();
     }
     let zoom = query.get("zoom").and_then(|z| {
         parse_zoom(&z)

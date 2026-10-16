@@ -42,8 +42,23 @@ pub fn set_pvws(url: &str) {
 static TOKEN: Mutex<Option<String>> = Mutex::new(None);
 
 /// Send `token` with every write, for a server that needs one (`--write`).
+/// It goes only to a socket on the page's own server: another, named by
+/// a link's `&pvws=`, could keep it.
 pub fn set_write_token(token: &str) {
     *TOKEN.lock() = Some(token.to_string());
+}
+
+/// The write token, if there is one and the socket is the page's server's.
+fn token() -> Option<String> {
+    let token = TOKEN.lock().clone()?;
+    let page = web_sys::window()?.location().href().ok()?;
+    let socket = url();
+    if crate::same_origin(&page, &socket) {
+        Some(token)
+    } else {
+        log::warn!("not sending the write token to {socket}, another server than the page's");
+        None
+    }
 }
 
 fn url() -> String {
@@ -119,7 +134,7 @@ pub(crate) fn write(name: &str, state: &PvState, text: String, long_string: bool
     if long_string {
         msg["long_string"] = json!(true);
     }
-    if let Some(token) = TOKEN.lock().as_ref() {
+    if let Some(token) = token() {
         msg["token"] = json!(token);
     }
     SOCKET.with_borrow_mut(|s| {
@@ -297,7 +312,25 @@ impl Socket {
                     shared.update(|s| apply(s, &sub.vtype, &msg));
                 }
             }
-            Some("error") => log::warn!("PVWS: {}", msg.get("message").unwrap_or(&Json::Null)),
+            Some("error") => {
+                let message = msg
+                    .get("message")
+                    .and_then(Json::as_str)
+                    .unwrap_or_default();
+                // A refused write names its PV: tell the user, as for a
+                // write refused here.
+                let shared = msg
+                    .get("pv")
+                    .and_then(Json::as_str)
+                    .and_then(|name| self.subs.get(name))
+                    .and_then(|sub| sub.shared.upgrade());
+                match shared {
+                    Some(shared) if msg.contains_key("write_error") => {
+                        shared.ctl.notify(message.to_string())
+                    }
+                    _ => log::warn!("PVWS: {message}"),
+                }
+            }
             _ => {}
         }
     }

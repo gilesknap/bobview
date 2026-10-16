@@ -373,11 +373,15 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "env_logger",
+ "httpdate",
+ "libc",
  "log",
+ "mime_guess",
  "percent-encoding",
  "pv",
  "serde_json",
  "tokio",
+ "tokio-util",
  "tower-http",
 ]
 

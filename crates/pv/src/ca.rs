@@ -7,7 +7,7 @@ use epics_base_rs::types::DbFieldType;
 use epics_ca_rs::EpicsValue;
 use epics_ca_rs::client::{CaChannel, CaClient, ConnectionEvent};
 use epics_ca_rs::protocol::{DBE_ALARM, DBE_VALUE};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 
 use crate::{Put, PvState, Severity, Shared, Value, Writer};
 
@@ -44,7 +44,7 @@ fn is_number_list(text: &str) -> bool {
 pub(crate) async fn run(client: &CaClient, pv: &str, shared: Arc<Shared>) {
     let channel = client.create_channel(pv);
     let mut events = channel.connection_events();
-    let (tx, mut writes) = mpsc::unbounded_channel();
+    let (tx, mut writes) = crate::write_queue();
     shared.set_writer(Writer::Channel(tx));
 
     let mut retry = std::time::Duration::from_millis(500);
@@ -105,6 +105,9 @@ pub(crate) async fn run(client: &CaClient, pv: &str, shared: Arc<Shared>) {
                 None => return,
             },
             Some(put) = writes.recv() => {
+                if !shared.can_write(&put.text) {
+                    continue;
+                }
                 let text = &put.text;
                 let value = shared.snapshot().value;
                 let native = channel.native_field_type().ok();
