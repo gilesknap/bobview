@@ -20,10 +20,17 @@ On the phone (Android Linux Terminal), an x86_64 Linux desktop or a Mac
 (Apple silicon or Intel, macOS 11 or later); `install.sh` picks the aarch64
 or x86_64, Linux or macOS release build to match the machine.
 
-Pre-requisites on debian distros (none on macOS):
+Pre-requisites on Debian and Ubuntu:
 ```bash
 sudo apt install libxkbcommon0 libwayland-client0 libegl1 libgl1-mesa-dri
 ```
+
+On RHEL, Rocky, Alma and Fedora:
+```bash
+sudo dnf install libxkbcommon libwayland-client libglvnd-egl mesa-dri-drivers
+```
+
+None are needed on macOS.
 
 Install:
 ```
