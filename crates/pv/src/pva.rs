@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use epics_pva_rs::client::PvaClient;
-use epics_pva_rs::client_native::ops_v2::{MonitorEvent, MonitorEventMask};
+use epics_pva_rs::client_native::ops_v2::{MonitorConnEvent, MonitorTermination};
 use epics_pva_rs::pvdata::{PvField, PvStructure, ScalarValue, TypedScalarArray};
 use tokio::sync::mpsc;
 
@@ -18,38 +18,56 @@ pub(crate) async fn run(client: &PvaClient, pv: &str, shared: Arc<Shared>) {
     let (tx, mut writes) = mpsc::unbounded_channel::<String>();
     shared.set_writer(Writer::Channel(tx));
 
-    // Writes run beside the monitor, each as its own put.
+    // Writes run beside the monitor, each as its own put. Weak: the state
+    // holds the sender this task waits on, so a strong reference would
+    // keep both, and the PV's last value, alive after the PV is dropped.
     let put_client = client.clone();
     let put_pv = pv.to_string();
-    let put_shared = shared.clone();
+    let put_shared = Arc::downgrade(&shared);
     tokio::spawn(async move {
         while let Some(text) = writes.recv().await {
             let result = put_client.pvput(&put_pv, &text).await;
-            put_shared.write_result(&text, result.err().map(|e| e.to_string()));
+            if let Some(shared) = put_shared.upgrade() {
+                shared.write_result(&text, result.err().map(|e| e.to_string()));
+            }
         }
     });
 
     let mut retry = Duration::from_millis(500);
     loop {
-        let result = client
-            .pvmonitor_events(pv, None, MonitorEventMask::default(), |event| match event {
-                MonitorEvent::Connected { .. } => shared.update(|s| s.error = None),
-                MonitorEvent::Data { value, .. } => {
-                    shared.update(|s| apply(s, &value));
-                }
-                MonitorEvent::Disconnected => shared.update(|s| s.connected = false),
-                MonitorEvent::Finished => {}
-            })
+        // A handle monitor, not `pvmonitor_events`: dropping the handle,
+        // as aborting this task does, sends the server DESTROY and ends
+        // the subscription. Aborting a `pvmonitor_events` future instead
+        // left the subscription registered and the IOC still sending.
+        let data = shared.clone();
+        let conn = shared.clone();
+        let monitor = client
+            .pvmonitor_handle(
+                pv,
+                move |_, value| data.update(|s| apply(s, value)),
+                move |event| match event {
+                    MonitorConnEvent::Connected { .. } => conn.update(|s| s.error = None),
+                    MonitorConnEvent::Disconnected => conn.update(|s| s.connected = false),
+                    MonitorConnEvent::Finished => {}
+                },
+            )
             .await;
-        // The monitor reconnects by itself; it only returns when the channel
-        // cannot be found or the subscription ends, so try again later.
+        // The monitor reconnects by itself; it only ends when the channel
+        // closes, the subscription finishes or fails, so try again later.
+        let error = match monitor {
+            Ok(handle) => match handle.wait_terminal().await {
+                MonitorTermination::Ended => None,
+                MonitorTermination::Failed(e) => Some(e),
+            },
+            Err(e) => Some(e),
+        };
         shared.update(|s| {
             s.connected = false;
-            if let Err(e) = &result {
+            if let Some(e) = &error {
                 s.error = Some(e.to_string());
             }
         });
-        if let Err(e) = result {
+        if let Some(e) = error {
             log::debug!("{pv}: {e}; retrying in {retry:?}");
         }
         tokio::time::sleep(retry).await;
