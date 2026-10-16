@@ -408,9 +408,10 @@ fn is_button(kind: &str) -> bool {
 fn widget(mut el: Element) -> Vec<Element> {
     let type_id = el.attr("typeId").unwrap_or("").to_string();
     let short = match type_id.strip_prefix(PREFIX).unwrap_or(&type_id) {
-        // DAWN's XY graph has the BOY one's properties, and Phoebus reads
-        // it as one.
+        // DAWN's XY and intensity graphs have the BOY ones' properties, and
+        // Phoebus reads them as those.
         "dawn.xygraph" => "xyGraph",
+        "dawn.intensitygraph" => "intensityGraph",
         s => s,
     }
     .to_string();
@@ -1578,6 +1579,7 @@ menumap {
             ("scaledslider", "scaledslider"),
             ("xyGraph", "xyplot"),
             ("dawn.xygraph", "xyplot"),
+            ("dawn.intensitygraph", "image"),
             ("tab", "tabs"),
             ("edm.menumux", "combo"),
             ("NoSuchWidget", "NoSuchWidget"),
