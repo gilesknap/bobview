@@ -225,10 +225,15 @@ fn parse(value: &Value, labels: &[String], units: &str, format: i64, text: &str)
             .strip_prefix(prefix[0])
             .or_else(|| t.strip_prefix(prefix[1]))
             .unwrap_or(t);
-        // Unsigned, so 0x8000000000000000 sets the top bit.
-        u64::from_str_radix(t, radix)
-            .ok()
-            .map(|n| (n as i64).to_string())
+        // Hex is unsigned, so 0x8000000000000000 sets the top bit; binary
+        // is signed, as Phoebus's `Long.parseLong`, so -101 is -5.
+        if radix == 16 {
+            u64::from_str_radix(t, radix)
+                .ok()
+                .map(|n| (n as i64).to_string())
+        } else {
+            i64::from_str_radix(t, radix).ok().map(|n| n.to_string())
+        }
     };
     let pi = std::f64::consts::PI;
     match format {
@@ -342,6 +347,10 @@ mod tests {
         assert_eq!(format_value(&bin, &s), "0b11111");
         assert_eq!(entry_value(&bin, Some(&s), "0b110 units"), "6");
         assert_eq!(entry_value(&bin, Some(&s), "102"), "102");
+        assert_eq!(entry_value(&bin, Some(&s), "-101"), "-5");
+        assert_eq!(entry_value(&bin, Some(&s), "0b-101"), "-5");
+        // Hex stays unsigned.
+        assert_eq!(entry_value(&hex, Some(&s), "-1F"), "-1F");
     }
 
     #[test]
