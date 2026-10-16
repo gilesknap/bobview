@@ -2111,7 +2111,7 @@ fn slider(
     if let Some(area) = lay.scale {
         // Major ticks at least `major_tick_step_hint` apart, and far
         // enough apart for their labels.
-        let hint = w.f64("major_tick_step_hint").unwrap_or(20.0) as f32 * z;
+        let hint = w.f64("major_tick_step_hint").unwrap_or(40.0) as f32 * z;
         let label_len = if horizontal {
             widest + 8.0 * z
         } else {
