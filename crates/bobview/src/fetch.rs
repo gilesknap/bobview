@@ -58,17 +58,29 @@ pub fn load(source: &Source) -> Result<Display, Error> {
     }
 }
 
-/// Drop every cached display, so the next load fetches it again.
+/// Drop every cached display, so the next load fetches it again. Which
+/// files displays from public addresses named is kept: fetches already
+/// queued are still checked, and a reload does not lift the check.
 pub fn forget() {
     CACHE.lock().clear();
     #[cfg(target_arch = "wasm32")]
     web::FAILED.lock().clear();
-    #[cfg(not(target_arch = "wasm32"))]
-    native::forget();
 }
 
-/// The file `file` named by the display at `base` (or by the user, with no
-/// display): relative names are found next to the display. One named by a
+/// The file or URL `text` that the user named (on the command line, in the
+/// Open panel, or in a saved layout). The user's own choice is fetched
+/// wherever it is, even if a display from a public address named it before.
+pub fn user_named(text: &str) -> Source {
+    let source = Source::parse(text);
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Source::Url(url) = &source {
+        native::user_named(url);
+    }
+    source
+}
+
+/// The file `file` named by the display at `base` (with no display, a plain
+/// [`Source::parse`]): relative names are found next to the display. One named by a
 /// display from a public address is fetched only from a public one.
 pub fn resolve(base: Option<&Source>, file: &str) -> Source {
     let Some(base) = base else {
@@ -106,7 +118,7 @@ mod native {
     use std::net::{IpAddr, ToSocketAddrs};
     use std::path::{Path, PathBuf};
     use std::sync::LazyLock;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use bob::{Error, Source};
     use parking_lot::Mutex;
@@ -118,11 +130,13 @@ mod native {
     /// Most redirects followed for one file.
     const MAX_REDIRECTS: usize = 10;
 
+    /// Longest one fetch may take, all its redirects included.
+    const FETCH_TIME: Duration = Duration::from_secs(10);
+
     /// Redirects are followed here, not by ureq, so that each is checked.
     static AGENT: LazyLock<ureq::Agent> = LazyLock::new(|| {
         ureq::Agent::config_builder()
             .timeout_connect(Some(Duration::from_secs(3)))
-            .timeout_global(Some(Duration::from_secs(10)))
             .user_agent(concat!("bobview/", env!("CARGO_PKG_VERSION")))
             .max_redirects(0)
             .build()
@@ -134,12 +148,13 @@ mod native {
     static PUBLIC: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
 
     /// URLs that displays in [`PUBLIC`] name: fetched only from a public
-    /// address, whoever asks for them, until [`forget`].
+    /// address, whoever asks for them, until the user names one.
     static FROM_PUBLIC: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
 
-    /// Ports on 127.0.0.1 that tests treat as a public address.
+    /// Addresses that tests give hosts on 127.0.0.1, by port, in place of
+    /// looking them up.
     #[cfg(test)]
-    pub(super) static PRETEND_PUBLIC: LazyLock<Mutex<HashSet<u16>>> =
+    pub(super) static PRETEND: LazyLock<Mutex<std::collections::HashMap<u16, Vec<IpAddr>>>> =
         LazyLock::new(Default::default);
 
     /// Note that the display at `base` names `url`.
@@ -152,10 +167,9 @@ mod native {
         }
     }
 
-    /// Forget which displays came from public addresses.
-    pub(super) fn forget() {
-        PUBLIC.lock().clear();
-        FROM_PUBLIC.lock().clear();
+    /// Note that the user named `url`, so it is fetched wherever it is.
+    pub(super) fn user_named(url: &str) {
+        FROM_PUBLIC.lock().remove(url);
     }
 
     /// GET `url`, following redirects, but not from https to http, nor from
@@ -163,13 +177,39 @@ mod native {
     /// a file a display from a public address named. Returns where it was
     /// finally served from, and the response.
     fn call(url: &str) -> Result<(String, Response<Body>), String> {
-        let mut public_only = FROM_PUBLIC.lock().contains(url);
+        call_within(url, FETCH_TIME)
+    }
+
+    /// [`call`], all of it (redirects, and reading the body) within `time`.
+    pub(super) fn call_within(
+        url: &str,
+        time: Duration,
+    ) -> Result<(String, Response<Body>), String> {
+        let deadline = Instant::now() + time;
+        // Why a private address is refused, if it is.
+        let mut refuse = FROM_PUBLIC
+            .lock()
+            .contains(url)
+            .then_some("refused: a display from a public address named a private one");
         let mut url = url.to_string();
         for _ in 0..=MAX_REDIRECTS {
-            if public_only && is_private(&url) {
-                return Err("refused: a display from a public address named a private one".into());
+            let addrs = addresses(&url);
+            if let Some(why) = refuse
+                && target_private(&addrs)
+            {
+                return Err(format!("{why} ({url})"));
             }
-            let resp = AGENT.get(&url).call().map_err(describe)?;
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(format!("timed out after {}s", time.as_secs_f32()));
+            }
+            let resp = AGENT
+                .get(&url)
+                .config()
+                .timeout_global(Some(left))
+                .build()
+                .call()
+                .map_err(describe)?;
             let status = resp.status();
             if !status.is_redirection() {
                 return Ok((url, resp));
@@ -181,15 +221,33 @@ mod native {
             else {
                 return Err(format!("HTTP {}", status.as_u16()));
             };
+            if let Some(scheme) = scheme(location)
+                && !scheme.eq_ignore_ascii_case("http")
+                && !scheme.eq_ignore_ascii_case("https")
+            {
+                return Err(format!("refused a redirect to {location}"));
+            }
             let next = Source::Url(url.clone()).resolve(location).to_string();
             if downgrade(&url, &next) {
                 return Err(format!("refused a redirect from https to {next}"));
             }
             log::info!("{url} redirects to {next}");
-            public_only = public_only || !is_private(&url);
+            if !origin_private(&addrs) {
+                refuse = Some("refused a redirect from a public address to a private one");
+            }
             url = next;
         }
         Err("too many redirects".into())
+    }
+
+    /// The scheme of `url`, if it has one (else it is relative).
+    fn scheme(url: &str) -> Option<&str> {
+        let (scheme, _) = url.split_once(':')?;
+        let mut chars = scheme.chars();
+        let first = chars.next()?;
+        (first.is_ascii_alphabetic()
+            && chars.all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c)))
+        .then_some(scheme)
     }
 
     /// Whether a redirect from `from` to `to` leaves https.
@@ -201,15 +259,15 @@ mod native {
         https(from) && !https(to)
     }
 
-    /// Whether the host of `url` has a private address (see
-    /// [`private_ip`]). A host that cannot be looked up here is not (a
-    /// proxy may reach it).
-    pub(super) fn is_private(url: &str) -> bool {
+    /// The addresses of the host of `url`, from the same lookup ureq
+    /// connects with; none if it cannot be looked up here (a proxy may reach
+    /// it).
+    pub(super) fn addresses(url: &str) -> Vec<IpAddr> {
         let Ok(uri) = url.parse::<ureq::http::Uri>() else {
-            return false;
+            return Vec::new();
         };
         let Some(host) = uri.host() else {
-            return false;
+            return Vec::new();
         };
         let host = host.trim_start_matches('[').trim_end_matches(']');
         let https = uri
@@ -217,20 +275,38 @@ mod native {
             .is_some_and(|s| s.eq_ignore_ascii_case("https"));
         let port = uri.port_u16().unwrap_or(if https { 443 } else { 80 });
         #[cfg(test)]
-        if host == "127.0.0.1" && PRETEND_PUBLIC.lock().contains(&port) {
-            return false;
+        if host == "127.0.0.1"
+            && let Some(addrs) = PRETEND.lock().get(&port)
+        {
+            return addrs.clone();
         }
         match host.parse::<IpAddr>() {
-            Ok(ip) => private_ip(ip),
+            Ok(ip) => vec![ip],
             Err(_) => (host, port)
                 .to_socket_addrs()
-                .is_ok_and(|mut addrs| addrs.any(|a| private_ip(a.ip()))),
+                .map(|addrs| addrs.map(|a| a.ip()).collect())
+                .unwrap_or_default(),
         }
+    }
+
+    /// Whether a display served from a host with addresses `addrs` is on a
+    /// private network: only if all of them are private ([`private_ip`]),
+    /// since the display may have come from any of them.
+    pub(super) fn origin_private(addrs: &[IpAddr]) -> bool {
+        !addrs.is_empty() && addrs.iter().all(|&ip| private_ip(ip))
+    }
+
+    /// Whether a fetch from a host with addresses `addrs` could reach a
+    /// private network: if any of them is private ([`private_ip`]).
+    pub(super) fn target_private(addrs: &[IpAddr]) -> bool {
+        addrs.iter().any(|&ip| private_ip(ip))
     }
 
     /// Whether `ip` is not a public internet address: loopback, private
     /// networks, link-local (cloud metadata), carrier-grade NAT,
-    /// unspecified, broadcast, IPv6 unique-local, and IPv4 in IPv6.
+    /// unspecified, broadcast, IPv6 unique-local and site-local, and IPv4
+    /// in IPv6 (mapped, compatible, translated, NAT64 and 6to4), by the
+    /// IPv4 address within.
     pub(super) fn private_ip(ip: IpAddr) -> bool {
         match ip {
             IpAddr::V4(v4) => {
@@ -243,16 +319,29 @@ mod native {
                     || a == 0
                     || (a == 100 && (64..128).contains(&b))
             }
-            IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-                Some(v4) => private_ip(IpAddr::V4(v4)),
-                None => {
-                    let first = v6.segments()[0];
-                    v6.is_loopback()
-                        || v6.is_unspecified()
-                        || first & 0xfe00 == 0xfc00
-                        || first & 0xffc0 == 0xfe80
+            IpAddr::V6(v6) => {
+                let s = v6.segments();
+                let v4 = |hi: u16, lo: u16| {
+                    private_ip(IpAddr::V4(((u32::from(hi) << 16) | u32::from(lo)).into()))
+                };
+                match s {
+                    // IPv4-mapped ::ffff:a.b.c.d, and SIIT ::ffff:0:a.b.c.d.
+                    [0, 0, 0, 0, 0xffff, 0, hi, lo] | [0, 0, 0, 0, 0, 0xffff, hi, lo] => v4(hi, lo),
+                    // IPv4-compatible ::a.b.c.d (deprecated), :: and ::1.
+                    [0, 0, 0, 0, 0, 0, _, _] => true,
+                    // NAT64 64:ff9b::a.b.c.d; local-use NAT64 64:ff9b:1::/48
+                    // may embed any address anywhere.
+                    [0x64, 0xff9b, 0, 0, 0, 0, hi, lo] => v4(hi, lo),
+                    [0x64, 0xff9b, 1, ..] => true,
+                    // 6to4 2002:a.b.c.d::/48.
+                    [0x2002, hi, lo, ..] => v4(hi, lo),
+                    [first, ..] => {
+                        first & 0xfe00 == 0xfc00 // unique-local
+                            || first & 0xffc0 == 0xfe80 // link-local
+                            || first & 0xffc0 == 0xfec0 // site-local
+                    }
                 }
-            },
+            }
         }
     }
 
@@ -312,11 +401,18 @@ mod native {
             .read_to_string()
             .map_err(|e| fail(describe(e)))?
             .into();
-        if !is_private(&served) {
-            let mut public = PUBLIC.lock();
-            public.insert(url.to_string());
-            public.insert(served.clone());
+        // Kept across reloads, so files named by a display already shown
+        // are still checked; updated as the display is fetched again.
+        let private = origin_private(&addresses(&served));
+        let mut public = PUBLIC.lock();
+        for u in [url, &served] {
+            if private {
+                public.remove(u);
+            } else {
+                public.insert(u.to_string());
+            }
         }
+        drop(public);
         let fetched = Fetched { url: served, text };
         CACHE.lock().insert(url.to_string(), fetched.clone());
         Ok(fetched)
@@ -436,7 +532,8 @@ mod tests {
         serve_to("/opi/a.bob")
     }
 
-    /// [`serve`], with /away redirecting to `away`.
+    /// [`serve`], with /away redirecting to `away`, /file to a file, and
+    /// /slow slowly to itself, while /stall answers after 3 s.
     fn serve_to(away: &str) -> (String, Arc<Mutex<usize>>) {
         let away = format!("302 Found\r\nLocation: {away}");
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -459,23 +556,35 @@ mod tests {
                     ("301 Moved Permanently\r\nLocation: /opi/a.bob", "")
                 } else if first.starts_with("GET /away ") {
                     (away.as_str(), "")
+                } else if first.starts_with("GET /file ") {
+                    ("302 Found\r\nLocation: file:///etc/passwd", "")
+                } else if first.starts_with("GET /slow ") {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    ("302 Found\r\nLocation: /slow", "")
+                } else if first.starts_with("GET /stall ") {
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    ("200 OK", DISPLAY)
                 } else {
                     ("404 Not Found", "")
                 };
                 let mut stream = stream;
-                write!(
+                // The client may have given up.
+                let _ = write!(
                     stream,
                     "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
-                )
-                .unwrap();
+                );
             }
         });
         (base, hits)
     }
 
+    /// Held by tests that clear the cache, or count on it.
+    static CACHE_USE: Mutex<()> = Mutex::new(());
+
     #[test]
     fn fetches_caches_and_reports_errors() {
+        let _cache = CACHE_USE.lock();
         let (base, hits) = serve();
         let src = Source::parse(&format!("{base}/opi/a.bob"));
         load(&src).unwrap();
@@ -497,12 +606,21 @@ mod tests {
         assert_eq!(d.resolve("b.bob"), Source::Url(format!("{base}/opi/b.bob")));
     }
 
-    /// A server that counts as on a public address.
-    fn serve_public(away: &str) -> (String, Arc<Mutex<usize>>) {
+    /// A public address (TEST-NET-3).
+    const PUBLIC_IP: &str = "203.0.113.5";
+
+    /// [`serve_to`], on a host with addresses `addrs`.
+    fn serve_at(addrs: &[&str], away: &str) -> (String, Arc<Mutex<usize>>) {
         let (base, hits) = serve_to(away);
         let port = base.rsplit(':').next().unwrap().parse().unwrap();
-        native::PRETEND_PUBLIC.lock().insert(port);
+        let addrs = addrs.iter().map(|a| a.parse().unwrap()).collect();
+        native::PRETEND.lock().insert(port, addrs);
         (base, hits)
+    }
+
+    /// A server that counts as on a public address.
+    fn serve_public(away: &str) -> (String, Arc<Mutex<usize>>) {
+        serve_at(&[PUBLIC_IP], away)
     }
 
     #[test]
@@ -521,16 +639,63 @@ mod tests {
         let err = bytes(&inside).unwrap_err().to_string();
         assert!(err.contains("refused"), "{err}");
         assert_eq!(*private_hits.lock(), 0);
-        // A private URL named by the user, or by a private display, is
-        // fetched. (Once a public display has named a URL, it stays refused
-        // until a reload.)
+        // A private URL named by a private display, or by the user, is
+        // fetched.
         let (other, _) = serve();
-        let named = Source::parse(&format!("{private}/old/a.bob"));
+        let named = format!("{private}/old/a.bob");
         let d = load(&Source::parse(&format!("{other}/opi/a.bob"))).unwrap();
-        assert_eq!(resolve(None, &named.to_string()), named);
-        load(&resolve(d.source.as_ref(), &named.to_string())).unwrap();
+        load(&resolve(d.source.as_ref(), &named)).unwrap();
         // The redirect, and where it leads.
         assert_eq!(*private_hits.lock(), 2);
+        assert_eq!(user_named(&inside.to_string()), inside);
+        load(&inside).unwrap();
+        assert_eq!(*private_hits.lock(), 3);
+    }
+
+    #[test]
+    fn a_host_with_a_public_address_is_not_private() {
+        // Say a public host also gives a private address, which it is not
+        // served from: its displays still cannot name a private one.
+        let (private, private_hits) = serve();
+        let (mixed, _) = serve_at(&["::1", PUBLIC_IP], "/opi/a.bob");
+        let d = load(&Source::parse(&format!("{mixed}/opi/a.bob"))).unwrap();
+        let inside = resolve(d.source.as_ref(), &format!("{private}/opi/a.bob"));
+        let err = bytes(&inside).unwrap_err().to_string();
+        assert!(err.contains("named a private one"), "{err}");
+        assert_eq!(*private_hits.lock(), 0);
+        // Nor can a public display name such a host.
+        let (public, _) = serve_public("/opi/a.bob");
+        let d = load(&Source::parse(&format!("{public}/opi/a.bob"))).unwrap();
+        let err = bytes(&resolve(d.source.as_ref(), &format!("{mixed}/opi/a.bob")))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("named a private one"), "{err}");
+
+        use native::{origin_private, target_private};
+        let ips = |a: &[&str]| a.iter().map(|a| a.parse().unwrap()).collect::<Vec<_>>();
+        let mixed = ips(&["::1", PUBLIC_IP]);
+        assert!(!origin_private(&mixed) && target_private(&mixed));
+        let inside = ips(&["10.0.0.1", "::1"]);
+        assert!(origin_private(&inside) && target_private(&inside));
+        let outside = ips(&[PUBLIC_IP, "2001:db8::1"]);
+        assert!(!origin_private(&outside) && !target_private(&outside));
+        // Not looked up here: left to a proxy, if any.
+        assert!(!origin_private(&[]) && !target_private(&[]));
+    }
+
+    #[test]
+    fn a_reload_still_refuses_what_a_public_display_named() {
+        let (private, private_hits) = serve();
+        let (public, _) = serve_public("/opi/a.bob");
+        let d = load(&Source::parse(&format!("{public}/opi/a.bob"))).unwrap();
+        let image = resolve(d.source.as_ref(), &format!("{private}/a.png"));
+        assert!(bytes(&image).is_err());
+        // An image queued before the reload is fetched after it.
+        let _cache = CACHE_USE.lock();
+        forget();
+        let err = bytes(&image).unwrap_err().to_string();
+        assert!(err.contains("named a private one"), "{err}");
+        assert_eq!(*private_hits.lock(), 0);
     }
 
     #[test]
@@ -540,7 +705,10 @@ mod tests {
         let err = load(&Source::parse(&format!("{public}/away")))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("refused"), "{err}");
+        assert!(
+            err.contains("refused a redirect from a public address to a private one"),
+            "{err}"
+        );
         assert_eq!(*private_hits.lock(), 0);
         // From one private server to another is fine.
         let (inside, _) = serve_to(&format!("{private}/opi/a.bob"));
@@ -559,8 +727,42 @@ mod tests {
     }
 
     #[test]
+    fn redirects_lead_only_to_http() {
+        let (base, _) = serve();
+        let err = load(&Source::parse(&format!("{base}/file")))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("refused a redirect to file:///etc/passwd"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn redirects_share_one_time_limit() {
+        // Each of up to eleven requests takes 0.3 s: all of them, 3.3 s.
+        let (base, _) = serve();
+        let start = std::time::Instant::now();
+        let limit = std::time::Duration::from_secs(1);
+        let Err(err) = native::call_within(&format!("{base}/slow"), limit) else {
+            panic!("a fetch redirecting forever succeeded");
+        };
+        assert!(err.contains("time"), "{err}");
+        assert!(start.elapsed() < limit * 2, "{:?}", start.elapsed());
+        // The limit holds within a request, too.
+        let (base, _) = serve();
+        let start = std::time::Instant::now();
+        let Err(err) = native::call_within(&format!("{base}/stall"), limit) else {
+            panic!("a stalled fetch succeeded");
+        };
+        assert!(err.contains("time"), "{err}");
+        assert!(start.elapsed() < limit * 2, "{:?}", start.elapsed());
+    }
+
+    #[test]
     fn private_addresses() {
-        use native::{is_private, private_ip};
+        use native::{addresses, private_ip, target_private};
+        let is_private = |url: &str| target_private(&addresses(url));
         for ip in [
             "127.0.0.1",
             "10.1.2.3",
@@ -575,6 +777,13 @@ mod tests {
             "fd00::1",
             "fe80::1",
             "::ffff:10.0.0.1",
+            "::127.0.0.1",
+            "::ffff:0:7f00:1",
+            "64:ff9b::a00:1",
+            "64:ff9b:1::8.8.8.8",
+            "2002:a00:1::",
+            "2002:7f00:1::1",
+            "fec0::1",
         ] {
             assert!(private_ip(ip.parse().unwrap()), "{ip}");
         }
@@ -584,6 +793,10 @@ mod tests {
             "100.128.0.1",
             "2001:db8::1",
             "::ffff:1.1.1.1",
+            "::ffff:0:808:808",
+            "64:ff9b::808:808",
+            "2002:808:808::1",
+            "2606:4700::1111",
         ] {
             assert!(!private_ip(ip.parse().unwrap()), "{ip}");
         }

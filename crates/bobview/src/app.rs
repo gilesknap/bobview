@@ -1172,7 +1172,7 @@ impl BobApp {
             ui.label("File or URL:");
             let edit = ui.add(egui::TextEdit::singleline(&mut *path).desired_width(f32::INFINITY));
             if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                chosen = Some(Source::parse(path));
+                chosen = Some(crate::fetch::user_named(path));
             }
         });
         // Nothing to list for a URL (an empty path lists nothing).
