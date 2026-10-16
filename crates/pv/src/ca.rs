@@ -188,7 +188,8 @@ async fn write(channel: &CaChannel, shared: &Shared, put: &Put) {
             channel.put_string_nowait(text).await
         }
     };
-    shared.write_result(text, result.err().map(|e| e.to_string()));
+    // No reply comes to a plain write: `Ok` only says it was sent.
+    shared.write_sent(text, result.err().map(|e| e.to_string()));
 }
 
 /// How long after a channel connects its monitor has to send the first

@@ -86,13 +86,21 @@ pub(crate) struct Control {
     /// The latest message for the user (a refused or failed write), with a
     /// number that changes with each one.
     notice: Mutex<(u64, String)>,
+    /// The UI's repaint callback (see [`PvManager::set_notifier`]), so a
+    /// new notice is shown without waiting for some PV to change.
+    repaint: Arc<RwLock<Option<Notifier>>>,
 }
 
 impl Control {
     pub(crate) fn notify(&self, text: String) {
         log::warn!("{text}");
-        let mut n = self.notice.lock();
-        *n = (n.0 + 1, text);
+        {
+            let mut n = self.notice.lock();
+            *n = (n.0 + 1, text);
+        }
+        if let Some(n) = self.repaint.read().as_ref() {
+            n();
+        }
     }
 }
 
@@ -209,6 +217,17 @@ impl Shared {
     /// A put failed (or worked, with `None`): remember why, and tell the user.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn write_result(&self, text: &str, error: Option<String>) {
+        self.answered();
+        if let Some(e) = &error {
+            self.ctl
+                .notify(format!("{}: write '{text}' failed: {e}", self.name));
+        }
+        self.update(|s| s.write_error = error);
+    }
+
+    /// A write counted in flight is done with: sent, failed or refused.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn answered(&self) {
         let mut n = self.in_flight.load(Ordering::Acquire);
         while n > 0 {
             match self.in_flight.compare_exchange_weak(
@@ -221,11 +240,18 @@ impl Shared {
                 Err(now) => n = now,
             }
         }
-        if let Some(e) = &error {
-            self.ctl
-                .notify(format!("{}: write '{text}' failed: {e}", self.name));
+    }
+
+    /// A put that the server does not answer was sent, or failed to be: a
+    /// failure is remembered as [`Shared::write_result`] does, but a send
+    /// confirms nothing, so it leaves an earlier failure shown.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn write_sent(&self, text: &str, error: Option<String>) {
+        if error.is_some() {
+            self.write_result(text, error);
+        } else {
+            self.answered();
         }
-        self.update(|s| s.write_error = error);
     }
 
     /// Whether a write taken from the queue can go now; if not, say why.
@@ -582,12 +608,13 @@ impl Default for PvManager {
 impl PvManager {
     #[cfg(target_arch = "wasm32")]
     pub fn new() -> Self {
+        let ctl = Arc::new(Control::default());
         Self {
             inner: Arc::new(Inner {
                 entries: Mutex::default(),
                 locals: Mutex::new(HashMap::new()),
-                notify: Arc::new(RwLock::new(None)),
-                ctl: Arc::default(),
+                notify: ctl.repaint.clone(),
+                ctl,
             }),
         }
     }
@@ -600,6 +627,7 @@ impl PvManager {
             .enable_all()
             .build()
             .expect("failed to start the PV runtime");
+        let ctl = Arc::new(Control::default());
         Self {
             inner: Arc::new(Inner {
                 rt: Some(rt),
@@ -607,8 +635,8 @@ impl PvManager {
                 locals: Mutex::new(HashMap::new()),
                 ca: Arc::new(tokio::sync::OnceCell::new()),
                 pva: Arc::new(std::sync::OnceLock::new()),
-                notify: Arc::new(RwLock::new(None)),
-                ctl: Arc::default(),
+                notify: ctl.repaint.clone(),
+                ctl,
             }),
         }
     }
@@ -786,6 +814,36 @@ mod tests {
         assert_eq!(pv.state().write_error, None);
     }
 
+    #[test]
+    fn a_sent_put_leaves_an_earlier_failure_shown() {
+        let pvs = PvManager::new();
+        let pv = pvs.subscribe("sim://sine");
+        let shared = &pv.0.shared;
+        shared.write_sent("3", Some("not connected".into()));
+        assert_eq!(pv.state().write_error.as_deref(), Some("not connected"));
+        assert_eq!(pvs.notice().0, 1);
+        // A CA put with no reply was only sent, not confirmed.
+        shared.write_sent("4", None);
+        assert_eq!(pv.state().write_error.as_deref(), Some("not connected"));
+        assert_eq!(pvs.notice().0, 1);
+    }
+
+    #[test]
+    fn a_new_notice_asks_for_a_repaint() {
+        let pvs = PvManager::new();
+        // No backend task, so nothing else changes the PV's state.
+        let (pv, _rx) = queued(&pvs, true);
+        let calls = Arc::new(AtomicU64::new(0));
+        let c = calls.clone();
+        pvs.set_notifier(Arc::new(move || {
+            c.fetch_add(1, Ordering::Relaxed);
+        }));
+        pvs.set_read_only(true);
+        pv.write("1");
+        assert_eq!(pvs.notice().0, 1);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
     /// A PV whose writes go to a queue no backend reads.
     fn queued(pvs: &PvManager, connected: bool) -> (Pv, mpsc::Receiver<Put>) {
         let name = PvName::parse("ca://QUEUED");
@@ -946,6 +1004,22 @@ mod tests {
         assert_eq!(shared.in_flight.load(Ordering::Acquire), 1);
         shared.write_result("1", None);
         assert_eq!(shared.in_flight.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn a_sent_ca_put_is_no_longer_in_flight() {
+        let pvs = PvManager::new();
+        let (pv, mut rx) = queued(&pvs, true);
+        let shared = &pv.0.shared;
+        shared.write_result("0", Some("refused".into()));
+        pv.write("1");
+        assert_eq!(shared.in_flight.load(Ordering::Acquire), 1);
+        let put = rx.try_recv().unwrap();
+        // As the CA task answers a plain write that was sent.
+        shared.write_sent(&put.text, None);
+        assert_eq!(shared.in_flight.load(Ordering::Acquire), 0);
+        // Sent is not confirmed: the earlier failure still shows.
+        assert_eq!(pv.state().write_error.as_deref(), Some("refused"));
     }
 
     #[test]
