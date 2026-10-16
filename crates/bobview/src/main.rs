@@ -43,6 +43,9 @@ options:
   -z, --zoom FACTOR      fixed zoom instead of fit-to-window
   -f, --fullscreen       start full screen
   -k, --keypad           edit values with an on-screen keypad (automatic on touch)
+  --read-only            refuse every write to a PV (except loc:// ones, which
+                         stay in bobview): controls are disabled and a write
+                         action says why it did nothing
   --multi-window         start in multi-window mode: links open their displays in
                          windows of their own (ctrl+click opens in place)
   --layout NAME          restore the saved window layout NAME
@@ -93,6 +96,7 @@ fn main() -> eframe::Result {
     let mut keypad = false;
     let mut project = None;
     let mut multi_window = false;
+    let mut read_only = false;
     let mut layout_name = None;
     let mut no_layout = false;
     let mut args = std::env::args().skip(1);
@@ -104,6 +108,7 @@ fn main() -> eframe::Result {
             "-f" | "--fullscreen" => fullscreen = true,
             "-k" | "--keypad" => keypad = true,
             "--multi-window" => multi_window = true,
+            "--read-only" => read_only = true,
             "--layout" => match args.next() {
                 Some(name) => layout_name = Some(name),
                 None => {
@@ -252,6 +257,7 @@ fn main() -> eframe::Result {
             clicks,
             settle: std::time::Duration::from_secs_f64(settle),
             keypad,
+            read_only,
         };
         if let Err(e) = snapshot::run(start, &opts, &out) {
             eprintln!("snapshot failed: {e}");
@@ -282,6 +288,7 @@ fn main() -> eframe::Result {
         Box::new(move |cc| {
             let mut app = app::BobApp::new(&cc.egui_ctx, start, zoom, ui_scale);
             app.set_keypad(keypad);
+            app.set_read_only(read_only);
             app.set_multi_window(multi_window);
             if let Some((mut layout, name)) = layout {
                 layout.multi_window |= multi_window;

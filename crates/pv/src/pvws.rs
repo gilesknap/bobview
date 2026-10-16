@@ -310,6 +310,7 @@ fn apply(s: &mut PvState, vtype: &str, msg: &Map<String, Json>) {
     }
     if let Some(readonly) = msg.get("readonly").and_then(Json::as_bool) {
         s.writable = !readonly;
+        s.writable_known = true;
     }
     if let Some(units) = msg.get("units").and_then(Json::as_str) {
         s.units = units.to_string();
