@@ -22,6 +22,12 @@ pub(crate) const MAX_DEPTH: u32 = 8;
 #[cfg(not(target_arch = "wasm32"))]
 pub const QUICK: Duration = Duration::from_millis(50);
 
+/// The stack of a thread that builds a display: building recurses once per
+/// nesting level, through every display it embeds (each nesting up to the
+/// XML depth cap), and the default is platform dependent.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const BUILD_STACK: usize = 16 << 20;
+
 /// The most embedded displays one load builds, however they nest (guards
 /// against displays that embed themselves several times over).
 const MAX_SCREENS: u32 = 256;
@@ -828,14 +834,22 @@ impl Builder<'_> {
             let (pvs, src, budget) = (self.pvs.clone(), source.clone(), this.budget.clone());
             let (macros, group) = (macros.clone(), group.to_string());
             let in_flight = InFlight::new();
-            std::thread::spawn(move || {
-                // Still the same load, so on the same budget: a display that
-                // embeds itself can't get a fresh one per thread.
-                let built =
-                    Builder::sharing(&pvs, budget, true).build(&src, &macros, &group, depth);
-                // Unsent (the node moved on), the result and its count drop here.
-                tx.send((built, in_flight)).ok();
-            });
+            let spawned = std::thread::Builder::new()
+                .name("display-builder".into())
+                .stack_size(BUILD_STACK)
+                .spawn(move || {
+                    // Still the same load, so on the same budget: a display
+                    // that embeds itself can't get a fresh one per thread.
+                    let built =
+                        Builder::sharing(&pvs, budget, true).build(&src, &macros, &group, depth);
+                    // Unsent (the node moved on), the result and its count drop here.
+                    tx.send((built, in_flight)).ok();
+                });
+            if let Err(e) = spawned {
+                let why = format!("cannot start a thread to build it: {e}");
+                node.place(&source, Err(refused(&source, &why)));
+                return;
+            }
             node.error = Some(format!("Loading {source}"));
             node.building = Some(Building { source, rx });
             node.poll_building(QUICK);
@@ -1084,6 +1098,7 @@ mod tests {
         // Embeds and navigation tabs of itself, four ways, built from the UI
         // thread: each is built on a thread of its own, which must draw on
         // the budget of the load, not start a fresh one (4 x 256 screens).
+        let _builds = BUILDS.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("bobview-threads-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("bomb.bob");
@@ -1595,6 +1610,48 @@ mod tests {
         }
         let nav = &view.screen.as_ref().unwrap().nodes[0];
         assert_eq!(nav.embedded.as_ref().unwrap().display.name, "Tab");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn deep_displays_embedding_themselves_build_on_a_thread() {
+        // Groups as deep as the XML depth cap allows, embedding the file
+        // again at the bottom: built on one thread, the recursion is that
+        // depth for each of the 8 embedding levels.
+        let _builds = BUILDS.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("bobview-deep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut inner = "<widget type='embedded'><file>deep.bob</file></widget>".to_string();
+        for _ in 0..61 {
+            inner = format!("<widget type='group'>{inner}</widget>");
+        }
+        let deep = format!("<display>{inner}</display>");
+        assert!(Display::parse(&deep).is_ok(), "within the XML depth cap");
+        std::fs::write(dir.join("deep.bob"), deep).unwrap();
+        let xml = "<display><widget type='embedded'><file>deep.bob</file></widget></display>";
+        let mut d = Display::parse(xml).unwrap();
+        d.source = Some(Source::File(dir.join("main.bob")));
+        let pvs = PvManager::new();
+        let mut s = Builder::ui(&pvs).screen(d, &Macros::default(), None, 0);
+        built(&mut s.nodes[0]);
+        std::fs::remove_dir_all(&dir).ok();
+        // Down the groups and into each embedded display.
+        let (mut n, mut screens) = (&s.nodes[0], 0);
+        loop {
+            match (n.embedded.as_ref(), n.children.first()) {
+                (Some(e), _) => {
+                    screens += 1;
+                    n = &e.nodes[0];
+                }
+                (None, Some(c)) => n = c,
+                (None, None) => break,
+            }
+        }
+        assert_eq!(screens, MAX_DEPTH);
+        assert_eq!(
+            n.error.as_deref(),
+            Some("embedded displays nested too deeply")
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]
