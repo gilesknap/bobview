@@ -18,6 +18,9 @@ const MAX_SCREENS: u32 = 256;
 /// The most widgets one load builds, counting those of embedded displays.
 const MAX_WIDGETS: u32 = 100_000;
 
+/// The most rules, and the most actions, of a widget that are used.
+const MAX_PER_WIDGET: usize = 256;
+
 /// A display ready to draw. Node rectangles are in this screen's own coordinates.
 pub struct Screen {
     pub display: Display,
@@ -202,7 +205,6 @@ pub struct Builder<'a> {
 
 impl<'a> Builder<'a> {
     pub fn new(pvs: &'a PvManager) -> Self {
-        bob::rearm_warning();
         Self {
             pvs,
             budget: Arc::new(Budget {
@@ -218,6 +220,7 @@ impl Screen {
     /// Load `source` with `macros` layered over the display's own macros.
     pub fn load(source: &Source, macros: &Macros, pvs: &PvManager) -> Result<Self, bob::Error> {
         let display = crate::fetch::load(source)?;
+        bob::rearm_warning();
         Ok(Builder::new(pvs).screen(display, macros, None, 0))
     }
 }
@@ -343,6 +346,17 @@ pub fn group_inset(w: &Widget) -> (f64, f64) {
 }
 
 impl Builder<'_> {
+    /// [`expand_for`], taking the size of the text and result from the load's
+    /// macro budget; once it is spent, text is left as written.
+    fn expand_charged(&self, w: &Widget, macros: &Macros, text: &str) -> String {
+        if self.budget.macros.load(Ordering::Relaxed) == 0 {
+            return text.to_string();
+        }
+        let out = expand_for(w, macros, text);
+        bob::spend(&self.budget.macros, text.len() + out.len());
+        out
+    }
+
     pub fn screen(
         &self,
         display: Display,
@@ -351,7 +365,7 @@ impl Builder<'_> {
         depth: u32,
     ) -> Screen {
         // Macros passed in override the display's own defaults.
-        let macros = display.macros.with_budget(macros, &self.budget.macros);
+        let macros = Macros::over(&display.macros, macros, &self.budget.macros);
         let base = display.source.clone();
         let (widgets, width, height) = match group.filter(|g| !g.is_empty()) {
             Some(name) => match find_group(&display.widgets, name) {
@@ -429,34 +443,29 @@ impl Builder<'_> {
             w.f64("width").unwrap_or(dw),
             w.f64("height").unwrap_or(dh),
         ];
-        // Once the load's macro text is spent, names stay as written.
-        let pv_name = match w.text("pv_name") {
-            Some(t) if self.budget.macros.load(Ordering::Relaxed) > 0 => {
-                let name = expand_for(w, &macros, t);
-                bob::spend(&self.budget.macros, name.len());
-                name
-            }
-            Some(t) => t.to_string(),
-            None => String::new(),
-        };
+        let ex = |t: &str| self.expand_charged(w, &macros, t);
+        let pv_name = w.text("pv_name").map(ex).unwrap_or_default();
         let pv = (!pv_name.is_empty()).then(|| self.pvs.subscribe(&pv_name));
         let rules = w
             .rules()
             .iter()
-            .map(|r| CompiledRule::new(r, &|t| expand_for(w, &macros, t), self.pvs))
+            .take(MAX_PER_WIDGET)
+            .map(|r| CompiledRule::new(r, &ex, self.pvs))
             .collect();
 
-        let link = crate::group_link::Link::new(w, &|t| expand_for(w, &macros, t), self.pvs);
+        let link = crate::group_link::Link::new(w, &ex, self.pvs);
         let action_pvs = w
             .actions()
             .iter()
+            .take(MAX_PER_WIDGET)
             .filter_map(|a| match a {
-                bob::Action::WritePv { pv_name, .. } => {
-                    Some(self.pvs.subscribe(&expand_for(w, &macros, pv_name)))
-                }
+                bob::Action::WritePv { pv_name, .. } => Some(self.pvs.subscribe(&ex(pv_name))),
                 _ => None,
             })
             .collect();
+        if w.rules().len() > MAX_PER_WIDGET || w.actions().len() > MAX_PER_WIDGET {
+            log::warn!("over {MAX_PER_WIDGET} rules or actions in a widget; the rest are ignored");
+        }
 
         let mut node = Node {
             w: w.clone(),
@@ -528,12 +537,18 @@ impl Builder<'_> {
                 self.embed(&mut node, &file, &macros, &group, depth);
             }
             "xyplot" => {
-                node.traces =
-                    crate::plot::subscribe(w, &|t| expand_for(w, &node.macros, t), self.pvs);
+                node.traces = crate::plot::subscribe(
+                    w,
+                    &|t| self.expand_charged(w, &node.macros, t),
+                    self.pvs,
+                );
             }
             "stripchart" => {
-                node.traces =
-                    crate::plot::subscribe(w, &|t| expand_for(w, &node.macros, t), self.pvs);
+                node.traces = crate::plot::subscribe(
+                    w,
+                    &|t| self.expand_charged(w, &node.macros, t),
+                    self.pvs,
+                );
                 node.series = node
                     .traces
                     .iter()

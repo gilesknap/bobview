@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -10,15 +11,27 @@ use crate::Element;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Macros {
     parent: Option<Arc<Macros>>,
+    /// Consulted after `parent` and everything below it.
+    base: Option<Arc<Macros>>,
     own: Vec<(String, String)>,
+    /// Position in `own` of the last definition of each name.
+    index: HashMap<String, usize>,
+    /// Layers below this one.
+    depth: u32,
 }
 
 /// The most expanded text that [`Macros::with`] holds in one layer.
 const MAX_LAYER_BYTES: usize = 1 << 20;
 
-/// The most expanded macro text a whole load should hold, across every
-/// layer, for [`Macros::with_budget`] to be given.
+/// The most expanded macro text, counting what was expanded as well as what
+/// it came to, that a whole load should do, for [`Macros::with_budget`] to be
+/// given. Each expansion takes the size of its text and result, so this also
+/// bounds the lookups, and so the time, of a load.
 pub const MAX_LOAD_BYTES: usize = 16 << 20;
+
+/// The most definitions in a layer, and the most layers; more are ignored.
+const MAX_LAYER_MACROS: usize = 512;
+const MAX_LAYERS: u32 = 32;
 
 impl Macros {
     pub fn from_element(el: &Element) -> Self {
@@ -28,26 +41,43 @@ impl Macros {
     pub fn from_pairs<K: Into<String>, V: Into<String>>(
         pairs: impl IntoIterator<Item = (K, V)>,
     ) -> Self {
+        let own: Vec<(String, String)> = pairs
+            .into_iter()
+            .map(|(k, v)| (k.into(), v.into()))
+            .collect();
+        Self::layer(None, None, own)
+    }
+
+    fn layer(
+        parent: Option<Arc<Macros>>,
+        base: Option<Arc<Macros>>,
+        own: Vec<(String, String)>,
+    ) -> Self {
+        let index = own
+            .iter()
+            .enumerate()
+            .map(|(i, (k, _))| (k.clone(), i))
+            .collect();
+        let depth = parent.as_ref().map_or(0, |p| p.depth + 1);
         Self {
-            parent: None,
-            own: pairs
-                .into_iter()
-                .map(|(k, v)| (k.into(), v.into()))
-                .collect(),
+            parent,
+            base,
+            own,
+            index,
+            depth,
         }
     }
 
     pub fn get(&self, name: &str) -> Option<&str> {
-        self.own
-            .iter()
-            .rev()
-            .find(|(k, _)| k == name)
-            .map(|(_, v)| v.as_str())
-            .or_else(|| self.parent.as_ref()?.get(name))
+        let own = self.index.get(name).map(|&i| self.own[i].1.as_str());
+        own.or_else(|| self.parent.as_ref()?.get(name))
+            .or_else(|| self.base.as_ref()?.get(name))
     }
 
     pub fn is_empty(&self) -> bool {
-        self.own.is_empty() && self.parent.as_ref().is_none_or(|p| p.is_empty())
+        self.own.is_empty()
+            && self.parent.as_ref().is_none_or(|p| p.is_empty())
+            && self.base.as_ref().is_none_or(|b| b.is_empty())
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
@@ -67,31 +97,54 @@ impl Macros {
         self.with_budget(inner, &AtomicUsize::new(MAX_LAYER_BYTES))
     }
 
-    /// [`Macros::with`], where the expanded values take their size from
-    /// `left`, which several layers may share. Once it is spent, values are
-    /// kept as written, not expanded, so nested definitions that each double
-    /// the last, in many widgets, can't use memory without bound.
+    /// [`Macros::with`], where expanding the values takes the size of their
+    /// text and result from `left`, which several layers may share. Once it
+    /// is spent, values are kept as written, not expanded, so nested
+    /// definitions that each double the last, in many widgets, can't use
+    /// memory or time without bound. Only the definitions made in `inner`
+    /// itself are used, at most [`MAX_LAYER_MACROS`] of them, and no more
+    /// than [`MAX_LAYERS`] deep.
     pub fn with_budget(&self, inner: &Macros, left: &AtomicUsize) -> Macros {
-        if inner.is_empty() {
+        if inner.own.is_empty() {
             return self.clone();
         }
+        if self.depth >= MAX_LAYERS {
+            log::warn!("macros nested over {MAX_LAYERS} deep are ignored");
+            return self.clone();
+        }
+        if inner.own.len() > MAX_LAYER_MACROS {
+            log::warn!("over {MAX_LAYER_MACROS} macros in a widget; the rest are ignored");
+        }
         let own = inner
+            .own
             .iter()
+            .take(MAX_LAYER_MACROS)
             .map(|(k, v)| {
                 let v = if left.load(Ordering::Relaxed) > 0 {
-                    let v = expand(v, &|name| self.get(name).map(str::to_string));
-                    spend(left, v.len());
-                    v
+                    let out = expand(v, &|name| self.get(name).map(str::to_string));
+                    spend(left, v.len() + out.len());
+                    out
                 } else {
-                    v.to_string()
+                    v.clone()
                 };
-                (k.to_string(), v)
+                (k.clone(), v)
             })
             .collect();
-        Macros {
-            parent: Some(Arc::new(self.clone())),
-            own,
+        Self::layer(Some(Arc::new(self.clone())), None, own)
+    }
+
+    /// `defaults` with `over` on top of them, sharing both: `over` is the
+    /// macros an embedding passes to the display it embeds, and is a whole
+    /// chain of the embedder's layers, which are not copied.
+    pub fn over(defaults: &Macros, over: &Macros, left: &AtomicUsize) -> Macros {
+        if over.parent.is_none() && over.base.is_none() {
+            return defaults.with_budget(over, left);
         }
+        Self::layer(
+            Some(Arc::new(over.clone())),
+            Some(Arc::new(defaults.clone())),
+            Vec::new(),
+        )
     }
 
     /// The bytes of the definitions in this layer alone.
