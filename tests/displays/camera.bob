@@ -3,7 +3,7 @@
 <display version="2.0.0">
   <name>bl01t-di-cam-01</name>
   <width>420</width>
-  <height>340</height>
+  <height>375</height>
   <macros>
     <P>BL01T-DI-CAM-01</P>
     <R>:DET:</R>
@@ -222,5 +222,21 @@
     <x>10</x>
     <y>305</y>
     <width>130</width>
+  </widget>
+  <widget type="label" version="2.0.0">
+    <name>LPath</name>
+    <text>File path</text>
+    <x>10</x>
+    <y>340</y>
+    <width>130</width>
+  </widget>
+  <widget type="textentry" version="3.0.0">
+    <name>Path</name>
+    <pv_name>$(P)$(R)FilePath</pv_name>
+    <x>140</x>
+    <y>340</y>
+    <width>270</width>
+    <format>6</format>
+    <tooltip>a char waveform, shown and written as text (format 6)</tooltip>
   </widget>
 </display>

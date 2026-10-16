@@ -14,10 +14,10 @@ use epics_pva_rs::client_native::ops_v2::{MonitorConnEvent, MonitorTermination};
 use epics_pva_rs::pvdata::{PvField, PvStructure, ScalarValue, TypedScalarArray};
 use tokio::sync::mpsc;
 
-use crate::{Image, ImageData, PvState, Severity, Shared, Value, Writer};
+use crate::{Image, ImageData, Put, PvState, Severity, Shared, Value, Writer};
 
 pub(crate) async fn run(client: &PvaClient, pv: &str, shared: Arc<Shared>) {
-    let (tx, mut writes) = mpsc::unbounded_channel::<String>();
+    let (tx, mut writes) = mpsc::unbounded_channel::<Put>();
     shared.set_writer(Writer::Channel(tx));
 
     // Writes run beside the monitor, each as its own put. Weak: the state
@@ -27,10 +27,22 @@ pub(crate) async fn run(client: &PvaClient, pv: &str, shared: Arc<Shared>) {
     let put_pv = pv.to_string();
     let put_shared = Arc::downgrade(&shared);
     tokio::spawn(async move {
-        while let Some(text) = writes.recv().await {
-            let result = put_client.pvput(&put_pv, &text).await;
+        while let Some(put) = writes.recv().await {
+            let long_string = put.long_string
+                && put_shared
+                    .upgrade()
+                    .is_some_and(|s| s.snapshot().value.is_numeric_array());
+            let result = if long_string {
+                // PVA arrays have no fixed element count to cut the text to.
+                let bytes = crate::long_string_bytes(&put.text, None);
+                put_client
+                    .pvput_build(&put_pv, |v| with_bytes(v, &bytes))
+                    .await
+            } else {
+                put_client.pvput(&put_pv, &put.text).await
+            };
             if let Some(shared) = put_shared.upgrade() {
-                shared.write_result(&text, result.err().map(|e| e.to_string()));
+                shared.write_result(&put.text, result.err().map(|e| e.to_string()));
             }
         }
     });
@@ -269,6 +281,39 @@ fn convert(f: &PvField) -> Value {
     }
 }
 
+/// Set the `value` of `v`, a structure read back from the PV, to `bytes`
+/// in the type of the array it holds, to write a long string.
+fn with_bytes(v: &mut PvField, bytes: &[u8]) -> Result<(), String> {
+    use TypedScalarArray as T;
+    let field = match v {
+        PvField::Structure(s) => s.get_field_mut("value"),
+        _ => None,
+    };
+    let Some(field) = field else {
+        return Err("no value field to write the text to".into());
+    };
+    let b = || bytes.iter().copied();
+    *field = match field {
+        PvField::ScalarArrayTyped(a) => PvField::ScalarArrayTyped(match a {
+            // A char waveform is signed over PVA: bytes past 127 wrap.
+            T::Byte(_) => T::Byte(b().map(|x| x as i8).collect()),
+            T::UByte(_) => T::UByte(b().collect()),
+            T::Short(_) => T::Short(b().map(i16::from).collect()),
+            T::UShort(_) => T::UShort(b().map(u16::from).collect()),
+            T::Int(_) => T::Int(b().map(i32::from).collect()),
+            T::UInt(_) => T::UInt(b().map(u32::from).collect()),
+            T::Long(_) => T::Long(b().map(i64::from).collect()),
+            T::ULong(_) => T::ULong(b().map(u64::from).collect()),
+            T::Float(_) => T::Float(b().map(f32::from).collect()),
+            T::Double(_) => T::Double(b().map(f64::from).collect()),
+            T::Boolean(_) | T::String(_) => return Err("not an array of numbers".into()),
+        }),
+        PvField::ScalarArray(_) => PvField::ScalarArray(b().map(ScalarValue::UByte).collect()),
+        _ => return Err("not an array of numbers".into()),
+    };
+    Ok(())
+}
+
 fn typed_longs(a: &TypedScalarArray) -> Arc<[i64]> {
     match a {
         TypedScalarArray::Boolean(x) => x.iter().map(|v| *v as i64).collect(),
@@ -398,6 +443,25 @@ mod tests {
         );
         assert_eq!(img.data.get(1, true), 255.0);
         assert_eq!(img.data.get(1, false), -1.0);
+    }
+
+    #[test]
+    fn writes_long_strings_in_the_arrays_own_type() {
+        let mut nt = PvStructure::new("epics:nt/NTScalarArray:1.0");
+        nt.set(
+            "value",
+            PvField::ScalarArrayTyped(TypedScalarArray::Byte(vec![0i8; 3].into())),
+        );
+        let mut v = PvField::Structure(nt);
+        with_bytes(&mut v, &crate::long_string_bytes("h\u{e9}", None)).unwrap();
+        let mut s = PvState::default();
+        apply(&mut s, &v);
+        assert_eq!(s.value, Value::LongArray(Arc::from(vec![104, -61, -87, 0])));
+        assert_eq!(s.value.as_long_string().as_deref(), Some("h\u{e9}"));
+
+        let mut nt = PvStructure::new("epics:nt/NTScalar:1.0");
+        nt.set("value", PvField::Scalar(ScalarValue::String("x".into())));
+        assert!(with_bytes(&mut PvField::Structure(nt), b"y\0").is_err());
     }
 
     #[test]
