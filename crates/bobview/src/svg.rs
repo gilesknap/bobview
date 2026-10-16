@@ -25,8 +25,9 @@ use resvg::usvg;
 
 /// Deepest element nesting of SVG XML handed to usvg, counting each
 /// reference followed as `REF_LEVELS` levels and the SVGs embedded in it
-/// together. A plain chain of references may be about 30 long; usvg needed
-/// about 700 to exhaust Chromium's stack, and real SVGs follow two or three.
+/// together. A plain chain of references may be about 20 long; usvg needed
+/// about 700 to exhaust Chromium's stack, and real SVGs follow two or three
+/// (and score at most 44).
 pub const MAX_XML_DEPTH: usize = 128;
 
 /// Levels of nesting that following one reference counts as. usvg recurses
@@ -131,11 +132,31 @@ const HREF_ELEMENTS: &[&str] = &[
     "filter",
 ];
 
+/// Properties holding references that an element's descendants inherit.
+const INHERITED: &[&str] = &[
+    "fill",
+    "stroke",
+    "marker",
+    "marker-start",
+    "marker-mid",
+    "marker-end",
+];
+
+/// Elements whose content usvg converts where it is in the document, when
+/// something refers to them, so it inherits from their ancestors there.
+const IN_PLACE: &[&str] = &["pattern", "marker", "mask", "clipPath"];
+
 /// The deepest element nesting in `doc` with the references usvg follows
 /// (`url(#id)` in an attribute, a `style` or a style sheet, and an `href` to
 /// `#id`) counted as `REF_LEVELS` levels each: how deep usvg recurses to
 /// parse it. `usize::MAX` if references form a loop. Found without
 /// recursion.
+///
+/// An element's references count from the deepest element below it, as
+/// that may be where an inherited `fill` or marker is resolved, or where
+/// the content of a `<use>` (which inherits from the `<use>`) resolves
+/// others. Following one into a pattern, marker, mask or clip path also
+/// leads to the references it inherits from its own ancestors.
 pub fn svg_depth(doc: &roxmltree::Document) -> usize {
     let mut ids: HashMap<&str, Vec<roxmltree::NodeId>> = HashMap::new();
     for node in doc.descendants().filter(|n| n.is_element()) {
@@ -143,8 +164,11 @@ pub fn svg_depth(doc: &roxmltree::Document) -> usize {
             ids.entry(id).or_default().push(node.id());
         }
     }
+    let id_names: Vec<&str> = ids.keys().copied().collect();
+    let id_index: HashMap<&str, usize> =
+        id_names.iter().enumerate().map(|(i, n)| (*n, i)).collect();
     // Style sheets, as usvg reads them, keeping only the rules that refer to
-    // something.
+    // something or inherit.
     let mut sheet = simplecss::StyleSheet::new();
     for node in doc.descendants().filter(|n| n.has_tag_name("style")) {
         if matches!(node.attribute("type"), None | Some("text/css"))
@@ -153,80 +177,163 @@ pub fn svg_depth(doc: &roxmltree::Document) -> usize {
             sheet.parse_more(text);
         }
     }
+    let relevant = |value: &str| value.contains("url(") || value.trim() == "inherit";
     sheet
         .rules
-        .retain(|rule| rule.declarations.iter().any(|d| d.value.contains("url(")));
+        .retain(|rule| rule.declarations.iter().any(|d| relevant(d.value)));
 
-    // The elements `node` refers to.
-    let refs = |node: roxmltree::Node| -> Vec<roxmltree::NodeId> {
-        let mut names = Vec::new();
+    // Each element's properties that refer to something or inherit: its
+    // attributes, its `style` and the style sheet rules it matches.
+    let count = doc.descendants().count();
+    let index = |id: roxmltree::NodeId| id.get_usize();
+    let mut props: Vec<Vec<(&str, &str)>> = vec![Vec::new(); count];
+    for node in doc.descendants().filter(|n| n.is_element()) {
+        let p = &mut props[index(node.id())];
         for attr in node.attributes() {
-            if attr.name() == "href" && HREF_ELEMENTS.contains(&node.tag_name().name()) {
-                names.extend(attr.value().split_once('#').map(|(_, id)| id.trim()));
+            if attr.name() == "style" {
+                for d in simplecss::DeclarationTokenizer::from(attr.value()) {
+                    p.push((d.name, d.value));
+                }
+            } else {
+                p.push((attr.name(), attr.value()));
             }
-            url_ids(attr.value(), &mut names);
         }
         for rule in &sheet.rules {
             if rule.selector.matches(&CssNode(node)) {
-                for declaration in &rule.declarations {
-                    url_ids(declaration.value, &mut names);
-                }
+                p.extend(rule.declarations.iter().map(|d| (d.name, d.value)));
+            }
+        }
+        p.retain(|(_, value)| relevant(value));
+    }
+    let url_refs = |id: roxmltree::NodeId, inherited: bool| {
+        let mut names = Vec::new();
+        for (name, value) in &props[index(id)] {
+            if !inherited || INHERITED.contains(name) {
+                url_ids(value, &mut names);
             }
         }
         names
-            .iter()
-            .filter_map(|name| ids.get(name))
-            .flatten()
-            .copied()
-            .collect()
     };
 
-    // What each node leads to, with the levels each step costs.
-    type Steps = Vec<(roxmltree::NodeId, usize)>;
-    let next = |id: roxmltree::NodeId| -> Steps {
-        let node = doc.get_node(id).expect("a node of this document");
-        let children = node.children().filter(|c| c.is_element());
-        let refs = refs(node).into_iter().map(|r| (r, REF_LEVELS));
-        children.map(|c| (c.id(), 1)).chain(refs).collect()
+    // The walk's nodes: each element; each element as followed to by a
+    // reference (`count +`); and each id (`2 * count +`), which leads to
+    // every element with that id.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Step {
+        /// Deeper by so many levels.
+        Down(usize),
+        /// Deeper by so many levels from the deepest `Down` step.
+        Across(usize),
+    }
+    type Steps = Vec<(usize, Step)>;
+    let named = |names: Vec<&str>, step: Step, steps: &mut Steps| {
+        steps.extend(
+            names
+                .iter()
+                .filter_map(|n| id_index.get(n))
+                .map(|i| (2 * count + i, step)),
+        );
+    };
+    // What a walk node leads to, and how many levels it is itself.
+    let next = |v: usize| -> (usize, Steps) {
+        let mut steps = Steps::new();
+        if v >= 2 * count {
+            for id in &ids[id_names[v - 2 * count]] {
+                steps.push((count + index(*id), Step::Down(0)));
+            }
+            return (0, steps);
+        }
+        let followed = v >= count;
+        let node = doc
+            .get_node(roxmltree::NodeId::from(v % count))
+            .expect("a node of this document");
+        if followed {
+            steps.push((v - count, Step::Down(0)));
+            if IN_PLACE.contains(&node.tag_name().name()) {
+                // What it inherits from where it is.
+                for a in node.ancestors().skip(1) {
+                    named(url_refs(a.id(), true), Step::Across(REF_LEVELS), &mut steps);
+                }
+                // An `inherit` of what is not inherited takes the parent's.
+                for (name, value) in &props[index(node.id())] {
+                    if value.trim() == "inherit" && !INHERITED.contains(name) {
+                        let parent = node.ancestors().skip(1).find_map(|a| {
+                            props[index(a.id())]
+                                .iter()
+                                .find(|(n, v)| n == name && v.trim() != "inherit")
+                        });
+                        let mut names = Vec::new();
+                        if let Some((_, value)) = parent {
+                            url_ids(value, &mut names);
+                        }
+                        named(names, Step::Across(REF_LEVELS), &mut steps);
+                    }
+                }
+            }
+            return (0, steps);
+        }
+        for c in node.children().filter(|c| c.is_element()) {
+            steps.push((index(c.id()), Step::Down(1)));
+        }
+        if HREF_ELEMENTS.contains(&node.tag_name().name()) {
+            let hrefs = node.attributes().filter(|a| a.name() == "href");
+            let names = hrefs
+                .filter_map(|a| a.value().split_once('#'))
+                .map(|(_, id)| id.trim());
+            named(names.collect(), Step::Down(REF_LEVELS), &mut steps);
+        }
+        named(
+            url_refs(node.id(), false),
+            Step::Across(REF_LEVELS),
+            &mut steps,
+        );
+        (1, steps)
     };
 
     // A depth-first walk, keeping the deepest each node leads to once all
     // it leads to is known.
     const NEW: usize = 0;
     const WALKING: usize = usize::MAX;
-    let mut depth = vec![NEW; doc.descendants().count()];
-    let index = |id: roxmltree::NodeId| id.get_usize();
-    // A node, what it leads to and how far through that the walk is.
-    let mut stack: Vec<(roxmltree::NodeId, Steps, usize)> = Vec::new();
+    let mut depth = vec![NEW; 2 * count + id_names.len()];
+    // A node, its own levels, what it leads to and how far through that the
+    // walk is.
+    let mut stack: Vec<(usize, usize, Steps, usize)> = Vec::new();
     let mut deepest = 0;
     for start in doc.descendants().filter(|n| n.is_element()) {
-        if depth[index(start.id())] != NEW {
+        let start = index(start.id());
+        if depth[start] != NEW {
             continue;
         }
-        depth[index(start.id())] = WALKING;
-        stack.push((start.id(), next(start.id()), 0));
-        while let Some((node, leads_to, at)) = stack.last_mut() {
-            let Some(&(id, _)) = leads_to.get(*at) else {
-                let d = leads_to
-                    .iter()
-                    .map(|&(id, levels)| levels.saturating_add(depth[index(id)]))
-                    .fold(1, usize::max);
-                depth[index(*node)] = d.min(WALKING - 1);
+        depth[start] = WALKING;
+        let (levels, steps) = next(start);
+        stack.push((start, levels, steps, 0));
+        while let Some((node, levels, leads_to, at)) = stack.last_mut() {
+            let Some(&(v, _)) = leads_to.get(*at) else {
+                let (mut down, mut across) = (*levels, 0usize);
+                for &(v, step) in leads_to.iter() {
+                    match step {
+                        Step::Down(l) => down = down.max(l.saturating_add(depth[v])),
+                        Step::Across(l) => across = across.max(l.saturating_add(depth[v])),
+                    }
+                }
+                // Never NEW, as a walked node may lead nowhere.
+                depth[*node] = down.saturating_add(across).clamp(1, WALKING - 1);
                 stack.pop();
                 continue;
             };
             *at += 1;
-            match depth[index(id)] {
+            match depth[v] {
                 NEW => {
-                    depth[index(id)] = WALKING;
-                    stack.push((id, next(id), 0));
+                    depth[v] = WALKING;
+                    let (levels, steps) = next(v);
+                    stack.push((v, levels, steps, 0));
                 }
                 // A loop, which usvg may or may not break.
                 WALKING => return usize::MAX,
                 _ => {}
             }
         }
-        deepest = deepest.max(depth[index(start.id())]);
+        deepest = deepest.max(depth[start]);
     }
     deepest
 }
@@ -590,6 +697,34 @@ mod tests {
                     format!(r#"<rect width="10" height="10" fill="url(#q{})"/>"#, n - 1),
                 ),
             ),
+            (
+                // A fill each pattern inherits from where it is.
+                "inherited fill",
+                chain(
+                    r#"<pattern id="a0" width="1" height="1"><rect width="1" height="1"/></pattern>"#,
+                    &|i| {
+                        format!(
+                            r#"<g fill="url(#a{})"><pattern id="a{i}" width="1" height="1"><rect width="1" height="1"/></pattern></g>"#,
+                            i - 1
+                        )
+                    },
+                    format!(r#"<rect width="10" height="10" fill="url(#a{})"/>"#, n - 1),
+                ),
+            ),
+            (
+                // A mask each mask takes from its parent by `inherit`.
+                "mask inherit",
+                chain(
+                    r#"<mask id="m0"><rect width="5" height="5" fill="white"/></mask>"#,
+                    &|i| {
+                        format!(
+                            r#"<g mask="url(#m{})"><mask id="m{i}" mask="inherit"><rect width="5" height="5" fill="white"/></mask></g>"#,
+                            i - 1
+                        )
+                    },
+                    format!(r#"<rect width="10" height="10" mask="url(#m{})"/>"#, n - 1),
+                ),
+            ),
         ]
     }
 
@@ -611,7 +746,61 @@ mod tests {
     }
 
     #[test]
+    fn inherited_references_count_from_where_they_are_used() {
+        // Each link of these chains is followed from 60 levels down, which
+        // the XML or the references alone do not show.
+        let deep = |leaf: &str| format!("{}{leaf}{}", "<g>".repeat(60), "</g>".repeat(60));
+        let rect = r#"<rect width="1" height="1"/>"#;
+        let chain = |link: &dyn Fn(usize) -> String| {
+            let links: String = (1..14).map(link).collect();
+            format!(
+                r#"{SVG}<defs><g id="deep">{}</g><pattern id="p0" width="1" height="1">{rect}</pattern>{links}</defs><rect width="10" height="10" fill="url(#p13)"/></svg>"#,
+                deep(rect)
+            )
+        };
+        let pattern = |i: usize, content: String| {
+            format!(r#"<pattern id="p{i}" width="1" height="1">{content}</pattern>"#)
+        };
+        let chains = [
+            // A fill on a group, used by the rect deep inside it.
+            chain(&|i| {
+                pattern(
+                    i,
+                    format!(r#"<g fill="url(#p{})">{}</g>"#, i - 1, deep(rect)),
+                )
+            }),
+            // A fill the pattern's content inherits from the pattern's parent.
+            chain(&|i| {
+                format!(
+                    r#"<g fill="url(#p{})">{}</g>"#,
+                    i - 1,
+                    pattern(i, deep(rect))
+                )
+            }),
+            // A fill the content of a `<use>` inherits from the `<use>`.
+            chain(&|i| {
+                pattern(
+                    i,
+                    format!(r##"<use href="#deep" fill="url(#p{})"/>"##, i - 1),
+                )
+            }),
+        ];
+        on_small_stack(move || {
+            for svg in chains {
+                let doc = parse_xml(&svg).unwrap();
+                assert!(svg_depth(&doc) > 13 * 60, "{}", svg_depth(&doc));
+                assert!(parse(svg.as_bytes()).is_err());
+            }
+        });
+    }
+
+    #[test]
     fn reference_loops_are_refused() {
+        // usvg itself follows a pattern that inherits itself for ever.
+        let svg = format!(
+            r#"{SVG}<g fill="url(#p)"><pattern id="p" width="1" height="1"><rect width="1" height="1"/></pattern><rect width="5" height="5"/></g></svg>"#
+        );
+        assert_eq!(svg_depth(&parse_xml(&svg).unwrap()), usize::MAX);
         let svg = format!(
             r#"{SVG}<defs><pattern id="a" width="1" height="1"><rect width="1" height="1" fill="url(#b)"/></pattern><pattern id="b" width="1" height="1"><rect width="1" height="1" style="fill: url( '#a' )"/></pattern></defs><rect width="10" height="10" fill="url(#a)"/></svg>"#
         );
@@ -628,13 +817,13 @@ mod tests {
         let pattern = r#"<pattern id="p"><rect/></pattern>"#;
         assert_eq!(
             depth(&format!(r#"{pattern}<rect fill="url(#p)"/>"#)),
-            2 + REF_LEVELS - 1 + 2
+            2 + REF_LEVELS + 2
         );
         assert_eq!(
             depth(&format!(
                 r#"{pattern}<rect style="stroke:url(&quot;#p&quot;)"/>"#
             )),
-            2 + REF_LEVELS - 1 + 2
+            2 + REF_LEVELS + 2
         );
         // An `<a>` links to, rather than draws, what it names.
         assert_eq!(depth(r##"<g id="g"><a href="#g"><rect/></a></g>"##), 4);
