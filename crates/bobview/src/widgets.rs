@@ -1161,7 +1161,7 @@ fn text_entry(
         .margin(margin)
         .interactive(enabled)
         .min_size(rect.size());
-    let resp = put_clipped(ui, rect, cx.clip, edit);
+    let resp = put_clipped(ui, id, rect, cx.clip, edit);
     if resp.has_focus() {
         node.edit = Some(buf);
     } else if resp.lost_focus() {
@@ -1199,12 +1199,17 @@ fn entry_job(
 
 /// Put a widget at `rect`, clipped. The scope starts at `rect`, not at the
 /// cursor: one there would take in the space after the last widget each
-/// time, and grow the display's scrolled size below its bottom.
-fn put_clipped(ui: &mut Ui, rect: Rect, clip: Rect, widget: impl egui::Widget) -> Response {
-    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
-        ui.set_clip_rect(clip.intersect(ui.clip_rect()));
-        ui.put(rect, widget)
-    })
+/// time, and grow the display's scrolled size below its bottom. Its ids
+/// derive from `id`, so a widget keeps its edit state (a drag, typing)
+/// however many widgets came before it.
+fn put_clipped(ui: &mut Ui, id: Id, rect: Rect, clip: Rect, widget: impl egui::Widget) -> Response {
+    ui.scope_builder(
+        egui::UiBuilder::new().max_rect(rect).id(id.with("clipped")),
+        |ui| {
+            ui.set_clip_rect(clip.intersect(ui.clip_rect()));
+            ui.put(rect, widget)
+        },
+    )
     .inner
 }
 
@@ -1850,14 +1855,21 @@ fn slide_layout(rect: Rect, z: f32, has_label: bool) -> (Rect, Option<Rect>) {
 
 /// Phoebus Spinner: the value, dragged or typed, kept within the range and
 /// stepped by `increment`.
-fn spinner(ui: &mut Ui, node: &mut Node, s: Option<&PvState>, rect: Rect, cx: &mut Cx) -> Response {
+fn spinner(
+    ui: &mut Ui,
+    node: &mut Node,
+    s: Option<&PvState>,
+    rect: Rect,
+    cx: &mut Cx,
+    id: Id,
+) -> Response {
     let w = node.w.clone();
     let (min, max) = crate::meter::limits(&w, s);
     let (min, max) = (min.min(max), max.max(min));
     let mut v = s.and_then(|s| s.value.as_f64()).unwrap_or(min);
     let step = w.f64("increment").unwrap_or(1.0);
     let drag = egui::DragValue::new(&mut v).range(min..=max).speed(step);
-    let resp = put_clipped(ui, rect, cx.clip.intersect(rect), drag);
+    let resp = put_clipped(ui, id, rect, cx.clip.intersect(rect), drag);
     if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
         write(node, v.to_string());
     }
@@ -2009,7 +2021,7 @@ fn slider(
     id: Id,
 ) -> Response {
     if node.w.kind == "spinner" {
-        return spinner(ui, node, s, rect, cx);
+        return spinner(ui, node, s, rect, cx, id);
     }
     let w = node.w.clone();
     let z = cx.view.zoom;
@@ -3385,5 +3397,25 @@ pv.setValue(pv_value);
         assert_eq!(slider_range(&boy, (-5.0, 5.0)), (-5.0, 5.0));
         assert_eq!(slider_range(&boy, (3.0, 3.0)), (3.0, 4.0));
         assert_eq!(slider_range(&boy, (10.0, 1.0)), (10.0, 1.0));
+    }
+
+    #[test]
+    fn clipped_widgets_are_keyed_by_their_id() {
+        // The same widget after one or two others has the same id.
+        let ctx = egui::Context::default();
+        let rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(60.0, 20.0));
+        let mut ids = Vec::new();
+        for before in [1, 2] {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                for _ in 0..before {
+                    ui.label("before");
+                }
+                let mut v = 1.0;
+                let drag = egui::DragValue::new(&mut v);
+                ids.push(put_clipped(ui, Id::new("spinner"), rect, Rect::EVERYTHING, drag).id);
+            });
+            out.textures_delta.clear();
+        }
+        assert_eq!(ids[0], ids[1]);
     }
 }
