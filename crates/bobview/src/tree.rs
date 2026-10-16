@@ -696,7 +696,9 @@ impl Navigator {
             let (tx, ctx, generation) = (self.done.0.clone(), ctx.clone(), self.generation);
             std::thread::spawn(move || {
                 tx.send((generation, run(job))).ok();
-                ctx.request_repaint();
+                // The navigator is in the main window; on this thread
+                // `request_repaint` is whichever window is being drawn.
+                ctx.request_repaint_of(egui::ViewportId::ROOT);
             });
         }
     }

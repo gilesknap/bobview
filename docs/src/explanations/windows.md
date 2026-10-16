@@ -54,5 +54,12 @@ again for each display a pinned window's link opens in it.
 Wayland doesn't let applications place their windows, so there the
 compositor does.
 
+## Redrawing
+
+Each window is redrawn on its own: for its own input, and when a PV its
+display shows changes (at most 10 times a second), not when another window
+is. That matters most over `ssh -X`, where each redraw sends the whole
+window over the network.
+
 The controls of each window are listed in
 [The window and its controls](../reference/controls.md).

@@ -38,7 +38,10 @@ Over X forwarding the finished window then travels to your X server as
 plain images, which every X server accepts.
 
 Software rendering costs CPU on the machine running bobview, but bobview's
-displays are simple to draw, so it is usually quick enough.
+displays are simple to draw, so it is usually quick enough. Over `ssh -X`
+each redraw sends the whole window over the network, so bobview redraws a
+window only for its own input and when a PV it shows changes, at most 10
+times a second (see [Pinned windows and the viewer](../explanations/windows.md#redrawing)).
 
 ## Requirement
 
