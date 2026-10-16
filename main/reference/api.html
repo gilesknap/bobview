@@ -183,13 +183,24 @@
                     <main>
                         <h1 id="rust-api"><a class="header" href="#rust-api">Rust API</a></h1>
 <p>The workspace's crates are documented with rustdoc, built into this book
-under <code>api/</code>:</p>
+under <code>api/</code>.</p>
+<p>Libraries:</p>
 <ul>
 <li><a href="../api/bob/index.html"><code>bob</code></a>: the display model, <code>.bob</code> and <code>.opi</code>
 reading, macros and project links</li>
 <li><a href="../api/pv/index.html"><code>pv</code></a>: PV connections over CA, PVA, PVWS and local
 sources</li>
 <li><a href="../api/testioc/index.html"><code>testioc</code></a>: the test IOC</li>
+</ul>
+<p>Programs, documented with their private items, since that is all they have:</p>
+<ul>
+<li><a href="../api/bobview/index.html"><code>bobview</code></a>: the viewer, its egui app and
+widgets</li>
+<li><a href="../api/bobview_server/index.html"><code>bobview_server</code></a>: the web server and
+its PV Web Socket</li>
+<li><a href="../api/bobview_probe/index.html"><code>bobview_probe</code></a> and
+<a href="../api/bobview_testioc/index.html"><code>bobview_testioc</code></a>: the command-line
+front ends of <code>bobview-probe</code> and <code>bobview-testioc</code></li>
 </ul>
 <p>The crates are not published to crates.io and their API is not stable; it
 is documented for contributors.</p>
