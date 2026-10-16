@@ -1080,6 +1080,8 @@ impl BobApp {
                 self.keypad = Some(Keypad { window, pv, text });
                 ctx.request_repaint();
             }
+            // A second one replaces a pending one: the dialog is modal in
+            // spirit, and a display cannot make writes pile up behind it.
             Request::ConfirmWrite { pv, value } => {
                 self.confirm = Some(Confirm { window, pv, value });
                 ctx.request_repaint();
@@ -1268,14 +1270,23 @@ fn confirm_window(ctx: &egui::Context, confirm: &mut Option<Confirm>) {
             ui.label("A display loaded from the web asks to write");
             ui.monospace(format!("{} = {}", plain_name(c.pv.name()), c.value));
             ui.horizontal(|ui| {
-                answer = if ui.button("Write").clicked() {
+                let write = ui.button("Write").clicked();
+                let cancel = ui.button("Cancel");
+                // Cancel has the focus, so Enter cancels; only a click writes.
+                if !ui.memory(|m| m.focused().is_some()) {
+                    cancel.request_focus();
+                }
+                answer = if write {
                     Some(true)
-                } else if ui.button("Cancel").clicked() {
+                } else if cancel.clicked() {
                     Some(false)
                 } else {
                     None
                 };
             });
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                answer = Some(false);
+            }
         });
     if let Some(yes) = answer {
         if yes {

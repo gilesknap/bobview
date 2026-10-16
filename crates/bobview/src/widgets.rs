@@ -1281,7 +1281,20 @@ pub(crate) fn run_action(node: &Node, action: &Action, cx: &mut Cx) {
                     // As `(PVUtil.getDouble(pv) == 0) ? 1 : 0`: a value
                     // that is not a number is NaN there, so it writes 0.
                     let zero = s.value.as_f64() == Some(0.0);
-                    write(node, if zero { "1" } else { "0" });
+                    let value = if zero { "1" } else { "0" };
+                    match &node.pv {
+                        Some(pv)
+                            if write_needs_confirmation(node.base.as_ref())
+                                && !cx.pvs.read_only()
+                                && can_write(&node.w, Some(&s)) =>
+                        {
+                            cx.requests.push(Request::ConfirmWrite {
+                                pv: pv.clone(),
+                                value: value.into(),
+                            });
+                        }
+                        _ => write(node, value),
+                    }
                 }
             } else {
                 log::warn!("script '{description}' is not supported: bobview runs no scripts");
@@ -2528,6 +2541,59 @@ mod tests {
                 &vec!["BL01T:X"]
             ]
         );
+    }
+
+    #[test]
+    fn writes_from_web_displays_ask_first_but_local_ones_write() {
+        let xml = r#"<display><widget type="action_button"><pv_name>loc://confirm_t(0)</pv_name><actions>
+            <action type="write_pv"><pv_name>loc://confirm_t(0)</pv_name><value>5</value></action>
+            <action type="execute"><script file="EmbeddedPy"><text>pv = ScriptUtil.getPrimaryPV(widget)
+var pv_value = PVUtil.getDouble(pv);
+pv_value = (pv_value == 0) ? 1 : 0;
+pv.setValue(pv_value);
+</text></script></action>
+            </actions></widget></display>"#;
+        let run = |source: &str| {
+            let pvs = PvManager::new();
+            let mut display = bob::Display::parse(xml).unwrap();
+            display.source = Some(Source::parse(source));
+            let screen = Builder { pvs: &pvs }.screen(display, &Macros::default(), None, 0);
+            let node = &screen.nodes[0];
+            let pv = node.pv.clone().unwrap();
+            let mut requests = Vec::new();
+            let mut cx = Cx {
+                view: View {
+                    origin: Pos2::ZERO,
+                    zoom: 1.0,
+                },
+                clip: Rect::EVERYTHING,
+                pvs: &pvs,
+                requests: &mut requests,
+                depth: 0,
+                keypad: false,
+                trends: &[],
+                window: WindowKey::Main,
+            };
+            for a in node.w.actions() {
+                run_action(node, &a, &mut cx);
+            }
+            (pv.state().value.as_f64(), requests)
+        };
+        // From the web: nothing written, both actions ask.
+        let (value, requests) = run("https://host/a.bob");
+        assert_eq!(value, Some(0.0));
+        let asked: Vec<&str> = requests
+            .iter()
+            .filter_map(|r| match r {
+                Request::ConfirmWrite { value, .. } => Some(value.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(asked, ["5", "1"]);
+        // A local file: written at once (the toggle then flips 5 to 0).
+        let (value, requests) = run("/tmp/a.bob");
+        assert!(requests.is_empty());
+        assert_eq!(value, Some(0.0));
     }
 
     #[test]
