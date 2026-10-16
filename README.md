@@ -16,10 +16,11 @@ were tuned by eye, and output has not been compared with Phoebus's own.
 
 ## Install
 
-On the phone (Android Linux Terminal) or an x86_64 Linux desktop; `install.sh`
-picks the aarch64 or x86_64 release build to match the machine:
+On the phone (Android Linux Terminal), an x86_64 Linux desktop or a Mac
+(Apple silicon or Intel, macOS 11 or later); `install.sh` picks the aarch64
+or x86_64, Linux or macOS release build to match the machine.
 
-Pre-requisites on debian distros:
+Pre-requisites on debian distros (none on macOS):
 ```bash
 sudo apt install libxkbcommon0 libwayland-client0 libegl1 libgl1-mesa-dri
 ```
@@ -40,6 +41,9 @@ This installs into `~/.local`:
 | `bin/bobview-server` | serves bobview to browsers, see [In a browser](#in-a-browser) |
 | `share/bobview/displays/` | test screens; `index.bob` opens by default |
 | `share/bobview/web/` | the browser build that `bobview-server` serves |
+
+On macOS `~/.local/bin` is not on `PATH` by default; add
+`export PATH=$HOME/.local/bin:$PATH` to `~/.zshrc`.
 
 ## Run
 
@@ -202,6 +206,27 @@ for a project in `/workspaces/VacOPIS/vacuum_4-100`, and bobview follows the
 links (the linked folders need not exist on disk; Open… lists them). A
 screen's real path can be given with `--project DIR` instead:
 `bobview -p /workspaces/VacOPIS/vacuum_4-100 /dls_sw/…/vacuumApp/opi/opi/diamondVacuumOverview.opi`.
+
+DLS modules need neither: there is no `.project` on disk, but the generated
+launcher `runcss.sh` beside a module's screens (`vacuumApp/opi/opi`) lists
+the links it gives CS-Studio (`links="${SCRIPT_DIR}=${project}/${module},…"`).
+bobview reads that list (it does not run the script, which needs
+`configure-ioc`), taking `version` from the module's `configure/VERSION`
+(else `dev`), so a BOY `.opi` screen such as
+`bobview /dls_sw/…/vacuum/4-100/vacuumApp/opi/opi/diamondVacuumOverview.opi`
+opens as
+`…/vacuumApp/opi/opi/runcss.sh/vacuum_4-100/vacuum/diamondVacuumOverview.opi`,
+the CS-Studio path `/vacuum_4-100/vacuum/diamondVacuumOverview.opi` below the
+launcher, and links to other modules work. The same goes for a BOY `.opi`
+screen reached by its real path from anywhere else (the file chooser, a
+layout, an absolute path in another screen), with the launcher in its
+folder or up to two above. This is for BOY screens only: a `.bob` (even one
+Phoebus-style in place of an `.opi`, or one picked in a launcher project's
+folder) goes by its real path. A `.project` nearer the screen than the
+launcher, or beside it, wins when it links the screen (an empty one, as many
+DLS modules have, does not). `-p` also
+takes a module's screens folder (or its `runcss.sh`), to open another
+module's BOY screen through that module's links.
 
 DLS screens open others with command actions that run a launcher script,
 such as `./srCellVacuum 04`, which ends by running `runcss.sh DISPLAY -m

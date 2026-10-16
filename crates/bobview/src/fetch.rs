@@ -337,4 +337,21 @@ mod tests {
         let err = load(&Source::parse(&format!("http://127.0.0.1:{port}/x.bob"))).unwrap_err();
         assert!(matches!(err, Error::Fetch(..)), "{err}");
     }
+
+    #[test]
+    fn a_bob_instead_of_a_launcher_screen_is_real() {
+        let dir = std::env::temp_dir().join(format!("bobview-fetch-runcss-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("runcss.sh"),
+            "project=m_${version}\nmodule=m\nlinks=\"${SCRIPT_DIR}=${project}/${module}\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("x.opi"), "<display/>").unwrap();
+        std::fs::write(dir.join("x.bob"), r#"<display version="2.0.0"/>"#).unwrap();
+        let virt = bob::project::launcher_path(&dir.join("x.opi")).unwrap();
+        let d = load(&Source::File(virt)).unwrap();
+        assert_eq!(d.source, Some(Source::File(dir.join("x.bob"))));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
