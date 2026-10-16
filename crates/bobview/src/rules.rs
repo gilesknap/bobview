@@ -680,11 +680,13 @@ struct Parser {
     toks: Vec<Tok>,
     pos: usize,
     lang: Lang,
-    /// Nesting of parentheses and prefix operators, bounded by `MAX_DEPTH`.
+    /// Nesting of brackets, calls and prefix operators, bounded by
+    /// `MAX_DEPTH`.
     depth: usize,
 }
 
-/// Deepest nesting of `(`, `!` and `-` a rule expression may have.
+/// Deepest nesting of brackets, calls and prefix operators (`!`, `not`,
+/// `-`, `+`) a rule expression may have.
 const MAX_DEPTH: usize = 64;
 /// Most tokens a rule expression may have.
 const MAX_TOKENS: usize = 1024;
@@ -744,7 +746,7 @@ impl Parser {
     fn not(&mut self) -> Option<Expr> {
         if self.lang == Lang::Python && self.op() == Some("!") {
             self.pos += 1;
-            return Some(Expr::Not(Box::new(self.not()?)));
+            return self.nested(|p| Some(Expr::Not(Box::new(p.not()?))));
         }
         self.binary(0)
     }
@@ -782,14 +784,22 @@ impl Parser {
         Some(lhs)
     }
 
-    fn unary(&mut self) -> Option<Expr> {
+    /// Parse with `f` one level deeper, failing past `MAX_DEPTH`: every
+    /// recursion back into the grammar (brackets, call arguments and prefix
+    /// operators) passes through here, so hostile nesting can't exhaust the
+    /// stack.
+    fn nested(&mut self, f: impl FnOnce(&mut Self) -> Option<Expr>) -> Option<Expr> {
         if self.depth >= MAX_DEPTH {
             return None;
         }
         self.depth += 1;
-        let e = self.unary_inner();
+        let e = f(self);
         self.depth -= 1;
         e
+    }
+
+    fn unary(&mut self) -> Option<Expr> {
+        self.nested(Self::unary_inner)
     }
 
     fn unary_inner(&mut self) -> Option<Expr> {
@@ -878,10 +888,13 @@ mod tests {
     }
 
     /// Run `f` on a thread with a small stack, so unbounded recursion fails
-    /// this test instead of passing on the test runner's larger stack.
+    /// this test instead of passing on the test runner's larger stack. An
+    /// unoptimised build needs about 2 MiB for `MAX_DEPTH` brackets, an
+    /// optimised one under 256 KiB, against the 16 MiB a display is built
+    /// on; without the bound 500 brackets need about 8 MiB.
     fn small_stack<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
         std::thread::Builder::new()
-            .stack_size(1024 * 1024)
+            .stack_size(4 * 1024 * 1024)
             .spawn(f)
             .unwrap()
             .join()
@@ -890,20 +903,38 @@ mod tests {
 
     #[test]
     fn hostile_expressions_are_rejected_not_overflowed() {
-        small_stack(|| {
+        // Nesting within `MAX_TOKENS`, so only the depth bound rejects it.
+        let deep = |open: &str, n: usize, close: &str| {
+            let e = format!("{}1{}", open.repeat(n), close.repeat(n));
+            assert!(
+                tokenize(&e, Lang::Python).unwrap().len() <= MAX_TOKENS,
+                "{e}"
+            );
+            e
+        };
+        small_stack(move || {
             for lang in [Lang::Python, Lang::JavaScript] {
-                let nested = format!("{}1{}", "(".repeat(5000), ")".repeat(5000));
-                assert!(parse(&nested, lang).is_none());
-                assert!(parse(&format!("{}1", "!".repeat(5000)), lang).is_none());
-                assert!(parse(&format!("{}1", "-".repeat(5000)), lang).is_none());
+                assert!(parse(&deep("(", 500, ")"), lang).is_none());
+                assert!(parse(&deep("!", 1000, ""), lang).is_none());
+                assert!(parse(&deep("-", 1000, ""), lang).is_none());
+                assert!(parse(&deep("+", 1000, ""), lang).is_none());
+                assert!(parse(&deep("Math.abs(", 300, ")"), lang).is_none());
+                // Nesting reached through a call's later arguments.
+                assert!(parse(&deep("max(1, ", 200, ")"), lang).is_none());
+                // Long chains, bounded by `MAX_TOKENS`.
                 assert!(parse(&vec!["1"; 20000].join("+"), lang).is_none());
-                let calls = format!("{}1{}", "Math.abs(".repeat(5000), ")".repeat(5000));
-                assert!(parse(&calls, lang).is_none());
+                assert!(parse(&vec!["1"; 20000].join("<"), lang).is_none());
                 assert!(parse(&format!("max({})", vec!["1"; 20000].join(",")), lang).is_none());
                 // Reasonable nesting still works.
-                let ok = format!("{}1{}", "(".repeat(30), ")".repeat(30));
-                assert!(parse(&ok, lang).is_some());
+                assert!(parse(&deep("(", 30, ")"), lang).is_some());
             }
+            // Python's `not`, which recurses outside `unary`, alone and
+            // inside brackets and chained comparisons.
+            let py = Lang::Python;
+            assert!(parse(&deep("not ", 1000, ""), py).is_none());
+            assert!(parse(&deep("(not ", 300, ")"), py).is_none());
+            assert!(parse(&deep("(1 < 2 < not ", 120, ")"), py).is_none());
+            assert!(parse(&deep("not ", 30, ""), py).is_some());
         });
     }
 
