@@ -199,8 +199,30 @@ fn float(f: Option<&PvField>) -> Option<f64> {
     }
 }
 
+/// An integer exactly, not through an `f64`, which keeps only 53 bits; a
+/// float is truncated and an unsigned one above `i64::MAX` saturates.
+fn scalar_i64(v: &ScalarValue) -> Option<i64> {
+    Some(match v {
+        ScalarValue::Boolean(b) => *b as i64,
+        ScalarValue::Byte(x) => *x as i64,
+        ScalarValue::Short(x) => *x as i64,
+        ScalarValue::Int(x) => *x as i64,
+        ScalarValue::Long(x) => *x,
+        ScalarValue::UByte(x) => *x as i64,
+        ScalarValue::UShort(x) => *x as i64,
+        ScalarValue::UInt(x) => *x as i64,
+        ScalarValue::ULong(x) => i64::try_from(*x).unwrap_or(i64::MAX),
+        ScalarValue::Float(x) => *x as i64,
+        ScalarValue::Double(x) => *x as i64,
+        ScalarValue::String(_) => return None,
+    })
+}
+
 fn int(f: Option<&PvField>) -> Option<i64> {
-    float(f).map(|v| v as i64)
+    match f? {
+        PvField::Scalar(v) => scalar_i64(v),
+        _ => None,
+    }
 }
 
 fn strings(f: Option<&PvField>) -> Vec<String> {
@@ -225,11 +247,13 @@ fn convert(f: &PvField) -> Value {
         PvField::Scalar(v @ (ScalarValue::Float(_) | ScalarValue::Double(_))) => {
             Value::Double(scalar_f64(v).unwrap_or(0.0))
         }
-        PvField::Scalar(v) => Value::Long(scalar_f64(v).unwrap_or(0.0) as i64),
+        PvField::Scalar(ScalarValue::ULong(x)) => Value::from_u64(*x),
+        PvField::Scalar(v) => Value::Long(scalar_i64(v).unwrap_or(0)),
         PvField::ScalarArrayTyped(a) => match a {
             TypedScalarArray::String(_) => Value::StrArray(strings(Some(f)).into()),
             TypedScalarArray::Float(x) => Value::DoubleArray(x.iter().map(|v| *v as f64).collect()),
             TypedScalarArray::Double(x) => Value::DoubleArray(x.iter().copied().collect()),
+            TypedScalarArray::ULong(x) => Value::from_u64s(x.as_slice()),
             other => Value::LongArray(typed_longs(other)),
         },
         PvField::ScalarArray(a) => {
@@ -255,7 +279,7 @@ fn typed_longs(a: &TypedScalarArray) -> Arc<[i64]> {
         TypedScalarArray::Int(x) => x.iter().map(|v| *v as i64).collect(),
         TypedScalarArray::UInt(x) => x.iter().map(|v| *v as i64).collect(),
         TypedScalarArray::Long(x) => x.iter().copied().collect(),
-        TypedScalarArray::ULong(x) => x.iter().map(|v| *v as i64).collect(),
+        TypedScalarArray::ULong(x) => x.iter().map(|v| (*v).min(i64::MAX as u64) as i64).collect(),
         TypedScalarArray::Float(x) => x.iter().map(|v| *v as i64).collect(),
         TypedScalarArray::Double(x) => x.iter().map(|v| *v as i64).collect(),
         TypedScalarArray::String(_) => Arc::from(Vec::new()),
@@ -374,6 +398,37 @@ mod tests {
         );
         assert_eq!(img.data.get(1, true), 255.0);
         assert_eq!(img.data.get(1, false), -1.0);
+    }
+
+    #[test]
+    fn keeps_every_bit_of_64_bit_integers() {
+        let big = (1i64 << 53) + 1;
+        let scalar = |v| {
+            let mut nt = PvStructure::new("epics:nt/NTScalar:1.0");
+            nt.set("value", PvField::Scalar(v));
+            let mut s = PvState::default();
+            apply(&mut s, &PvField::Structure(nt));
+            s.value
+        };
+        assert_eq!(scalar(ScalarValue::Long(big)), Value::Long(big));
+        assert_eq!(scalar(ScalarValue::Long(-big)), Value::Long(-big));
+        assert_eq!(scalar(ScalarValue::ULong(big as u64)), Value::Long(big));
+        assert_eq!(
+            scalar(ScalarValue::ULong(u64::MAX)),
+            Value::Double(u64::MAX as f64)
+        );
+        let array = convert(&PvField::ScalarArrayTyped(TypedScalarArray::ULong(
+            vec![1u64, u64::MAX].into(),
+        )));
+        assert_eq!(array, Value::DoubleArray(Arc::from([1.0, u64::MAX as f64])));
+        let array = convert(&PvField::ScalarArrayTyped(TypedScalarArray::Long(
+            vec![big].into(),
+        )));
+        assert_eq!(array, Value::LongArray(Arc::from([big])));
+        assert_eq!(
+            int(Some(&PvField::Scalar(ScalarValue::Long(big)))),
+            Some(big)
+        );
     }
 
     #[test]
