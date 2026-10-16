@@ -618,6 +618,9 @@ mod tests {
             assert!(parse(&format!("{}1", "!".repeat(5000))).is_none());
             assert!(parse(&format!("{}1", "-".repeat(5000))).is_none());
             assert!(parse(&vec!["1"; 20000].join("+")).is_none());
+            let calls = format!("{}1{}", "Math.abs(".repeat(5000), ")".repeat(5000));
+            assert!(parse(&calls).is_none());
+            assert!(parse(&format!("max({})", vec!["1"; 20000].join(","))).is_none());
             // Reasonable nesting still works.
             let ok = format!("{}1{}", "(".repeat(30), ")".repeat(30));
             assert!(parse(&ok).is_some());
