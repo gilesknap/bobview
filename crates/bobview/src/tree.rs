@@ -208,10 +208,7 @@ fn embed(
 
 /// A file named by a widget of the display at `base`.
 fn resolve(base: Option<&Source>, file: &str) -> Source {
-    match base {
-        Some(base) => base.resolve(file),
-        None => Source::parse(file),
-    }
+    crate::fetch::resolve(base, file)
 }
 
 /// What `action` of widget `w` opens, as clicking it would (see
@@ -945,6 +942,8 @@ mod tests {
     #[test]
     fn a_job_started_before_reading_again_is_dropped() {
         use super::{Done, Navigator};
+        // Reading again clears the fetch cache.
+        let _cache = crate::fetch::tests::CACHE_USERS.lock();
         // Started, then ⟳ pressed while it runs.
         let mut nav = Navigator {
             running: 1,

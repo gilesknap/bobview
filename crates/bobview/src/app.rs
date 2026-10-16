@@ -662,7 +662,9 @@ impl BobApp {
     /// worked out.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn is_loading(&self) -> bool {
-        self.main.is_loading() || self.windows.iter().any(|w| w.view.is_loading())
+        self.main.is_loading()
+            || self.windows.iter().any(|w| w.view.is_loading())
+            || crate::screen::building()
     }
 
     /// Run a command action on a thread, so a slow launcher script or file
@@ -975,7 +977,7 @@ impl BobApp {
     /// The open windows as a layout.
     fn layout(&self) -> Layout {
         let mut windows = Vec::new();
-        if let Some(loc) = &self.main.current {
+        if let Some(loc) = self.main.saved_location() {
             let mut w = WindowLayout::new(loc, self.geometry);
             w.main = true;
             w.pinned = Some(self.main_pinned);
@@ -984,7 +986,7 @@ impl BobApp {
             windows.push(w);
         }
         for dw in self.windows.iter().filter(|w| !w.close) {
-            if let Some(loc) = &dw.view.current {
+            if let Some(loc) = dw.view.saved_location() {
                 let mut w = WindowLayout::new(loc, dw.geometry);
                 w.toolbar = dw.toolbar;
                 w.pinned = Some(dw.pinned);
@@ -1172,7 +1174,7 @@ impl BobApp {
             ui.label("File or URL:");
             let edit = ui.add(egui::TextEdit::singleline(&mut *path).desired_width(f32::INFINITY));
             if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                chosen = Some(Source::parse(path));
+                chosen = Some(crate::fetch::user_named(path));
             }
         });
         // Nothing to list for a URL (an empty path lists nothing).
@@ -2253,8 +2255,10 @@ mod tests {
         app.launch(&ctx, main, None, None, "no-such-launcher".into());
         app.launch(&ctx, main, None, None, "no-such-launcher".into());
         assert_eq!(app.main.launching.len(), 1);
-        assert!(app.is_loading());
-        while app.is_loading() {
+        // The main view's own loading: app.is_loading() also counts tab
+        // builds of other tests running at the same time.
+        assert!(app.main.is_loading());
+        while app.main.is_loading() {
             std::thread::sleep(std::time::Duration::from_millis(5));
             app.poll_launched(&ctx);
         }
@@ -2277,7 +2281,7 @@ mod tests {
             })
             .unwrap();
         app.poll_launched(&ctx);
-        assert!(app.main.current.is_none() && !app.is_loading());
+        assert!(app.main.current.is_none() && !app.main.is_loading());
         // In the pinned main window a ctrl+clicked command opens in place,
         // as a ctrl+clicked link does.
         app.launched
@@ -2577,6 +2581,9 @@ mod tests {
         use super::{BobApp, Location, Origin, WindowKey};
         use crate::tree::{Clicked, Target};
         use crate::widgets::Request;
+        // Following a link to the display shown reloads it, clearing the
+        // fetch cache.
+        let _cache = crate::fetch::tests::CACHE_USERS.lock();
         let ctx = eframe::egui::Context::default();
         let mut app = BobApp::new(&ctx, None, Some(1.0), crate::chrome::UiScale::Auto);
         let display = |name: &str| Location {
@@ -2650,6 +2657,9 @@ mod tests {
             source: bob::Source::File(file.clone()),
             macros: bob::Macros::from_pairs(pairs.iter().copied()),
         };
+        // Following a link to the display shown reloads it, clearing the
+        // fetch cache.
+        let _cache = crate::fetch::tests::CACHE_USERS.lock();
         let ctx = eframe::egui::Context::default();
         let mut app = BobApp::new(&ctx, None, Some(1.0), crate::chrome::UiScale::Auto);
         let open = |app: &mut BobApp, ctrl, loc: Location| {

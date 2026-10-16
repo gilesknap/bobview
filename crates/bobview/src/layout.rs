@@ -174,7 +174,7 @@ impl WindowLayout {
 
     /// The display and macros to show.
     pub fn location(&self) -> Location {
-        let mut source = Source::parse(&self.display);
+        let mut source = crate::fetch::user_named(&self.display);
         let mut project = self.project.clone();
         // A DLS launcher's project is named after the module's version, so
         // after the version changes take the launcher's project as it is now.
