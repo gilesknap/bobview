@@ -960,9 +960,14 @@ fn list_dir(dir: &Path) -> Vec<(PathBuf, bool)> {
 }
 
 impl eframe::App for BobApp {
-    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+    /// Run at the start of every pass, including those eframe runs without
+    /// `ui` while every window is hidden.
+    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Before the PVs are read, so a later update asks again.
         self.repaint_asked.store(false, Ordering::Relaxed);
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // A layout's positions are checked against the monitors as they are
         // when it is loaded.
         #[cfg(not(target_arch = "wasm32"))]
