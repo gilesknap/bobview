@@ -125,6 +125,7 @@ impl Macros {
                     spend(left, v.len() + out.len());
                     out
                 } else {
+                    warn_spent();
                     v.clone()
                 };
                 (k.clone(), v)
@@ -140,7 +141,19 @@ impl Macros {
         if over.0.parent.is_none() && over.0.base.is_none() {
             return defaults.with_budget(over, left);
         }
-        Self::layer(Some(over.clone()), Some(defaults.clone()), Vec::new())
+        // A value naming its own key, as `P=$(P):SUB` does, means the next
+        // layer down, which here is the display's default.
+        let own = over
+            .iter()
+            .filter_map(|(k, v)| {
+                let default = defaults.get(k)?;
+                let fixed = v
+                    .replace(&format!("$({k})"), default)
+                    .replace(&format!("${{{k}}}"), default);
+                (fixed != v && over.get(k) == Some(v)).then(|| (k.to_string(), fixed))
+            })
+            .collect();
+        Self::layer(Some(over.clone()), Some(defaults.clone()), own)
     }
 
     /// The bytes of the definitions in this layer alone.
@@ -165,6 +178,16 @@ static WARNED: AtomicBool = AtomicBool::new(false);
 /// Let the next expansion that gives up warn again, as at the start of a load.
 pub fn rearm_warning() {
     WARNED.store(false, Ordering::Relaxed);
+    SPENT_WARNED.store(false, Ordering::Relaxed);
+}
+
+static SPENT_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// Warn, once per load, that the macro budget is spent and text is left as written.
+pub fn warn_spent() {
+    if !SPENT_WARNED.swap(true, Ordering::Relaxed) {
+        log::warn!("macro expansion budget spent; the rest of the load is left as written");
+    }
 }
 
 /// Replace `$(NAME)` and `${NAME}` using `lookup`. `$(NAME=default)` falls back
@@ -312,6 +335,20 @@ mod tests {
         assert!(set.own_bytes() < 10_000);
         let more = set.with_budget(&inner, &left);
         assert_eq!(more.get("N0"), Some("$(V)"));
+    }
+
+    #[test]
+    fn caller_self_references_use_the_displays_defaults() {
+        let ex = |m: &Macros, t: &str| expand(t, &|n| m.get(n).map(str::to_string));
+        let defaults = Macros::from_pairs([("P", "D")]);
+        let own = Macros::from_pairs([("P", "$(P):SUB")]);
+        let none = Macros::from_pairs([("X", "1")]);
+        let caller = none.with(&own);
+        let m = Macros::over(&defaults, &caller, &AtomicUsize::new(1 << 20));
+        assert_eq!(ex(&m, "$(P)"), "D:SUB");
+        let caller = Macros::from_pairs([("P", "CALL")]).with(&own);
+        let m = Macros::over(&defaults, &caller, &AtomicUsize::new(1 << 20));
+        assert_eq!(ex(&m, "$(P)"), "CALL:SUB");
     }
 
     #[test]

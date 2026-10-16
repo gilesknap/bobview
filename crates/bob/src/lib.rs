@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 pub use element::Element;
 pub use group_link::{GroupLink, LinkSets, group_device, group_frame};
-pub use macros::{MAX_LOAD_BYTES, Macros, expand, rearm_warning, spend};
+pub use macros::{MAX_LOAD_BYTES, Macros, expand, rearm_warning, spend, warn_spent};
 pub use model::{Action, Color, Font, FontStyle, Rule, RuleExpr, named_color};
 pub use source::Source;
 pub use trend::{databrowser_pvs, strip_tool_pvs};

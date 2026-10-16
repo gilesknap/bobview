@@ -1,6 +1,7 @@
 //! A loaded display: widgets with resolved positions, macros and PVs.
 
 use bob::{Display, Macros, Source, Widget};
+use std::cell::Cell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
@@ -20,6 +21,9 @@ const MAX_EMBEDDED_BYTES: usize = 32 << 20;
 
 /// The most widgets one load builds, counting those of embedded displays.
 const MAX_WIDGETS: u32 = 100_000;
+
+/// The most groups, tabs and the like that widgets may nest in.
+const MAX_NEST: u32 = 64;
 
 /// The most rules, and the most actions, of a widget that are used.
 const MAX_PER_WIDGET: usize = 256;
@@ -206,12 +210,15 @@ impl Compat {
 pub struct Builder<'a> {
     pub pvs: &'a PvManager,
     budget: Arc<Budget>,
+    /// How many groups deep the widgets being built are.
+    nest: Cell<u32>,
 }
 
 impl<'a> Builder<'a> {
     pub fn new(pvs: &'a PvManager) -> Self {
         Self {
             pvs,
+            nest: Cell::new(0),
             budget: Arc::new(Budget {
                 screens: AtomicU32::new(MAX_SCREENS),
                 widgets: AtomicU32::new(MAX_WIDGETS),
@@ -356,6 +363,7 @@ impl Builder<'_> {
     /// macro budget; once it is spent, text is left as written.
     fn expand_charged(&self, w: &Widget, macros: &Macros, text: &str) -> String {
         if self.budget.macros.load(Ordering::Relaxed) == 0 {
+            bob::warn_spent();
             return text.to_string();
         }
         let out = expand_for(w, macros, text);
@@ -410,6 +418,35 @@ impl Builder<'_> {
     }
 
     fn nodes(
+        &self,
+        widgets: &[Widget],
+        origin: (f64, f64),
+        macros: &Macros,
+        base: Option<&Source>,
+        depth: u32,
+    ) -> Vec<Node> {
+        if self.nest.get() >= MAX_NEST {
+            // Say so on the first widget, built without its children.
+            let Some(first) = widgets.first() else {
+                return Vec::new();
+            };
+            log::warn!("groups nested over {MAX_NEST} deep; the rest are left out");
+            let stub = Widget {
+                kind: first.kind.clone(),
+                props: first.props.clone(),
+                children: Vec::new(),
+            };
+            let mut node = self.node(&stub, origin, macros, base, depth);
+            node.error = Some("groups nested too deeply".into());
+            return vec![node];
+        }
+        self.nest.set(self.nest.get() + 1);
+        let nodes = self.nodes_in(widgets, origin, macros, base, depth);
+        self.nest.set(self.nest.get() - 1);
+        nodes
+    }
+
+    fn nodes_in(
         &self,
         widgets: &[Widget],
         origin: (f64, f64),
@@ -472,7 +509,13 @@ impl Builder<'_> {
             })
             .collect();
         let mut node = Node {
-            w: w.clone(),
+            // Without the children, which the nodes hold, so that nested
+            // groups don't each keep a copy of everything below them.
+            w: Widget {
+                kind: w.kind.clone(),
+                props: w.props.clone(),
+                children: Vec::new(),
+            },
             rect,
             macros,
             pv,
@@ -585,6 +628,7 @@ impl Builder<'_> {
         let this = Builder {
             pvs: self.pvs,
             budget: node.budget.clone(),
+            nest: Cell::new(0),
         };
         if !Budget::take(&this.budget.screens) {
             node.error = Some("too many embedded displays".into());
@@ -908,6 +952,74 @@ mod tests {
         );
         let (_, took) = load_hostile("embed", &xml);
         assert!(took < patience(), "{took:?}");
+    }
+
+    /// The text held by a widget's properties.
+    fn prop_bytes(e: &bob::Element) -> usize {
+        e.text.len() + e.children.iter().map(prop_bytes).sum::<usize>()
+    }
+
+    /// Text held by the widgets of `nodes` and everything below them.
+    fn held(nodes: &[Node]) -> usize {
+        nodes
+            .iter()
+            .map(|n| prop_bytes(&n.w.props) + n.w.children.len() + held(&n.children))
+            .sum()
+    }
+
+    #[test]
+    fn nested_groups_do_not_each_keep_their_subtree() {
+        // 50 groups in each other and 1 MB of text at the bottom: kept once
+        // per node would be 50 MB.
+        let mut inner = format!(
+            "<widget type='label'><text>{}</text></widget>",
+            "t".repeat(1 << 20)
+        );
+        for _ in 0..50 {
+            inner = format!("<widget type='group'><x>1</x>{inner}</widget>");
+        }
+        let d = Display::parse(&format!("<display>{inner}</display>")).unwrap();
+        let pvs = PvManager::new();
+        let s = Builder::new(&pvs).screen(d, &Macros::default(), None, 0);
+        assert!(held(&s.nodes) < 2 << 20, "{} bytes", held(&s.nodes));
+    }
+
+    #[test]
+    fn groups_nested_too_deeply_get_an_error_placeholder() {
+        let mut inner = "<widget type='label'/>".to_string();
+        for _ in 0..100 {
+            inner = format!("<widget type='group'>{inner}</widget>");
+        }
+        let d = Display::parse(&format!("<display>{inner}</display>")).unwrap();
+        let pvs = PvManager::new();
+        let s = Builder::new(&pvs).screen(d, &Macros::default(), None, 0);
+        let mut n = &s.nodes[0];
+        let mut levels = 1;
+        while let Some(c) = n.children.first() {
+            n = c;
+            levels += 1;
+        }
+        assert_eq!(levels, MAX_NEST as usize + 1);
+        assert!(n.error.is_some());
+    }
+
+    #[test]
+    fn ordinary_nested_groups_keep_their_positions() {
+        let mut inner = "<widget type='label'><x>5</x><y>7</y></widget>".to_string();
+        for _ in 0..10 {
+            inner = format!("<widget type='group'><x>10</x><y>20</y>{inner}</widget>");
+        }
+        let d = Display::parse(&format!("<display>{inner}</display>")).unwrap();
+        let pvs = PvManager::new();
+        let s = Builder::new(&pvs).screen(d, &Macros::default(), None, 0);
+        let mut n = &s.nodes[0];
+        while let Some(c) = n.children.first() {
+            n = c;
+        }
+        assert!(n.error.is_none());
+        assert_eq!(n.w.kind, "label");
+        // Each group adds its position and its 18 pixel inset.
+        assert_eq!((n.rect[0], n.rect[1]), (285.0, 387.0));
     }
 
     #[test]
