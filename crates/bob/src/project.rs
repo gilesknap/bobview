@@ -589,11 +589,15 @@ pub fn normalize(path: &Path) -> PathBuf {
     for c in path.components() {
         match c {
             Component::CurDir => {}
-            Component::ParentDir => {
-                if !out.pop() {
-                    out.push("..");
+            // `..` above the root is the root; above a relative start it
+            // stays.
+            Component::ParentDir => match out.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
                 }
-            }
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+                _ => out.push(".."),
+            },
             c => out.push(c),
         }
     }
@@ -1018,5 +1022,8 @@ $CSS_RUN_SCRIPT -o "${launch_opi}" -s -l "$links" "$@"
             PathBuf::from("/a/c/d")
         );
         assert_eq!(normalize(Path::new("../x")), PathBuf::from("../x"));
+        assert_eq!(normalize(Path::new("../../x")), PathBuf::from("../../x"));
+        assert_eq!(normalize(Path::new("a/../../x")), PathBuf::from("../x"));
+        assert_eq!(normalize(Path::new("/../x")), PathBuf::from("/x"));
     }
 }
