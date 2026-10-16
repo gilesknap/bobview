@@ -6,6 +6,7 @@ mod chrome;
 mod colormaps;
 mod fetch;
 mod group_link;
+mod icons;
 mod image;
 #[cfg(not(target_arch = "wasm32"))]
 mod launch;
@@ -19,6 +20,7 @@ mod screen;
 mod snapshot;
 mod style;
 mod symbol;
+mod tree;
 mod trend;
 mod view;
 mod widgets;
@@ -42,7 +44,6 @@ options:
                          that links between the project's modules work
   -z, --zoom FACTOR      fixed zoom instead of fit-to-window
   -f, --fullscreen       start full screen
-  -k, --keypad           edit values with an on-screen keypad (automatic on touch)
   --read-only            refuse every write to a PV (except loc:// ones, which
                          stay in bobview): controls are disabled and a write
                          action says why it did nothing
@@ -91,7 +92,6 @@ fn main() -> eframe::Result {
     let mut wait = 2.0;
     let mut settle = 1.0;
     let mut clicks = Vec::new();
-    let mut keypad = false;
     let mut project = None;
     let mut read_only = false;
     let mut layout_name = None;
@@ -103,7 +103,8 @@ fn main() -> eframe::Result {
             "-p" | "--project" => project = args.next().map(PathBuf::from),
             "-z" | "--zoom" => zoom = args.next().and_then(|z| z.parse().ok()),
             "-f" | "--fullscreen" => fullscreen = true,
-            "-k" | "--keypad" => keypad = true,
+            // The on-screen keypad is gone: text entries take the keyboard.
+            "-k" | "--keypad" => eprintln!("--keypad is no longer supported: ignored"),
             // Pin mode replaced multi-window mode: shift+click follows a
             // link as it did.
             "--multi-window" => eprintln!(
@@ -258,7 +259,6 @@ fn main() -> eframe::Result {
             wait: std::time::Duration::from_secs_f64(wait),
             clicks,
             settle: std::time::Duration::from_secs_f64(settle),
-            keypad,
             read_only,
         };
         if let Err(e) = snapshot::run(start, &opts, &out) {
@@ -289,7 +289,6 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             let mut app = app::BobApp::new(&cc.egui_ctx, start, zoom, ui_scale);
-            app.set_keypad(keypad);
             app.set_read_only(read_only);
             if let Some((layout, name)) = layout {
                 app.restore_layout(layout, Some(name));
@@ -346,7 +345,7 @@ fn unescape_macro(text: &str) -> String {
 /// The browser build: the page's query string names the display, its
 /// macros and the PV Web Socket, e.g.
 /// `?display=https://host/opi/index.bob&macros=P=X&pvws=pvws.host:443`
-/// (and `zoom=1.5`, `keypad`, `token=SECRET` for a server with `--write`).
+/// (and `zoom=1.5`, `token=SECRET` for a server with `--write`).
 /// A relative display is found next to the page; the default is `index.bob`.
 /// With a token, displays come only from the page's server, and writes
 /// carry the token only to a PVWS there.
@@ -375,7 +374,6 @@ fn main() {
         fetch::same_origin_only();
     }
     let zoom = query.get("zoom").and_then(|z| z.parse().ok());
-    let keypad = query.has("keypad");
 
     let canvas = window
         .document()
@@ -389,8 +387,7 @@ fn main() {
                 eframe::WebOptions::default(),
                 Box::new(move |cc| {
                     let ui_scale = chrome::UiScale::from_env();
-                    let mut app = app::BobApp::new(&cc.egui_ctx, Some(start), zoom, ui_scale);
-                    app.set_keypad(keypad);
+                    let app = app::BobApp::new(&cc.egui_ctx, Some(start), zoom, ui_scale);
                     Ok(Box::new(app))
                 }),
             )

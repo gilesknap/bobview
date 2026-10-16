@@ -20,11 +20,6 @@ pub enum Request {
         target: String,
     },
     Webpage(String),
-    /// Edit a value with the on-screen keypad.
-    Keypad {
-        pv: pv::Pv,
-        text: String,
-    },
     /// Show the details of a widget's PV, from its context menu.
     Details(crate::pvmenu::Details),
     /// Open a trend window of these PVs.
@@ -55,8 +50,8 @@ pub struct Cx<'a> {
     pub pvs: &'a PvManager,
     pub requests: &'a mut Vec<Request>,
     pub depth: u32,
-    /// Text entries open the on-screen keypad instead of taking keyboard focus.
-    pub keypad: bool,
+    /// Touch mode: finger-sized rows in drop-down lists.
+    pub touch: bool,
     /// The open trend windows, (id, title), that a PV's context menu can
     /// add it to.
     pub trends: &'a [(u64, String)],
@@ -72,7 +67,7 @@ impl Cx<'_> {
             pvs: self.pvs,
             requests: self.requests,
             depth: self.depth + 1,
-            keypad: self.keypad,
+            touch: self.touch,
             trends: self.trends,
             window: self.window,
         }
@@ -90,7 +85,7 @@ const MOUSE_RADIUS: f32 = 5.0;
 /// [`TOUCH_TARGET`].
 const TOUCH_RADIUS: f32 = (TOUCH_TARGET - 20.0) / 2.0;
 
-/// Grow the hit area of every control in touch (keypad) mode, without
+/// Grow the hit area of every control in touch mode, without
 /// changing how anything is drawn. egui hit-tests in two steps: a touch
 /// directly on a control always goes to that control (the topmost one), and
 /// only a touch on no control at all goes to the nearest control within
@@ -1079,36 +1074,6 @@ fn text_entry(
     };
     let align = alignment(&w, 1);
     let enabled = can_write(&w, state);
-    if cx.keypad {
-        let resp = ui.interact(rect.intersect(cx.clip), id, Sense::click());
-        let painter = ui.painter().with_clip_rect(cx.clip);
-        fill(&painter, rect, bg(&w, "Write_Background"));
-        text_in(
-            &painter,
-            rect.shrink2(Vec2::new(2.0, 0.0)),
-            &shown,
-            font(&w, cx.view.zoom),
-            fg(&w),
-            align,
-            false,
-        );
-        if resp.clicked()
-            && enabled
-            && let Some(pv) = &node.pv
-        {
-            let text = state.map(|s| {
-                s.format(
-                    w.i64("precision").filter(|p| *p >= 0).map(|p| p as i32),
-                    false,
-                )
-            });
-            cx.requests.push(Request::Keypad {
-                pv: pv.clone(),
-                text: text.unwrap_or_default(),
-            });
-        }
-        return resp;
-    }
     let mut buf = node.edit.clone().unwrap_or(shown);
     // Text that does not fit is elided with `…` like a text update's, except
     // while it is being edited, when every character must be there for the
@@ -1613,7 +1578,7 @@ fn combo(
         font(&w, z),
         &ui.style().text_styles[&egui::TextStyle::Button],
     );
-    let row_h = if cx.keypad { TOUCH_TARGET } else { 0.0 };
+    let row_h = if cx.touch { TOUCH_TARGET } else { 0.0 };
     egui::Popup::menu(&resp).width(rect.width()).show(|ui| {
         ui.set_min_width(rect.width() - ui.spacing().menu_margin.sum().x);
         for item in &items {
@@ -1636,6 +1601,12 @@ fn combo_item_font(widget: FontId, ui: &FontId) -> FontId {
     } else {
         widget
     }
+}
+
+/// Phoebus labels a checkbox or slide button "Label" unless the file says
+/// otherwise; an explicit empty `<label>` stays empty.
+fn raw_label(w: &Widget) -> &str {
+    w.text("label").unwrap_or("Label")
 }
 
 fn checkbox(
@@ -1677,7 +1648,7 @@ fn checkbox(
     text_in(
         &painter,
         tr,
-        &node.prop("label"),
+        &node.expand(raw_label(&w)),
         font(&w, z),
         fg(&w),
         Align2::LEFT_CENTER,
@@ -1705,10 +1676,7 @@ fn slide_button(
     let on = s.is_some_and(|s| s.connected && is_on(&w, s));
     let resp = ui.interact(rect.intersect(cx.clip), id, Sense::click());
     let painter = ui.painter().with_clip_rect(cx.clip);
-    // Phoebus labels a slide button "Label" unless the file says otherwise.
-    let label = w
-        .text("label")
-        .map_or_else(|| "Label".to_string(), |t| node.expand(t));
+    let label = node.expand(raw_label(&w));
     let (track, label_rect) = slide_layout(rect, z, !label.is_empty());
     let track_color = if on {
         w.color("on_color")
@@ -2158,7 +2126,7 @@ mod tests {
                 pvs: &pvs,
                 requests: &mut requests,
                 depth: 0,
-                keypad: false,
+                touch: false,
                 trends: &[],
                 window: WindowKey::Main,
             };
@@ -2404,6 +2372,13 @@ mod tests {
     }
 
     #[test]
+    fn label_defaults_to_label_only_when_absent() {
+        assert_eq!(raw_label(&widget("")), "Label");
+        assert_eq!(raw_label(&widget("<label></label>")), "");
+        assert_eq!(raw_label(&widget("<label>Go</label>")), "Go");
+    }
+
+    #[test]
     fn toggles_the_whole_value_or_one_bit() {
         // A slide button's bit defaults to 0, as in Phoebus.
         let default = widget("");
@@ -2485,7 +2460,7 @@ mod tests {
             pvs: &pvs,
             requests: &mut requests,
             depth: 0,
-            keypad: false,
+            touch: false,
             trends: &[],
             window: WindowKey::Main,
         };
@@ -2519,7 +2494,7 @@ mod tests {
             pvs: &pvs,
             requests: &mut requests,
             depth: 0,
-            keypad: false,
+            touch: false,
             trends: &[],
             window: WindowKey::Main,
         };
@@ -2570,7 +2545,7 @@ pv.setValue(pv_value);
                 pvs: &pvs,
                 requests: &mut requests,
                 depth: 0,
-                keypad: false,
+                touch: false,
                 trends: &[],
                 window: WindowKey::Main,
             };
