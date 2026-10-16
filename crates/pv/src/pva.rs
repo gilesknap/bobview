@@ -7,6 +7,7 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use epics_pva_rs::PvaError;
 use epics_pva_rs::client::PvaClient;
 use epics_pva_rs::client_native::ops_v2::{MonitorConnEvent, MonitorTermination};
 use epics_pva_rs::pvdata::{PvField, PvStructure, ScalarValue, TypedScalarArray};
@@ -35,20 +36,44 @@ pub(crate) async fn run(client: &PvaClient, pv: &str, shared: Arc<Shared>) {
 
     let mut retry = Duration::from_millis(500);
     loop {
-        // A handle monitor, not `pvmonitor_events`: dropping the handle,
-        // as aborting this task does, sends the server DESTROY and ends
-        // the subscription. Aborting a `pvmonitor_events` future instead
-        // left the subscription registered and the IOC still sending.
-        let data = shared.clone();
-        let conn = shared.clone();
+        // Wait for the channel here, not in the monitor: dropping this wait,
+        // as aborting the task does, cancels the search, while a monitor
+        // dropped before it connects keeps searching. A search that times
+        // out waits before the next, as the client's own searches slow down.
+        match client.pvconnect(pv).await {
+            Ok(_) => retry = Duration::from_millis(500),
+            Err(e) => {
+                if !matches!(e, PvaError::Timeout) {
+                    log::debug!("{pv}: {e}; retrying in {retry:?}");
+                    shared.update(|s| s.error = Some(e.to_string()));
+                }
+                tokio::time::sleep(retry).await;
+                retry = (retry * 2).min(Duration::from_secs(30));
+                continue;
+            }
+        }
+        // A handle monitor, not `pvmonitor_events`: dropping the handle
+        // sends the server DESTROY and ends the subscription, where
+        // aborting a `pvmonitor_events` future left it registered and the
+        // IOC still sending. Weak: the monitor's task can outlive the
+        // handle while it reconnects, and must not keep the state alive.
+        let data = Arc::downgrade(&shared);
+        let conn = Arc::downgrade(&shared);
         let monitor = client
             .pvmonitor_handle(
                 pv,
-                move |_, value| data.update(|s| apply(s, value)),
-                move |event| match event {
-                    MonitorConnEvent::Connected { .. } => conn.update(|s| s.error = None),
-                    MonitorConnEvent::Disconnected => conn.update(|s| s.connected = false),
-                    MonitorConnEvent::Finished => {}
+                move |_, value| {
+                    if let Some(shared) = data.upgrade() {
+                        shared.update(|s| apply(s, value));
+                    }
+                },
+                move |event| {
+                    let Some(shared) = conn.upgrade() else { return };
+                    match event {
+                        MonitorConnEvent::Connected { .. } => shared.update(|s| s.error = None),
+                        MonitorConnEvent::Disconnected => shared.update(|s| s.connected = false),
+                        MonitorConnEvent::Finished => {}
+                    }
                 },
             )
             .await;
