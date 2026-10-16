@@ -88,7 +88,7 @@ pub(crate) async fn run(name: PvName, shared: Arc<Shared>) {
     });
 
     let mut n = 0u64;
-    let period = Duration::from_secs_f64(period.max(0.01));
+    let period = update_period(period);
     #[cfg(not(target_arch = "wasm32"))]
     let mut ticker = tokio::time::interval(period);
     #[cfg(target_arch = "wasm32")]
@@ -113,6 +113,13 @@ pub(crate) async fn run(name: PvName, shared: Arc<Shared>) {
     }
 }
 
+/// The update period for a requested number of seconds. The text comes from
+/// the PV name, so NaN, infinities and huge values must not panic (the
+/// release build aborts); clamp to 0.01-3600 s.
+fn update_period(secs: f64) -> Duration {
+    Duration::try_from_secs_f64(secs.clamp(0.01, 3600.0)).unwrap_or(Duration::from_secs(1))
+}
+
 /// A deterministic pseudo-random number in [0, 1) from a counter (splitmix64).
 fn random(n: u64) -> f64 {
     let mut z = n.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -124,6 +131,45 @@ fn random(n: u64) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn hostile_period_is_clamped() {
+        for secs in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1e300, -1.0] {
+            let d = update_period(secs);
+            assert!(d >= Duration::from_millis(10) && d <= Duration::from_secs(3600));
+        }
+        assert_eq!(update_period(0.0), Duration::from_millis(10));
+        assert_eq!(update_period(2.0), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn hostile_sim_names_do_not_panic() {
+        // "1e400" parses to infinity; none of these may panic the task.
+        let names = [
+            "sim://sine(0,1,1e400)",
+            "sim://sine(NaN,inf,NaN,inf)",
+            "sim://sine(0,1,1e300,1e300)",
+            "sim://ramp(0,1e300,1e-300)",
+            "sim://ramp(-1e308,1e308,1)",
+            "sim://gaussianNoise(inf,NaN,NaN)",
+            "sim://noise(1e308,-1e308,-5)",
+            "sim://flipflop(NaN)",
+            "sim://const(inf)",
+        ];
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        for n in names {
+            let name = PvName::parse(n);
+            let shared = Shared::new(Arc::new(std::sync::RwLock::new(None)));
+            rt.block_on(async {
+                let _ = tokio::time::timeout(Duration::from_millis(50), run(name, shared)).await;
+            });
+        }
+    }
+
     #[test]
     fn random_is_in_range() {
         for n in 0..1000 {

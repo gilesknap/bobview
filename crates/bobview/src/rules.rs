@@ -328,7 +328,16 @@ fn tokenize(s: &str) -> Option<Vec<Tok>> {
 
 fn parse(s: &str) -> Option<Expr> {
     let toks = tokenize(s)?;
-    let mut p = Parser { toks, pos: 0 };
+    // A long chain (`1+1+1+...`) builds a deep left-leaning tree that the
+    // evaluator and `Drop` walk recursively, so bound the length too.
+    if toks.len() > MAX_TOKENS {
+        return None;
+    }
+    let mut p = Parser {
+        toks,
+        pos: 0,
+        depth: 0,
+    };
     let e = p.binary(0)?;
     (p.pos == p.toks.len()).then_some(e)
 }
@@ -336,7 +345,14 @@ fn parse(s: &str) -> Option<Expr> {
 struct Parser {
     toks: Vec<Tok>,
     pos: usize,
+    /// Nesting of parentheses and prefix operators, bounded by `MAX_DEPTH`.
+    depth: usize,
 }
+
+/// Deepest nesting of `(`, `!` and `-` a rule expression may have.
+const MAX_DEPTH: usize = 64;
+/// Most tokens a rule expression may have.
+const MAX_TOKENS: usize = 1024;
 
 const LEVELS: &[&[&str]] = &[
     &["||"],
@@ -369,6 +385,16 @@ impl Parser {
     }
 
     fn unary(&mut self) -> Option<Expr> {
+        if self.depth >= MAX_DEPTH {
+            return None;
+        }
+        self.depth += 1;
+        let e = self.unary_inner();
+        self.depth -= 1;
+        e
+    }
+
+    fn unary_inner(&mut self) -> Option<Expr> {
         let tok = self.toks.get(self.pos)?.clone();
         self.pos += 1;
         Some(match tok {
@@ -406,6 +432,31 @@ mod tests {
             })
             .collect();
         eval(&parse(expr).expect("parses"), &Env { states: &states })
+    }
+
+    /// Run `f` on a thread with a small stack, so unbounded recursion fails
+    /// this test instead of passing on the test runner's larger stack.
+    fn small_stack<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    #[test]
+    fn hostile_expressions_are_rejected_not_overflowed() {
+        small_stack(|| {
+            let nested = format!("{}1{}", "(".repeat(5000), ")".repeat(5000));
+            assert!(parse(&nested).is_none());
+            assert!(parse(&format!("{}1", "!".repeat(5000))).is_none());
+            assert!(parse(&format!("{}1", "-".repeat(5000))).is_none());
+            assert!(parse(&vec!["1"; 20000].join("+")).is_none());
+            // Reasonable nesting still works.
+            let ok = format!("{}1{}", "(".repeat(30), ")".repeat(30));
+            assert!(parse(&ok).is_some());
+        });
     }
 
     #[test]

@@ -8,6 +8,65 @@ pub struct Element {
     pub children: Vec<Element>,
 }
 
+/// Deepest element nesting accepted. Everything that walks the tree
+/// (`from_node`, `split_widgets`, `Drop`) recurses once per level.
+pub(crate) const MAX_DEPTH: usize = 256;
+
+/// The deepest element nesting in `xml`, found by a quick scan without
+/// recursion, so it can run before the (recursive) XML parser.
+///
+/// It only has to be right for documents the parser accepts: comments, CDATA
+/// and processing instructions are skipped, quotes in tags are honoured, and
+/// anything else odd (a DTD, which the parser rejects) ends the scan.
+pub(crate) fn depth(xml: &str) -> usize {
+    let b = xml.as_bytes();
+    let (mut i, mut open, mut deepest) = (0, 0usize, 0usize);
+    let skip = |i: usize, end: &[u8]| -> usize {
+        b[i..]
+            .windows(end.len())
+            .position(|w| w == end)
+            .map_or(b.len(), |p| i + p + end.len())
+    };
+    while let Some(p) = b[i..].iter().position(|&c| c == b'<') {
+        i += p;
+        let rest = &b[i..];
+        if rest.starts_with(b"<!--") {
+            i = skip(i + 4, b"-->");
+        } else if rest.starts_with(b"<![CDATA[") {
+            i = skip(i + 9, b"]]>");
+        } else if rest.starts_with(b"<?") {
+            i = skip(i + 2, b"?>");
+        } else if rest.starts_with(b"<!") {
+            break;
+        } else if rest.starts_with(b"</") {
+            open = open.saturating_sub(1);
+            i = skip(i + 2, b">");
+        } else {
+            // A start tag: find its closing `>`, outside any quoted value.
+            let mut j = i + 1;
+            let mut quote = None;
+            while j < b.len() {
+                match (quote, b[j]) {
+                    (None, b'>') => break,
+                    (None, q @ (b'"' | b'\'')) => quote = Some(q),
+                    (Some(q), c) if c == q => quote = None,
+                    _ => {}
+                }
+                j += 1;
+            }
+            deepest = deepest.max(open + 1);
+            if j == 0 || b.get(j - 1) != Some(&b'/') {
+                open += 1;
+            }
+            i = j + 1;
+        }
+        if i >= b.len() {
+            break;
+        }
+    }
+    deepest
+}
+
 impl Element {
     pub(crate) fn from_node(node: roxmltree::Node) -> Self {
         let children: Vec<Element> = node
@@ -101,5 +160,23 @@ impl Element {
             Some(c) => *c = child,
             None => self.children.push(child),
         }
+    }
+}
+
+#[cfg(test)]
+mod depth_tests {
+    use super::depth;
+
+    #[test]
+    fn counts_nesting_ignoring_markup_that_is_not_elements() {
+        assert_eq!(depth("<a/>"), 1);
+        assert_eq!(depth("<a><b/><b><c x='>'/></b></a>"), 3);
+        assert_eq!(
+            depth("<a><!-- <b><b><b> --><![CDATA[<c><c>]]><?pi <d> ?></a>"),
+            1
+        );
+        assert_eq!(depth("<a x=\"<\"><b></b><b></b></a>"), 2);
+        assert_eq!(depth(""), 0);
+        assert_eq!(depth("<a><b"), 2);
     }
 }

@@ -53,6 +53,8 @@ pub enum Error {
     Io(PathBuf, std::io::Error),
     Xml(roxmltree::Error),
     NotADisplay(String),
+    /// Elements nested more deeply than [`MAX_DEPTH`](element::MAX_DEPTH).
+    TooDeep,
     /// A URL that could not be fetched, and why.
     Fetch(String, String),
 }
@@ -62,6 +64,11 @@ impl std::fmt::Display for Error {
         match self {
             Error::Io(p, e) => write!(f, "cannot read {}: {e}", p.display()),
             Error::Xml(e) => write!(f, "invalid XML: {e}"),
+            Error::TooDeep => write!(
+                f,
+                "display nests elements more than {} deep",
+                element::MAX_DEPTH
+            ),
             Error::NotADisplay(root) => write!(f, "expected a <display>, found <{root}>"),
             Error::Fetch(url, why) => write!(f, "cannot fetch {url}: {why}"),
         }
@@ -82,6 +89,10 @@ impl Display {
     }
 
     pub fn parse(xml: &str) -> Result<Self, Error> {
+        // Before parsing: roxmltree's own parser recurses once per level.
+        if element::depth(xml) > element::MAX_DEPTH {
+            return Err(Error::TooDeep);
+        }
         let doc = roxmltree::Document::parse(xml).map_err(Error::Xml)?;
         let mut root = Element::from_node(doc.root_element());
         if root.name != "display" {
@@ -140,12 +151,15 @@ impl Display {
 fn split_widgets(mut el: Element) -> (Element, Vec<Widget>) {
     let mut widgets = Vec::new();
     let mut props: Vec<Element> = Vec::new();
+    // Index by name: a linear search per child is quadratic in the property count.
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for child in el.children.drain(..) {
         if child.name == "widget" {
             widgets.push(Widget::from_element(child));
-        } else if let Some(prev) = props.iter_mut().find(|p| p.name == child.name) {
-            *prev = child;
+        } else if let Some(&i) = index.get(&child.name) {
+            props[i] = child;
         } else {
+            index.insert(child.name.clone(), props.len());
             props.push(child);
         }
     }
@@ -268,6 +282,45 @@ impl Widget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deeply_nested_xml_is_an_error_not_a_stack_overflow() {
+        // A small stack makes unbounded recursion fail this test.
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let n = 50_000;
+                let xml = format!(
+                    "<display>{}{}</display>",
+                    "<widget type=\"group\">".repeat(n),
+                    "</widget>".repeat(n)
+                );
+                assert!(matches!(Display::parse(&xml), Err(Error::TooDeep)));
+                // Nesting well inside the limit still parses.
+                let n = 100; // ok on a 2 MiB stack
+                let xml = format!(
+                    "<display>{}{}</display>",
+                    "<widget type=\"group\">".repeat(n),
+                    "</widget>".repeat(n)
+                );
+                assert_eq!(Display::parse(&xml).unwrap().all_widgets().len(), n);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn many_properties_keep_the_last_value_quickly() {
+        let n = 100_000;
+        let mut xml = String::from("<display>");
+        for i in 0..n {
+            xml.push_str(&format!("<p{}>a</p{}>", i % 1000, i % 1000));
+        }
+        xml.push_str("<p0>last</p0></display>");
+        let d = Display::parse(&xml).unwrap();
+        assert!(d.widgets.is_empty());
+    }
 
     const SAMPLE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <display version="2.0.0">
