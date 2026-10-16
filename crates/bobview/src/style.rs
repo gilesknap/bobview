@@ -45,9 +45,12 @@ pub fn severity_color(sev: pv::Severity) -> Option<Color32> {
 /// Font families registered at startup; regular is egui's proportional.
 pub const BOLD: &str = "bold";
 pub const ITALIC: &str = "italic";
+pub const BOLD_ITALIC: &str = "bold-italic";
 
 pub fn font_id(font: &bob::Font, zoom: f32) -> FontId {
-    let family = if font.is_bold() {
+    let family = if font.is_bold() && font.is_italic() {
+        FontFamily::Name(BOLD_ITALIC.into())
+    } else if font.is_bold() {
         FontFamily::Name(BOLD.into())
     } else if font.is_italic() {
         FontFamily::Name(ITALIC.into())
@@ -82,6 +85,10 @@ pub fn install_fonts(ctx: &egui::Context) {
         "liberation-italic",
         include_bytes!("../fonts/LiberationSans-Italic.ttf"),
     );
+    let bold_italic = add(
+        "liberation-bold-italic",
+        include_bytes!("../fonts/LiberationSans-BoldItalic.ttf"),
+    );
     // Symbols that neither Liberation nor egui's fonts have, such as the
     // '⧉' pvi puts on buttons that open a display (Phoebus finds them
     // through system font fallback).
@@ -110,6 +117,9 @@ pub fn install_fonts(ctx: &egui::Context) {
         .insert(FontFamily::Name(ITALIC.into()), with(italic));
     fonts
         .families
+        .insert(FontFamily::Name(BOLD_ITALIC.into()), with(bold_italic));
+    fonts
+        .families
         .insert(FontFamily::Proportional, with(regular));
     ctx.set_fonts(fonts);
 }
@@ -122,4 +132,25 @@ pub fn align(h: i64, v: i64) -> egui::Align2 {
         _ => egui::Align::Min,
     };
     egui::Align2([a(h), a(v)])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_style_has_its_own_face() {
+        let family = |style| {
+            let font = bob::Font {
+                style,
+                ..Default::default()
+            };
+            font_id(&font, 1.0).family
+        };
+        use bob::FontStyle as S;
+        assert_eq!(family(S::Regular), FontFamily::Proportional);
+        assert_eq!(family(S::Bold), FontFamily::Name(BOLD.into()));
+        assert_eq!(family(S::Italic), FontFamily::Name(ITALIC.into()));
+        assert_eq!(family(S::BoldItalic), FontFamily::Name(BOLD_ITALIC.into()));
+    }
 }

@@ -23,11 +23,13 @@ mod name;
 mod pva;
 #[cfg(target_arch = "wasm32")]
 mod pvws;
+#[cfg(any(target_arch = "wasm32", test))]
+mod pvws_msg;
 mod sim;
 mod value;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -81,6 +83,8 @@ pub(crate) struct Shared {
     ctl: Arc<Control>,
     name: String,
     state: Mutex<PvState>,
+    /// How many times the state has changed.
+    version: AtomicU64,
     writer: Mutex<Option<Writer>>,
     notify: Arc<RwLock<Option<Notifier>>>,
     listeners: Mutex<Vec<Weak<ListenFn>>>,
@@ -92,6 +96,7 @@ impl Shared {
             ctl,
             name: name.to_string(),
             state: Mutex::new(PvState::default()),
+            version: AtomicU64::new(0),
             writer: Mutex::new(None),
             notify,
             listeners: Mutex::new(Vec::new()),
@@ -103,6 +108,7 @@ impl Shared {
         {
             let mut state = self.state.lock().unwrap();
             f(&mut state);
+            self.version.fetch_add(1, Ordering::Relaxed);
             // Under the state lock, so listeners see changes in order.
             let mut listeners = self.listeners.lock().unwrap();
             listeners.retain(|l| match l.upgrade() {
@@ -175,6 +181,17 @@ impl Pv {
             state.writable_known = true;
         }
         state
+    }
+
+    /// Whether it is connected, without copying its state.
+    pub fn connected(&self) -> bool {
+        self.0.shared.state.lock().unwrap().connected
+    }
+
+    /// A number that changes whenever its state does (bar read-only mode),
+    /// so a caller can skip work on a PV that has not changed.
+    pub fn version(&self) -> u64 {
+        self.0.shared.version.load(Ordering::Relaxed)
     }
 
     /// Whether read-only mode (see [`PvManager::set_read_only`]) stops writes

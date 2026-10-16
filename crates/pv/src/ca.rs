@@ -5,9 +5,10 @@ use std::sync::Arc;
 use epics_base_rs::server::snapshot::{DbrClass, Snapshot};
 use epics_ca_rs::EpicsValue;
 use epics_ca_rs::client::{CaChannel, CaClient, ConnectionEvent};
+use epics_ca_rs::protocol::{DBE_ALARM, DBE_VALUE};
 use tokio::sync::{broadcast, mpsc};
 
-use crate::{Severity, Shared, Value, Writer};
+use crate::{PvState, Severity, Shared, Value, Writer};
 
 pub(crate) async fn run(client: &CaClient, pv: &str, shared: Arc<Shared>) {
     let channel = client.create_channel(pv);
@@ -17,7 +18,12 @@ pub(crate) async fn run(client: &CaClient, pv: &str, shared: Arc<Shared>) {
 
     let mut retry = std::time::Duration::from_millis(500);
     let mut monitor = loop {
-        match channel.subscribe().await {
+        // Value and alarm changes, as Phoebus asks for: not DBE_LOG, which
+        // archive deadbands (ADEL) send, and the display does not need.
+        match channel
+            .subscribe_with_mask(0.0, DBE_VALUE | DBE_ALARM)
+            .await
+        {
             Ok(m) => break m,
             Err(e) => {
                 log::warn!("{pv}: cannot subscribe, retrying in {retry:?}: {e}");
@@ -89,35 +95,43 @@ async fn fetch_metadata(channel: &CaChannel, shared: &Shared) {
 }
 
 fn apply(shared: &Shared, snap: &Snapshot, metadata: bool) {
-    let value = convert(&snap.value);
-    shared.update(|s| {
+    let value = (!metadata).then(|| convert(&snap.value));
+    shared.update(|s| apply_to(s, snap, value, metadata));
+}
+
+/// Apply a monitor update, or the metadata read once per connection. A
+/// DBR_CTRL read carries no time stamp (it decodes as 1970), and may land
+/// after the first monitor update, so it sets only the metadata: units,
+/// precision, limits and labels.
+fn apply_to(s: &mut PvState, snap: &Snapshot, value: Option<Value>, metadata: bool) {
+    s.error = None;
+    if let Some(value) = value {
         s.connected = true;
-        s.error = None;
         s.value = value;
         s.severity = Severity::from_epics(snap.alarm.severity);
         s.status = snap.alarm.status;
         s.timestamp = Some(snap.timestamp.into());
-        if !metadata {
-            return;
-        }
-        if let Some(d) = &snap.display {
-            s.units = d.units.as_str_lossy().into_owned();
-            s.precision = Some(d.precision as i32);
-            s.display_range = Some((d.lower_disp_limit, d.upper_disp_limit));
-            s.alarm_range = Some((d.lower_alarm_limit, d.upper_alarm_limit));
-            s.warning_range = Some((d.lower_warning_limit, d.upper_warning_limit));
-        }
-        if let Some(c) = &snap.control {
-            s.control_range = Some((c.lower_ctrl_limit, c.upper_ctrl_limit));
-        }
-        if let Some(e) = &snap.enums {
-            s.labels = e
-                .strings
-                .iter()
-                .map(|l| l.as_str_lossy().into_owned())
-                .collect();
-        }
-    });
+    }
+    if !metadata {
+        return;
+    }
+    if let Some(d) = &snap.display {
+        s.units = d.units.as_str_lossy().into_owned();
+        s.precision = Some(d.precision as i32);
+        s.display_range = Some((d.lower_disp_limit, d.upper_disp_limit));
+        s.alarm_range = Some((d.lower_alarm_limit, d.upper_alarm_limit));
+        s.warning_range = Some((d.lower_warning_limit, d.upper_warning_limit));
+    }
+    if let Some(c) = &snap.control {
+        s.control_range = Some((c.lower_ctrl_limit, c.upper_ctrl_limit));
+    }
+    if let Some(e) = &snap.enums {
+        s.labels = e
+            .strings
+            .iter()
+            .map(|l| l.as_str_lossy().into_owned())
+            .collect();
+    }
 }
 
 fn convert(v: &EpicsValue) -> Value {
@@ -153,5 +167,52 @@ fn convert(v: &EpicsValue) -> Value {
         E::StringArray(a) => {
             Value::StrArray(a.iter().map(|s| s.as_str_lossy().into_owned()).collect())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use epics_base_rs::server::snapshot::DisplayInfo;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn metadata_after_a_monitor_update_keeps_its_value_and_time() {
+        let stamp = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let monitor = Snapshot::new(EpicsValue::Double(5.0), 3, 1, stamp);
+        // DBR_CTRL has no time: it decodes as 1970. Its value and alarm may
+        // be older than the monitor's on a reconnect.
+        let mut ctrl = Snapshot::new(EpicsValue::Double(0.0), 0, 0, UNIX_EPOCH);
+        ctrl.display = Some(DisplayInfo {
+            units: "mm".into(),
+            precision: 2,
+            upper_disp_limit: 10.0,
+            ..Default::default()
+        });
+
+        let mut s = PvState::default();
+        apply_to(&mut s, &monitor, Some(convert(&monitor.value)), false);
+        apply_to(&mut s, &ctrl, None, true);
+        assert!(s.connected);
+        assert_eq!(s.value, Value::Double(5.0));
+        assert_eq!(s.severity, Severity::Minor);
+        assert_eq!(s.status, 3);
+        assert_eq!(s.timestamp, Some(stamp));
+        assert_eq!(s.units, "mm");
+        assert_eq!(s.precision, Some(2));
+        assert_eq!(s.display_range, Some((0.0, 10.0)));
+    }
+
+    #[test]
+    fn metadata_alone_does_not_make_a_value() {
+        let ctrl = Snapshot::new(EpicsValue::Double(0.0), 0, 0, UNIX_EPOCH);
+        let mut s = PvState::default();
+        apply_to(&mut s, &ctrl, None, true);
+        assert!(
+            !s.connected,
+            "connected comes with the first monitor update"
+        );
+        assert_eq!(s.value, Value::None);
+        assert_eq!(s.timestamp, None);
     }
 }

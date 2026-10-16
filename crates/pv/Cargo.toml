@@ -27,3 +27,6 @@ web-sys = { version = "0.3.106", features = ["WebSocket", "MessageEvent", "Windo
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 testioc = { path = "../testioc" }
+# For testing the PVWS decoding natively.
+base64 = "0.23.1"
+serde_json = "1.0.154"

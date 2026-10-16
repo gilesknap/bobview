@@ -12,6 +12,7 @@ mod launch;
 mod layout;
 mod meter;
 mod plot;
+mod polygon;
 mod pvmenu;
 mod rules;
 mod screen;

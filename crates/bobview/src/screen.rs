@@ -36,6 +36,8 @@ pub struct Node {
     /// Properties before any rule changed them, and the last rule outcomes.
     pub orig_props: Option<bob::Element>,
     pub rule_outcomes: Vec<(String, crate::rules::Outcome)>,
+    /// The rule PVs' versions when the rules were last evaluated.
+    pub rule_versions: Option<Vec<u64>>,
     /// PVs written by this widget's actions, connected in advance.
     pub action_pvs: Vec<Pv>,
     /// Text being typed into a text entry, while it has focus.
@@ -400,6 +402,7 @@ impl Builder<'_> {
             rules,
             orig_props: None,
             rule_outcomes: Vec::new(),
+            rule_versions: None,
             action_pvs,
             edit: None,
             error: None,

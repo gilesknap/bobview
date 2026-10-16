@@ -433,13 +433,12 @@ impl View {
 /// How many of the distinct PVs that widgets, plots and rules use are
 /// connected, and how many there are.
 fn count_pvs(nodes: &[Node]) -> (usize, usize) {
-    fn walk(nodes: &[Node], seen: &mut std::collections::HashMap<String, bool>) {
+    fn walk<'a>(nodes: &'a [Node], seen: &mut std::collections::HashMap<&'a pv::PvName, bool>) {
         for n in nodes {
             let traces = n.traces.iter().flat_map(|t| t.x.iter().chain(&t.y));
             let rules = n.rules.iter().flat_map(|r| r.pvs());
             for pv in n.pv.iter().chain(traces).chain(rules) {
-                seen.entry(pv.name().to_string())
-                    .or_insert_with(|| pv.state().connected);
+                seen.entry(pv.name()).or_insert_with(|| pv.connected());
             }
             walk(&n.children, seen);
             n.tabs.iter().for_each(|t| walk(t, seen));
