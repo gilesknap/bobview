@@ -86,7 +86,9 @@ fn number(v: &Value, format: i64, p: usize) -> String {
         ENGINEERING if x == 0.0 => exponential(x, p),
         ENGINEERING => {
             let power = 3 * (x.abs().log10() / 3.0).floor() as i32;
-            format!("{:.p$}E{power}", x / 10f64.powi(power))
+            // As Java's Math.pow; `powi` takes 10^312 as infinite, so
+            // would show a subnormal as infinite.
+            format!("{:.p$}E{power}", x / 10f64.powf(power as f64))
         }
         HEX => format!("0x{long:0p$X}"),
         BINARY => format!("0b{long:0p$b}"),
@@ -366,6 +368,7 @@ mod tests {
         assert_eq!(f(ENGINEERING, 2, 12345.0), "12.35E3");
         assert_eq!(f(ENGINEERING, 2, 0.00123), "1.23E-3");
         assert_eq!(f(ENGINEERING, 1, 0.0), "0.0E0");
+        assert_eq!(f(ENGINEERING, 2, 1e-310), "100.00E-312");
         assert_eq!(f(COMPACT, 2, 12.345), "12.35");
         assert_eq!(f(COMPACT, 2, 123456.0), "1.23E5");
         assert_eq!(f(SIGNIFICANT, 3, 12.345), "12.3");
