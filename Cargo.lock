@@ -347,12 +347,14 @@ version = "0.2.1"
 dependencies = [
  "bob",
  "chrono",
+ "clap",
  "eframe",
  "egui",
  "imagesize",
  "js-sys",
  "libc",
  "log",
+ "parking_lot",
  "png",
  "pv",
  "resvg",
@@ -534,6 +536,7 @@ dependencies = [
  "anstyle",
  "clap_lex",
  "strsim",
+ "terminal_size",
 ]
 
 [[package]]
@@ -2684,6 +2687,7 @@ dependencies = [
  "futures-util",
  "gloo-timers",
  "log",
+ "parking_lot",
  "serde_json",
  "testioc",
  "tokio",
@@ -3379,6 +3383,16 @@ name = "sync_wrapper"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0bf256ce5efdfa370213c1dabab5935a12e49f2c58d15e9eac2870d3b4f27263"
+
+[[package]]
+name = "terminal_size"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
+dependencies = [
+ "rustix 1.1.5",
+ "windows-sys 0.59.0",
+]
 
 [[package]]
 name = "testioc"

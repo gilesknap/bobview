@@ -294,8 +294,8 @@ fn run_in(
     // it calls exec, and until then the file cannot be run ("text file
     // busy"). So launchers are not started while another's files are being
     // written.
-    static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let writing = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+    static WRITING: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+    let writing = WRITING.lock();
     let launcher = dir.join("launcher");
     write_executable(&launcher, script)?;
     write_executable(&dir.join("runcss.sh"), STUB.as_bytes())?;

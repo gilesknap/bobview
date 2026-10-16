@@ -165,7 +165,7 @@ mod tests {
             let name = PvName::parse(n);
             let shared = Shared::new(
                 &name,
-                Arc::new(std::sync::RwLock::new(None)),
+                Arc::new(parking_lot::RwLock::new(None)),
                 Arc::default(),
             );
             rt.block_on(async {
