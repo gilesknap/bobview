@@ -402,6 +402,19 @@ fn pv_less(kind: &str) -> bool {
     )
 }
 
+/// A BOY `pv_name` as the widget's `pv_name` macro, unless empty.
+fn pv_macro(el: &mut Element, pv: Element) {
+    if pv.text.is_empty() {
+        return;
+    }
+    // As Phoebus `MacroWidget.importPVName`: rules and tooltips use it.
+    let mut macros = el
+        .take_child("macros")
+        .unwrap_or_else(|| Element::new("macros"));
+    macros.children.insert(0, pv);
+    el.children.push(macros);
+}
+
 /// Widgets that run their actions themselves, so BOY's click hooks don't apply.
 fn is_button(kind: &str) -> bool {
     matches!(kind, "action_button" | "bool_button" | "combo" | "choice")
@@ -453,14 +466,8 @@ fn widget(mut el: Element) -> Vec<Element> {
     actions(&mut el, &kind);
     if pv_less(&kind)
         && let Some(pv) = el.take_child("pv_name")
-        && !pv.text.is_empty()
     {
-        // As Phoebus `MacroWidget.importPVName`: rules and tooltips use it.
-        let mut macros = el
-            .take_child("macros")
-            .unwrap_or_else(|| Element::new("macros"));
-        macros.children.insert(0, pv);
-        el.children.push(macros);
+        pv_macro(&mut el, pv);
     }
 
     let mut extra = Vec::new();
@@ -757,6 +764,21 @@ fn xy_graph(el: &mut Element) {
         if let Some(prop) = rule.attr("prop_id").map(trace_ref) {
             rule.set_attr("prop_id", prop);
         }
+    }
+    // Phoebus' XY plot has no PV of its own; BOY's is usually
+    // `$(trace_0_y_pv)`, which no macro defines, so it is that trace's PV,
+    // kept for rules and tooltips that use `$(pv_name)`.
+    if let Some(mut pv) = el.take_child("pv_name") {
+        for (i, trace) in el
+            .child("traces")
+            .into_iter()
+            .flat_map(|t| &t.children)
+            .enumerate()
+        {
+            let y_pv = trace.child_text("y_pv").unwrap_or("");
+            pv.text = pv.text.replace(&format!("$(trace_{i}_y_pv)"), y_pv);
+        }
+        pv_macro(el, pv);
     }
 }
 
@@ -2198,6 +2220,21 @@ widget.setPropertyValue("opi_file", pv0 + ".opi");"#,
             ),
             "traces[10].visible, trace_x, trace_0_other"
         );
+    }
+
+    #[test]
+    fn xy_graphs_keep_their_pv_as_a_macro() {
+        let w = one(
+            "xyGraph",
+            r#"<pv_name>$(trace_1_y_pv)</pv_name><trace_count>2</trace_count>
+            <trace_0_y_pv>G1</trace_0_y_pv><trace_1_y_pv>$(P):G2</trace_1_y_pv>
+            <tooltip>$(pv_name)</tooltip>"#,
+        );
+        assert!(w.get("pv_name").is_none());
+        assert_eq!(w.macros().get("pv_name"), Some("$(P):G2"));
+        let w = one("xyGraph", "<pv_name></pv_name>");
+        assert!(w.get("pv_name").is_none());
+        assert_eq!(w.macros().get("pv_name"), None);
     }
 
     #[test]
