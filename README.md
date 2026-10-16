@@ -107,6 +107,17 @@ small high-DPI screen so that they take a small share of it; `--ui-scale F`
 PV and value; right-click it (long-press on a touch screen) to copy the PV
 name or value, open the PV details, or trend it (see [Trends](#trends)). On a touch screen, pinch to zoom.
 
+### Writes
+
+`--read-only` refuses every write to a PV: controls are disabled and a write
+action says in the status line why it did nothing. `loc://` PVs are exempt,
+as they live inside bobview and cannot reach a control system. PV Access
+does not report access rights, so such a PV is assumed writable (the PV
+details say "unknown") and a put the server refuses is shown as a write
+error in the status line and the PV details. A `write_pv` action (or the
+toggle script) of a display loaded from an `http://` or `https://` URL asks
+for confirmation before it writes; displays from local files write at once.
+
 ## What it draws
 
 | widgets | notes |
