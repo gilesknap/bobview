@@ -142,10 +142,6 @@ const INHERITED: &[&str] = &[
     "marker-end",
 ];
 
-/// Elements whose content usvg converts where it is in the document, when
-/// something refers to them, so it inherits from their ancestors there.
-const IN_PLACE: &[&str] = &["pattern", "marker", "mask", "clipPath"];
-
 /// The deepest element nesting in `doc` with the references usvg follows
 /// (`url(#id)` in an attribute, a `style` or a style sheet, and an `href` to
 /// `#id`) counted as `REF_LEVELS` levels each: how deep usvg recurses to
@@ -155,8 +151,9 @@ const IN_PLACE: &[&str] = &["pattern", "marker", "mask", "clipPath"];
 /// An element's references count from the deepest element below it, as
 /// that may be where an inherited `fill` or marker is resolved, or where
 /// the content of a `<use>` (which inherits from the `<use>`) resolves
-/// others. Following one into a pattern, marker, mask or clip path also
-/// leads to the references it inherits from its own ancestors.
+/// others. Following one into an element also leads to the references it
+/// inherits from its own ancestors, as usvg converts patterns, markers,
+/// masks, clip paths and the elements a filter image names where they are.
 pub fn svg_depth(doc: &roxmltree::Document) -> usize {
     let mut ids: HashMap<&str, Vec<roxmltree::NodeId>> = HashMap::new();
     for node in doc.descendants().filter(|n| n.is_element()) {
@@ -249,25 +246,23 @@ pub fn svg_depth(doc: &roxmltree::Document) -> usize {
             .expect("a node of this document");
         if followed {
             steps.push((v - count, Step::Down(0)));
-            if IN_PLACE.contains(&node.tag_name().name()) {
-                // What it inherits from where it is.
-                for a in node.ancestors().skip(1) {
-                    named(url_refs(a.id(), true), Step::Across(REF_LEVELS), &mut steps);
-                }
-                // An `inherit` of what is not inherited takes the parent's.
-                for (name, value) in &props[index(node.id())] {
-                    if value.trim() == "inherit" && !INHERITED.contains(name) {
-                        let parent = node.ancestors().skip(1).find_map(|a| {
-                            props[index(a.id())]
-                                .iter()
-                                .find(|(n, v)| n == name && v.trim() != "inherit")
-                        });
-                        let mut names = Vec::new();
-                        if let Some((_, value)) = parent {
-                            url_ids(value, &mut names);
-                        }
-                        named(names, Step::Across(REF_LEVELS), &mut steps);
+            // What it inherits from where it is.
+            for a in node.ancestors().skip(1) {
+                named(url_refs(a.id(), true), Step::Across(REF_LEVELS), &mut steps);
+            }
+            // An `inherit` of what is not inherited takes the parent's.
+            for (name, value) in &props[index(node.id())] {
+                if value.trim() == "inherit" && !INHERITED.contains(name) {
+                    let parent = node.ancestors().skip(1).find_map(|a| {
+                        props[index(a.id())]
+                            .iter()
+                            .find(|(n, v)| n == name && v.trim() != "inherit")
+                    });
+                    let mut names = Vec::new();
+                    if let Some((_, value)) = parent {
+                        url_ids(value, &mut names);
                     }
+                    named(names, Step::Across(REF_LEVELS), &mut steps);
                 }
             }
             return (0, steps);
@@ -719,6 +714,51 @@ mod tests {
                     &|i| {
                         format!(
                             r#"<g mask="url(#m{})"><mask id="m{i}" mask="inherit"><rect width="5" height="5" fill="white"/></mask></g>"#,
+                            i - 1
+                        )
+                    },
+                    format!(r#"<rect width="10" height="10" mask="url(#m{})"/>"#, n - 1),
+                ),
+            ),
+            (
+                // A filter image, converted where it is, inheriting a fill.
+                "feImage fill",
+                chain(
+                    r#"<pattern id="p0" width="1" height="1"><rect width="1" height="1"/></pattern>"#,
+                    &|i| {
+                        format!(
+                            r##"<g fill="url(#p{})"><rect id="r{i}" width="5" height="5"/></g><filter id="f{i}"><feImage href="#r{i}"/></filter><pattern id="p{i}" width="1" height="1"><rect width="1" height="1" filter="url(#f{i})"/></pattern>"##,
+                            i - 1
+                        )
+                    },
+                    format!(r#"<rect width="10" height="10" fill="url(#p{})"/>"#, n - 1),
+                ),
+            ),
+            (
+                // ... a marker.
+                "feImage marker",
+                chain(
+                    r#"<marker id="k0"><rect width="1" height="1"/></marker>"#,
+                    &|i| {
+                        format!(
+                            r##"<g marker-start="url(#k{})"><path id="r{i}" d="M0 0L1 1" stroke="black"/></g><filter id="f{i}"><feImage href="#r{i}"/></filter><marker id="k{i}"><rect width="1" height="1" filter="url(#f{i})"/></marker>"##,
+                            i - 1
+                        )
+                    },
+                    format!(
+                        r#"<path d="M1 1L5 5" stroke="black" marker-start="url(#k{})"/>"#,
+                        n - 1
+                    ),
+                ),
+            ),
+            (
+                // ... or its parent's mask, by `inherit`.
+                "feImage mask inherit",
+                chain(
+                    r#"<mask id="m0"><rect width="5" height="5" fill="white"/></mask>"#,
+                    &|i| {
+                        format!(
+                            r##"<g mask="url(#m{})"><rect id="r{i}" width="5" height="5" mask="inherit"/></g><filter id="f{i}"><feImage href="#r{i}"/></filter><mask id="m{i}"><rect width="5" height="5" fill="white" filter="url(#f{i})"/></mask>"##,
                             i - 1
                         )
                     },
