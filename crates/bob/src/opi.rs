@@ -1376,6 +1376,9 @@ fn rules(el: &mut Element) {
         return;
     };
     for rule in rules.children.iter_mut().filter(|r| r.name == "rule") {
+        // BOY runs a rule while its PVs are disconnected, so that an alarm
+        // rule shows them as INVALID.
+        rule.set_attr("check_connections", "false");
         let own = format!(
             "pv{}",
             rule.children.iter().filter(|c| c.name == "pv").count()
@@ -1627,6 +1630,7 @@ menumap {
         assert_eq!(r.prop_id, "line_color");
         assert_eq!(r.pv_names, ["X"]);
         assert_eq!(r.exprs[0].condition, "pvLegacySev0==1");
+        assert!(!r.check_connections);
         let c = crate::Color::from_element(r.exprs[0].value.child("color").unwrap());
         assert_eq!(c.rgba(), [200, 200, 200, 255]);
         let w = one(

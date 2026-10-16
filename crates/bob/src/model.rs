@@ -290,6 +290,10 @@ pub struct Rule {
     pub out_exp: bool,
     pub exprs: Vec<RuleExpr>,
     pub pv_names: Vec<String>,
+    /// Whether to wait for every PV to connect before evaluating. BOY
+    /// evaluates regardless, reading a disconnected PV as INVALID, and an
+    /// `.opi` rule carries `check_connections="false"` to say so.
+    pub check_connections: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -306,6 +310,7 @@ impl Rule {
             name: el.attr("name").unwrap_or("").to_string(),
             prop_id: el.attr("prop_id").unwrap_or("").to_string(),
             out_exp: el.attr("out_exp") == Some("true"),
+            check_connections: el.attr("check_connections") != Some("false"),
             exprs: el
                 .children
                 .iter()
