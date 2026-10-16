@@ -1,9 +1,10 @@
 name: Interop
 
 # Runs the pv crate against a real softIoc (CA and PVXS) and a ca-gateway.
-# A separate, non-required workflow: it pulls third-party container images and
-# depends on UDP/TCP networking on the runner, so it may be flaky. A failure
-# here must not block CI.
+# A separate workflow, not a required check: it pulls third-party container
+# images and depends on UDP/TCP networking on the runner, so it may be flaky.
+# A failure shows red on the PR (no continue-on-error, which would hide real
+# failures) but does not block merging, as no status check is required.
 
 on:
   push:
@@ -28,7 +29,6 @@ env:
 jobs:
   interop:
     runs-on: ubuntu-24.04
-    continue-on-error: true
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
