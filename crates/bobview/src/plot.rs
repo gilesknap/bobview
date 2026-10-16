@@ -10,6 +10,7 @@ use bob::{Element, Widget};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Shape, Stroke, Vec2, epaint};
 use parking_lot::Mutex;
 use pv::{Listener, Pv, PvManager, PvState, Value};
+use web_time::SystemTime;
 
 use crate::axis::{self, Scale};
 use crate::screen::Node;
@@ -51,6 +52,11 @@ struct Buffer {
     y: Option<Vec<f64>>,
     x_new: bool,
     y_new: bool,
+    /// Each PV's last time stamp and value, while connected: a PV's state
+    /// also changes without a new value (CA's metadata read, access rights,
+    /// a write's result), which appends nothing.
+    x_seen: Option<(Option<SystemTime>, Value)>,
+    y_seen: Option<(Option<SystemTime>, Value)>,
     /// (x, y), x unused without an x PV.
     points: VecDeque<(f64, f64)>,
 }
@@ -65,8 +71,26 @@ impl Buffer {
             y: None,
             x_new: false,
             y_new: false,
+            x_seen: None,
+            y_seen: None,
             points: VecDeque::new(),
         }
+    }
+
+    /// Take in a change of the x PV's state (`is_x`) or the y PV's: an
+    /// update if it has a new time stamp or value, or has disconnected.
+    fn changed(&mut self, is_x: bool, s: &PvState) {
+        let seen = if is_x {
+            &mut self.x_seen
+        } else {
+            &mut self.y_seen
+        };
+        let now = s.connected.then(|| (s.timestamp, s.value.clone()));
+        if now.is_some() && *seen == now {
+            return;
+        }
+        *seen = now;
+        self.update(is_x, numbers(s));
     }
 
     /// Take in an update of the x PV (`is_x`) or the y PV: its numbers, or
@@ -134,8 +158,7 @@ impl History {
         let buffer = Arc::new(Mutex::new(Buffer::new(size, mode, x.is_some())));
         let listen = |pv: &Pv, is_x: bool| {
             let into = buffer.clone();
-            let listener: Listener =
-                Arc::new(move |s: &PvState| into.lock().update(is_x, numbers(s)));
+            let listener: Listener = Arc::new(move |s: &PvState| into.lock().changed(is_x, s));
             pv.listen(&listener);
             listener
         };
@@ -1006,6 +1029,42 @@ mod tests {
         b.update(false, Some(vec![5.0]));
         b.update(false, Some(vec![6.0]));
         assert_eq!(b.points(), vec![(2.0, 5.0)]);
+    }
+
+    #[test]
+    fn buffers_append_only_new_values() {
+        let mut b = Buffer::new(10, UpdateMode::Y, false);
+        let at = |secs| Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs));
+        let mut s = PvState {
+            connected: true,
+            value: Value::Double(1.0),
+            timestamp: at(1),
+            ..Default::default()
+        };
+        b.changed(false, &s);
+        // Metadata, access rights and a write's result: no new value.
+        s.units = "mm".into();
+        b.changed(false, &s);
+        s.writable = true;
+        b.changed(false, &s);
+        s.write_error = Some("refused".into());
+        b.changed(false, &s);
+        assert_eq!(b.points(), vec![(0.0, 1.0)]);
+        // The same value again, newly stamped, is an update; so is a new
+        // value without a time stamp.
+        s.timestamp = at(2);
+        b.changed(false, &s);
+        (s.timestamp, s.value) = (None, Value::Double(2.0));
+        b.changed(false, &s);
+        // After a disconnection, the value it reconnects with is too.
+        s.connected = false;
+        b.changed(false, &s);
+        s.connected = true;
+        b.changed(false, &s);
+        assert_eq!(
+            b.points(),
+            vec![(0.0, 1.0), (1.0, 1.0), (2.0, 2.0), (3.0, 2.0)]
+        );
     }
 
     #[test]

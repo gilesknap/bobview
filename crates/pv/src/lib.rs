@@ -448,6 +448,8 @@ impl Pv {
             Some(Writer::Local) => {
                 drop(writer);
                 shared.update(|s| {
+                    // Each write is a new sample, though its value be the same.
+                    s.timestamp = Some(web_time::SystemTime::now());
                     s.value = if long_string && s.value.is_numeric_array() {
                         Value::LongArray(
                             long_string_bytes(&value, None)
@@ -705,6 +707,15 @@ mod tests {
         drop(listener);
         pv.write("4");
         assert_eq!(*seen.lock(), [Some(1.0), Some(2.0), Some(3.0)]);
+    }
+
+    #[test]
+    fn local_writes_are_time_stamped() {
+        let pvs = PvManager::new();
+        let pv = pvs.subscribe("loc://stamp_test(1)");
+        assert_eq!(pv.state().timestamp, None);
+        pv.write("1");
+        assert!(pv.state().timestamp.is_some());
     }
 
     #[test]
