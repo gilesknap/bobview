@@ -643,7 +643,9 @@ impl BobApp {
     /// worked out.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn is_loading(&self) -> bool {
-        self.main.is_loading() || self.windows.iter().any(|w| w.view.is_loading())
+        self.main.is_loading()
+            || self.windows.iter().any(|w| w.view.is_loading())
+            || crate::screen::building()
     }
 
     /// Run a command action on a thread, so a slow launcher script or file

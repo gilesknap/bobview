@@ -175,7 +175,48 @@ impl Compat {
 #[cfg(not(target_arch = "wasm32"))]
 pub struct Building {
     source: Source,
-    rx: Receiver<Result<Screen, bob::Error>>,
+    rx: Receiver<(Result<Screen, bob::Error>, InFlight)>,
+}
+
+/// Embedded displays being built whose results have not been shown yet.
+#[cfg(not(target_arch = "wasm32"))]
+static IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Counts an embedded display in [`IN_FLIGHT`] from when its thread starts
+/// until its result is shown or thrown away (or the thread panics).
+#[cfg(not(target_arch = "wasm32"))]
+struct InFlight;
+
+#[cfg(not(target_arch = "wasm32"))]
+impl InFlight {
+    fn new() -> Self {
+        IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        InFlight
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The error for a display whose build thread panicked.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn build_failed(source: &Source) -> bob::Error {
+    let why = "the build failed (see the log)";
+    match source {
+        Source::File(path) => bob::Error::Io(path.clone(), std::io::Error::other(why)),
+        Source::Url(url) => bob::Error::Fetch(url.clone(), why.into()),
+    }
+}
+
+/// Whether any embedded display or navigation tab is still being built on
+/// a thread, or built but not yet shown, so a snapshot waits for it.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn building() -> bool {
+    IN_FLIGHT.load(std::sync::atomic::Ordering::SeqCst) > 0
 }
 
 /// Builds screens from displays, loading the displays they embed.
@@ -269,7 +310,9 @@ impl Node {
             Err(e) => {
                 log::warn!("{e}");
                 self.error = Some(match e {
-                    bob::Error::Io(..) => format!("{source}: not found"),
+                    bob::Error::Io(_, e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        format!("{source}: not found")
+                    }
                     e => e.to_string(),
                 });
             }
@@ -284,14 +327,12 @@ impl Node {
             return false;
         };
         let built = match b.rx.recv_timeout(wait) {
-            Ok(built) => built,
+            // Shown below, so it stops counting as in flight after this.
+            Ok((built, _in_flight)) => built,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return true,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 // The thread panicked building it.
-                Err(bob::Error::Fetch(
-                    b.source.to_string(),
-                    "build failed".into(),
-                ))
+                Err(build_failed(&b.source))
             }
         };
         let source = b.source.clone();
@@ -607,10 +648,12 @@ impl Builder<'_> {
             let (tx, rx) = std::sync::mpsc::channel();
             let (pvs, src) = (self.pvs.clone(), source.clone());
             let (macros, group) = (macros.clone(), group.to_string());
+            let in_flight = InFlight::new();
             std::thread::spawn(move || {
                 let built = crate::fetch::load(&src)
                     .map(|d| Builder::new(&pvs).screen(d, &macros, Some(&group), depth + 1));
-                tx.send(built).ok();
+                // Unsent (the node moved on), the result and its count drop here.
+                tx.send((built, in_flight)).ok();
             });
             node.error = Some(format!("Loading {source}"));
             node.building = Some(Building { source, rx });
@@ -869,6 +912,10 @@ mod tests {
         (base, release)
     }
 
+    /// Held by tests that check whether anything is still being built.
+    #[cfg(not(target_arch = "wasm32"))]
+    static BUILDS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Poll `node` until its embedded display is built, or panic.
     #[cfg(not(target_arch = "wasm32"))]
     fn built(node: &mut Node) {
@@ -881,6 +928,10 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn navtabs_are_fetched_off_the_ui_thread() {
+        let _builds = BUILDS.lock().unwrap_or_else(|e| e.into_inner());
+        let _cache = crate::fetch::tests::CACHE_USERS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let (base, release) = held_server();
         let dir = std::env::temp_dir().join(format!("bobview-navtabs-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -918,8 +969,14 @@ mod tests {
         let loading = format!("Loading {base}/tab.bob");
         assert_eq!(nav.error.as_deref(), Some(loading.as_str()));
         assert!(nav.poll_building(Duration::ZERO), "still fetching");
+        // A snapshot waits for it.
+        assert!(building());
+        let ctx = eframe::egui::Context::default();
+        let app = crate::app::BobApp::new(&ctx, None, Some(1.0), crate::chrome::UiScale::Auto);
+        assert!(app.is_loading());
         release.send(()).unwrap();
         built(nav);
+        assert!(!building() && !app.is_loading());
         assert_eq!(nav.embedded.as_ref().unwrap().display.name, "Tab");
         assert_eq!(nav.error, None);
 
@@ -947,6 +1004,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_tab_switched_away_from_is_dropped_when_built() {
+        let _builds = BUILDS.lock().unwrap_or_else(|e| e.into_inner());
         let (base, release) = held_server();
         let d = Display::parse(&format!(
             r#"<display version="2.0.0">
@@ -970,6 +1028,12 @@ mod tests {
         release.send(()).unwrap();
         assert!(!nav.poll_building(Duration::from_millis(100)));
         assert!(nav.embedded.is_none() && nav.error.is_none());
+        // Thrown away, it stops counting once its thread ends.
+        let until = std::time::Instant::now() + Duration::from_secs(20);
+        while building() {
+            assert!(std::time::Instant::now() < until, "still counted");
+            std::thread::sleep(Duration::from_millis(10));
+        }
         assert_eq!(nav.active_tab, 0);
     }
 

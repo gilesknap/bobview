@@ -233,7 +233,14 @@ impl View {
                 self.loading = None;
                 self.loaded(loaded);
             }
-            Err(TryRecvError::Disconnected) => self.loading = None,
+            Err(TryRecvError::Disconnected) => {
+                // The thread panicked building it: say so, not a blank view.
+                self.loading = None;
+                if let Some(cur) = &self.current {
+                    let e = crate::screen::build_failed(&cur.source);
+                    self.loaded(Err(e));
+                }
+            }
         }
     }
 
@@ -488,5 +495,29 @@ fn set_page_url(loc: &Location) {
     }
     if let Ok(history) = window.history() {
         let _ = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&url.href()));
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_panicked_build_shows_an_error() {
+        let ctx = egui::Context::default();
+        let mut view = View::new(&PvManager::new(), Some(1.0));
+        view.current = Some(Location {
+            source: bob::Source::File("/x/a.bob".into()),
+            macros: Default::default(),
+        });
+        // The thread's sender dropped without sending, as when it panics.
+        let (_, rx) = std::sync::mpsc::channel();
+        view.loading = Some(rx);
+        view.poll_loading(&ctx);
+        assert!(!view.is_loading() && view.screen.is_none());
+        assert_eq!(
+            view.error.as_deref(),
+            Some("cannot read /x/a.bob: the build failed (see the log)")
+        );
     }
 }
