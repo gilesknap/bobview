@@ -149,6 +149,9 @@ fn draw_node(ui: &mut Ui, node: &mut Node, cx: &mut Cx, id: Id) {
     if node.w.bool("visible") == Some(false) {
         return;
     }
+    if node.w.kind == "label" && node.w.bool("auto_size") == Some(true) {
+        auto_size(ui.painter(), node, cx.view.zoom);
+    }
     let rect = cx.view.rect(&node.rect);
     if !rect.intersects(cx.clip) {
         return;
@@ -751,6 +754,21 @@ fn label(painter: &egui::Painter, node: &Node, rect: Rect, z: f32) {
         wrap,
         w.i64("rotation_step").unwrap_or(0),
     );
+}
+
+/// Size an `auto_size` label to its text, as Phoebus does: the width and
+/// height become those of the expanded text on one row per line, with x and
+/// y kept. Done each frame, so a rule that changes the text resizes it too.
+fn auto_size(painter: &egui::Painter, node: &mut Node, z: f32) {
+    let w = &node.w;
+    let galley = painter.layout_no_wrap(node.prop("text"), font(w, z), fg(w));
+    let size = galley.size() / z;
+    let (width, height) = match w.i64("rotation_step") {
+        Some(1 | 3) => (size.y, size.x),
+        _ => (size.x, size.y),
+    };
+    node.rect[2] = width.ceil() as f64;
+    node.rect[3] = height.ceil() as f64;
 }
 
 fn text_update(painter: &egui::Painter, node: &Node, state: Option<&PvState>, rect: Rect, z: f32) {
@@ -2282,6 +2300,55 @@ mod tests {
     }
 
     const PV: &str = "<BL01T-DI-CAM-01:DET:PortName_RBV>";
+
+    #[test]
+    fn auto_size_labels_fit_their_expanded_text() {
+        let xml = r#"<display><macros><camera>LI-DI-CAMERA-01</camera></macros>
+            <widget type="label"><x>10</x><y>20</y><width>66</width><height>20</height>
+              <text>$(camera)</text><auto_size>true</auto_size></widget>
+            <widget type="label"><x>10</x><y>50</y><width>66</width><height>20</height>
+              <text>$(camera)</text></widget></display>"#;
+        let pvs = PvManager::new();
+        let display = bob::Display::parse(xml).unwrap();
+        let mut screen = Builder::new(&pvs).screen(display, &Macros::default(), None, 0);
+        let ctx = egui::Context::default();
+        style::install_fonts(&ctx);
+        let mut natural = 0.0;
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let mut requests = Vec::new();
+            let mut cx = Cx {
+                view: View {
+                    origin: Pos2::ZERO,
+                    zoom: 1.0,
+                },
+                clip: Rect::EVERYTHING,
+                pvs: &pvs,
+                requests: &mut requests,
+                depth: 0,
+                touch: false,
+                trends: &[],
+                window: WindowKey::Main,
+            };
+            draw_screen(ui, &mut screen, &mut cx, Id::new("auto_size"));
+            let font = font(&screen.nodes[0].w, 1.0);
+            natural = ui
+                .painter()
+                .layout_no_wrap("LI-DI-CAMERA-01".into(), font, Color32::BLACK)
+                .size()
+                .x;
+        });
+        out.textures_delta.clear();
+        let [x, y, w, h] = screen.nodes[0].rect;
+        assert_eq!((x, y), (10.0, 20.0));
+        // Wide enough for the whole text, so nothing is elided.
+        assert!(
+            w > 66.0 && w >= natural as f64 && w < natural as f64 + 1.0,
+            "{w} {natural}"
+        );
+        assert!(h > 0.0);
+        // Without auto_size the label keeps its size.
+        assert_eq!(screen.nodes[1].rect, [10.0, 50.0, 66.0, 20.0]);
+    }
 
     /// Lay out a text entry's text `w` wide, as `text_entry` does.
     fn entry(text: &str, w: f32, editing: bool) -> Arc<egui::Galley> {
