@@ -942,6 +942,8 @@ mod tests {
     #[test]
     fn a_job_started_before_reading_again_is_dropped() {
         use super::{Done, Navigator};
+        // Reading again clears the fetch cache.
+        let _cache = crate::fetch::tests::CACHE_USERS.lock();
         // Started, then ⟳ pressed while it runs.
         let mut nav = Navigator {
             running: 1,

@@ -2581,6 +2581,9 @@ mod tests {
         use super::{BobApp, Location, Origin, WindowKey};
         use crate::tree::{Clicked, Target};
         use crate::widgets::Request;
+        // Following a link to the display shown reloads it, clearing the
+        // fetch cache.
+        let _cache = crate::fetch::tests::CACHE_USERS.lock();
         let ctx = eframe::egui::Context::default();
         let mut app = BobApp::new(&ctx, None, Some(1.0), crate::chrome::UiScale::Auto);
         let display = |name: &str| Location {
@@ -2654,6 +2657,9 @@ mod tests {
             source: bob::Source::File(file.clone()),
             macros: bob::Macros::from_pairs(pairs.iter().copied()),
         };
+        // Following a link to the display shown reloads it, clearing the
+        // fetch cache.
+        let _cache = crate::fetch::tests::CACHE_USERS.lock();
         let ctx = eframe::egui::Context::default();
         let mut app = BobApp::new(&ctx, None, Some(1.0), crate::chrome::UiScale::Auto);
         let open = |app: &mut BobApp, ctrl, loc: Location| {
