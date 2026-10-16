@@ -45,50 +45,92 @@ jobs:
           path: snapshots
 
   build:
-    # release builds for each arch on a native runner, packaged as
-    # bobview-<arch>-linux. cargo-zigbuild links against glibc 2.28 so the
-    # binaries also run on older distributions (e.g. RHEL 8), not just the
-    # runner's Ubuntu 24.04
+    # release builds for each platform on a native runner, packaged as
+    # bobview-<arch>-<os>. On Linux cargo-zigbuild links against glibc 2.28
+    # so the binaries also run on older distributions (e.g. RHEL 8), not just
+    # the runner's Ubuntu 24.04. The macOS builds run on the arm64 runner;
+    # x86_64 is cross-built there, so only arm64 is smoke tested.
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: x86_64
             os: ubuntu-24.04
+            platform: linux
+            target: x86_64-unknown-linux-gnu
           - arch: aarch64
             os: ubuntu-24.04-arm
+            platform: linux
+            target: aarch64-unknown-linux-gnu
+          - arch: aarch64
+            os: macos-15
+            platform: macos
+            target: aarch64-apple-darwin
+          - arch: x86_64
+            os: macos-15
+            platform: macos
+            target: x86_64-apple-darwin
+            cross: true
     runs-on: ${{ matrix.os }}
     env:
-      TARGET: ${{ matrix.arch }}-unknown-linux-gnu
+      TARGET: ${{ matrix.target }}
       GLIBC: "2.28"
-      TARGET_DIR: target/${{ matrix.arch }}-unknown-linux-gnu/release
+      TARGET_DIR: target/${{ matrix.target }}/release
+      LICENSE_TARGET: ${{ matrix.target }}
+      # the oldest macOS the binaries run on
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ env.TARGET }}, wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
       - uses: mlugg/setup-zig@v2
+        if: matrix.platform == 'linux'
       - name: Find the wasm-bindgen version in Cargo.lock
         run: |
           echo "WASM_BINDGEN=$(sed -n '/^name = "wasm-bindgen"$/{n;s/^version = "\(.*\)"$/\1/p;}' Cargo.lock)" >> "$GITHUB_ENV"
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-zigbuild, wasm-bindgen@${{ env.WASM_BINDGEN }}
+          tool: ${{ matrix.platform == 'linux' && 'cargo-zigbuild, ' || '' }}wasm-bindgen@${{ env.WASM_BINDGEN }}
       - name: Take the version from the release tag
         if: startsWith(github.ref, 'refs/tags/v')
-        run: sed -i "0,/^version = .*/s//version = \"${GITHUB_REF_NAME#v}\"/" Cargo.toml
-      - run: cargo zigbuild --release --workspace --target ${TARGET}.${GLIBC}
+        # perl rather than sed -i, which differs between GNU and BSD (macOS)
+        run: V=${GITHUB_REF_NAME#v} perl -0pi -e 's/^version = .*$/version = "$ENV{V}"/m' Cargo.toml
+      - if: matrix.platform == 'linux'
+        run: cargo zigbuild --release --workspace --target ${TARGET}.${GLIBC}
+      - if: matrix.platform == 'macos'
+        run: cargo build --release --workspace --target ${TARGET}
+      - name: Sign the macOS binaries ad hoc
+        # arm64 macOS will not run unsigned code, and stripping can leave the
+        # linker's signature invalid; ad hoc signing needs no certificate
+        if: matrix.platform == 'macos'
+        run: |
+          for b in bobview bobview-probe bobview-testioc bobview-server; do
+            codesign --force --sign - ${TARGET_DIR}/$b
+          done
       - name: Build the browser bundle
         run: ./scripts/build-web.sh
       - name: Check the glibc requirement
+        if: matrix.platform == 'linux'
         run: |
           for b in bobview bobview-probe bobview-testioc bobview-server; do
             need=$(objdump -T ${TARGET_DIR}/$b | grep -oE "GLIBC_[0-9.]+" | sort -Vu | tail -1)
             echo "$b needs $need"
             [ "$(printf "%s\n" "$need" "GLIBC_${GLIBC}" | sort -V | tail -1)" = "GLIBC_${GLIBC}" ]
           done
-      - name: Smoke test the ${{ matrix.arch }} binaries
+      - name: Check the macOS requirement
+        if: matrix.platform == 'macos'
+        run: |
+          for b in bobview bobview-probe bobview-testioc bobview-server; do
+            lipo -archs ${TARGET_DIR}/$b
+            otool -l ${TARGET_DIR}/$b | grep -A3 LC_BUILD_VERSION | grep -q "minos ${MACOSX_DEPLOYMENT_TARGET}"
+            codesign --verify ${TARGET_DIR}/$b
+          done
+      - name: Smoke test the ${{ matrix.arch }}-${{ matrix.platform }} binaries
+        if: ${{ !matrix.cross }}
         env:
           EPICS_CA_ADDR_LIST: 127.0.0.1
           EPICS_CA_AUTO_ADDR_LIST: "NO"
@@ -111,15 +153,16 @@ jobs:
             ${TARGET_DIR}/bobview --snapshot snapshots/demo-${{ matrix.arch }}.png --size 1300x780 --wait 5 tests/displays/demo.bob
           kill %1
       - uses: actions/upload-artifact@v4
+        if: ${{ !matrix.cross }}
         with:
-          name: snapshots-${{ matrix.arch }}
+          name: snapshots-${{ matrix.arch }}-${{ matrix.platform }}
           path: snapshots
       - name: Package
-        run: ./scripts/package.sh bobview-${{ matrix.arch }}-linux
+        run: ./scripts/package.sh bobview-${{ matrix.arch }}-${{ matrix.platform }}
       - uses: actions/upload-artifact@v4
         with:
-          name: bobview-${{ matrix.arch }}-linux
-          path: bobview-${{ matrix.arch }}-linux.tar.gz
+          name: bobview-${{ matrix.arch }}-${{ matrix.platform }}
+          path: bobview-${{ matrix.arch }}-${{ matrix.platform }}.tar.gz
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -130,7 +173,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: bobview-*-linux
+          pattern: bobview-*
           merge-multiple: true
       - name: Create the release, or add the binaries to an existing one
         env:
@@ -139,9 +182,9 @@ jobs:
           # a release made in the GitHub UI creates the tag too, so the
           # release may already exist when this tag build runs
           if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" > /dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" bobview-*-linux.tar.gz \
+            gh release upload "${GITHUB_REF_NAME}" bobview-*.tar.gz \
               --repo "${GITHUB_REPOSITORY}" --clobber
           else
-            gh release create "${GITHUB_REF_NAME}" bobview-*-linux.tar.gz \
+            gh release create "${GITHUB_REF_NAME}" bobview-*.tar.gz \
               --repo "${GITHUB_REPOSITORY}" --title "${GITHUB_REF_NAME}" --generate-notes
           fi
