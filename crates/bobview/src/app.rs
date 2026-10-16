@@ -2098,8 +2098,12 @@ fn details_window(ctx: &egui::Context, details: &mut Option<(WindowKey, pvmenu::
 
 #[cfg(not(target_arch = "wasm32"))]
 fn open_webpage(url: &str) {
-    if let Err(e) = std::process::Command::new("xdg-open").arg(url).spawn() {
-        log::warn!("cannot open {url}: {e}");
+    match std::process::Command::new("xdg-open").arg(url).spawn() {
+        // Reaped on a thread, so the finished child is not left a zombie.
+        Ok(mut child) => {
+            std::thread::spawn(move || child.wait());
+        }
+        Err(e) => log::warn!("cannot open {url}: {e}"),
     }
 }
 
