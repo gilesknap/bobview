@@ -240,10 +240,11 @@ pub fn svg_cost(doc: &roxmltree::Document) -> Cost {
         .rules
         .retain(|rule| rule.declarations.iter().any(|d| relevant(d.value)));
 
-    // The ids each element names: by `href`; in the paint and the markers
-    // its descendants inherit; in its other properties; and in each of
+    // The ids each element names: by `href`; in what its descendants
+    // inherit, converted once for each (paint, start and end markers) or at
+    // each vertex (middle markers); in its other properties; and in each of
     // `NOT_INHERITED`, with which of those it takes from its parent. And
-    // how many vertices it may put markers on.
+    // how many vertices it may put middle markers on.
     #[derive(Clone, Default)]
     struct Refs {
         href: Vec<usize>,
@@ -285,14 +286,17 @@ pub fn svg_cost(doc: &roxmltree::Document) -> Cost {
                 }
                 continue;
             }
-            named(
-                value,
-                match name {
-                    "fill" | "stroke" => &mut r.paint,
-                    _ if INHERITED.contains(&name) => &mut r.markers,
-                    _ => &mut r.other,
-                },
-            );
+            // usvg draws a start and an end marker once a path, like a fill,
+            // and a middle one at each vertex between.
+            match name {
+                "fill" | "stroke" | "marker-start" | "marker-end" => named(value, &mut r.paint),
+                "marker-mid" => named(value, &mut r.markers),
+                "marker" => {
+                    named(value, &mut r.paint);
+                    named(value, &mut r.markers);
+                }
+                _ => named(value, &mut r.other),
+            }
             if let Some(k) = k {
                 named(value, &mut r.not_inherited[k]);
             }
@@ -308,13 +312,14 @@ pub fn svg_cost(doc: &roxmltree::Document) -> Cost {
             list.sort_unstable();
             list.dedup();
         }
-        // A generous bound: no vertex takes fewer characters to write than
-        // one, nor an arc fewer than the segments usvg splits it into, and
-        // a rect or an ellipse has fewer than `SHAPE_VERTICES`.
+        // A generous bound on the vertices middle markers go on: each takes
+        // at least two characters to write (usvg puts none on a close), an
+        // arc more than twice the segments usvg splits it into, and a rect
+        // or an ellipse has fewer than `SHAPE_VERTICES`.
         let text = |name| node.attribute(name).map_or(0, str::len);
         r.vertices = match node.tag_name().name() {
             "rect" | "circle" | "ellipse" => SHAPE_VERTICES,
-            "line" | "polyline" | "polygon" | "path" => 2 + text("d") + text("points"),
+            "line" | "polyline" | "polygon" | "path" => 2 + (text("d") + text("points")) / 2,
             _ => 0,
         };
     }
@@ -1146,6 +1151,17 @@ mod tests {
         );
         let e = parse(big.as_bytes()).err();
         assert_eq!(e.as_deref(), Some("SVG is too large or complex"));
+        // Start and end markers go once on each path, so arrowheads on
+        // long paths are fine.
+        let curve = format!("M0 0{}", " C1 2 3 4 5 6".repeat(80));
+        let arrows = format!(
+            r#"{SVG}<defs><marker id="a"><path d="M0 0 5 -5 -12 0 5 5Z"/></marker></defs>{}</svg>"#,
+            format!(
+                r#"<path d="{curve}" stroke="black" marker-start="url(#a)" marker-end="url(#a)"/>"#
+            )
+            .repeat(50)
+        );
+        assert!(parse(arrows.as_bytes()).is_ok());
         // A few repeats are fine.
         let svg = levels(
             3,
