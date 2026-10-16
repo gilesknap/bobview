@@ -430,6 +430,9 @@ fn set_page_url(loc: &Location) {
     let dir = format!("{}{}", url.origin(), &path[..=path.rfind('/').unwrap_or(0)]);
     let display = loc.source.to_string();
     let params = url.search_params();
+    // The write token is read at startup; keep it out of the address bar,
+    // history and bookmarks.
+    params.delete("token");
     params.set("display", display.strip_prefix(&dir).unwrap_or(&display));
     // Escaped for parse_macros.
     let macros: Vec<String> = loc

@@ -34,7 +34,7 @@ use tokio::sync::mpsc;
 
 pub use name::{PvName, Scheme};
 #[cfg(target_arch = "wasm32")]
-pub use pvws::set_pvws;
+pub use pvws::{set_pvws, set_write_token};
 pub use value::{Image, ImageData, PvState, Severity, Value, split_array, split_strings};
 
 /// Called whenever any PV changes, so a UI can schedule a repaint.

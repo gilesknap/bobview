@@ -13,5 +13,5 @@ log = "0.4.34"
 percent-encoding = "2.3.2"
 pv = { path = "../pv" }
 serde_json = "1.0.154"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
 tower-http = { version = "0.6", features = ["fs"] }

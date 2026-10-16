@@ -339,7 +339,7 @@ fn unescape_macro(text: &str) -> String {
 /// The browser build: the page's query string names the display, its
 /// macros and the PV Web Socket, e.g.
 /// `?display=https://host/opi/index.bob&macros=P=X&pvws=pvws.host:443`
-/// (and `zoom=1.5`, `keypad`).
+/// (and `zoom=1.5`, `keypad`, `token=SECRET` for a server with `--write`).
 /// A relative display is found next to the page; the default is `index.bob`.
 #[cfg(target_arch = "wasm32")]
 fn main() {
@@ -358,6 +358,9 @@ fn main() {
     };
     if let Some(pvws) = query.get("pvws") {
         pv::set_pvws(&pvws);
+    }
+    if let Some(token) = query.get("token") {
+        pv::set_write_token(&token);
     }
     let zoom = query.get("zoom").and_then(|z| z.parse().ok());
     let keypad = query.has("keypad");
