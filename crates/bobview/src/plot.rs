@@ -609,6 +609,11 @@ pub(crate) fn legend(
     }
 }
 
+/// How much egui's anti-aliasing widens a line, in points.
+const FEATHER_WIDTH: f32 = 0.4;
+/// Thinnest a trace's line is drawn, so a 1 pixel line stays solid enough.
+const MIN_TRACE_WIDTH: f32 = 0.6;
+
 fn draw_trace(outer: &egui::Painter, t: &Trace, xs: &Scale, ys: &Scale, plot: Rect) {
     let painter = &outer.with_clip_rect(outer.clip_rect().intersect(plot));
     // Markers may poke out of the plot by half their size.
@@ -625,7 +630,9 @@ fn draw_trace(outer: &egui::Painter, t: &Trace, xs: &Scale, ys: &Scale, plot: Re
         })
     };
     let pts: Vec<Option<Pos2>> = t.points.iter().map(|p| screen(*p)).collect();
-    let stroke = Stroke::new(t.width, t.color);
+    // egui's anti-aliasing widens a line by about a pixel, which makes
+    // thin traces look heavier than the aliased ones of CS-Studio.
+    let stroke = Stroke::new((t.width - FEATHER_WIDTH).max(MIN_TRACE_WIDTH), t.color);
 
     // Runs of finite points; a NaN breaks the line.
     let runs = pts
@@ -655,7 +662,8 @@ fn draw_trace(outer: &egui::Painter, t: &Trace, xs: &Scale, ys: &Scale, plot: Re
                 0.0f64.clamp(ys.lo, ys.hi)
             });
             let n = pts.iter().flatten().count().max(1) as f32;
-            let half = (plot.width() / n * 0.4).max(0.5);
+            // A bar is a line from the axis, as in CS-Studio.
+            let half = (t.width / 2.0).max(0.5).min(plot.width() / n * 0.4);
             for p in pts.iter().flatten() {
                 let bar =
                     Rect::from_x_y_ranges(p.x - half..=p.x + half, p.y.min(base)..=p.y.max(base));
