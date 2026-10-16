@@ -43,8 +43,6 @@ options:
   -z, --zoom FACTOR      fixed zoom instead of fit-to-window
   -f, --fullscreen       start full screen
   -k, --keypad           edit values with an on-screen keypad (automatic on touch)
-  --multi-window         start in multi-window mode: links open their displays in
-                         windows of their own (ctrl+click opens in place)
   --layout NAME          restore the saved window layout NAME
   --no-layout            don't restore the default layout
   --ui-scale F|auto      size of the toolbar and menus relative to the desktop's
@@ -92,7 +90,6 @@ fn main() -> eframe::Result {
     let mut clicks = Vec::new();
     let mut keypad = false;
     let mut project = None;
-    let mut multi_window = false;
     let mut layout_name = None;
     let mut no_layout = false;
     let mut args = std::env::args().skip(1);
@@ -103,7 +100,12 @@ fn main() -> eframe::Result {
             "-z" | "--zoom" => zoom = args.next().and_then(|z| z.parse().ok()),
             "-f" | "--fullscreen" => fullscreen = true,
             "-k" | "--keypad" => keypad = true,
-            "--multi-window" => multi_window = true,
+            // Pin mode replaced multi-window mode: shift+click follows a
+            // link as it did.
+            "--multi-window" => eprintln!(
+                "--multi-window is no longer needed: links from the pinned main \
+                 window open in another window, shift+click in a new one"
+            ),
             "--layout" => match args.next() {
                 Some(name) => layout_name = Some(name),
                 None => {
@@ -282,9 +284,7 @@ fn main() -> eframe::Result {
         Box::new(move |cc| {
             let mut app = app::BobApp::new(&cc.egui_ctx, start, zoom, ui_scale);
             app.set_keypad(keypad);
-            app.set_multi_window(multi_window);
-            if let Some((mut layout, name)) = layout {
-                layout.multi_window |= multi_window;
+            if let Some((layout, name)) = layout {
                 app.restore_layout(layout, Some(name));
             }
             Ok(Box::new(app))

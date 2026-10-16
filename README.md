@@ -275,35 +275,59 @@ switch; each value holds until the next, and a gap marks where a PV was
 disconnected. Below the plot a legend gives each PV's colour, name and
 current value, or Disconnected; ✖ removes a PV, and Add PV adds one.
 
-## Multi-window mode and layouts
+## Pinned windows and layouts
 
 For a control room, several displays can be open side by side, each in a
-window of its own, and the arrangement saved and restored. Multi-window mode
-is switched on with 🗗 on the main window's toolbar (or `--multi-window`).
-The toggle and the layout controls are not shown in a browser, nor on a
-touch or small screen.
+window of its own, and the arrangement saved and restored. Each window is
+**pinned** or not, which decides where its links (an action or menu button,
+a symbol click …) open their displays, whatever their target:
 
-In multi-window mode a link (an action or menu button, a symbol click …)
-opens its display in a new window, whatever its target, and a link to a
-display already open with the same macros raises that window instead.
-**Ctrl+click** follows a link in place, in the window it is in, with Back
-and Forward as in one window; with multi-window mode off every link
-navigates in place, as before. BOY Exit buttons close the display window
-they are in (in the main window they go back first, as before).
+| Click | Display already open somewhere | Not open |
+|---|---|---|
+| in a pinned window | raise that window | open in the viewer, or a new window if every window is pinned |
+| in an unpinned window | raise that window | open in place |
+| **shift**+click | raise that window | open in a new window |
+| **ctrl**+click | open in place | open in place |
+
+The **viewer** is the unpinned window used last (focused, opened or
+unpinned), so clicking a window once makes it where the next link goes.
+"Already open" means the same display with the same macros. A display
+opened in place or in the viewer keeps that window's history for Back and
+Forward.
+
+The main window starts pinned, so it stays where it is while the displays
+it links to come and go in one other window; pin that one too to keep it,
+and the next link opens a new viewer. Unpinned, the main window navigates in
+place as one window does. Holding shift opens every display in a window of
+its own, as the old multi-window mode did. The main window's pin is 📌 on
+its toolbar; a display window's is in the corner of its display (below).
+Pinned windows have 📌 before their title. In a browser, and on a touch or
+small screen, displays have no windows of their own: every link navigates
+in place, and the pin and layout controls are not shown. BOY Exit buttons
+close the display window they are in (in the main window they go back
+first, as before).
 
 A display window opens sized to its display at 100%, within the monitor,
-and the display fits the window as you resize it. It has the native title
+beside the window whose link opened it, on the first of its right, below
+it, its left and above it where there is room on the monitor (not on
+Wayland, where the compositor places windows). The viewer is sized and
+placed so again for each display a pinned window's link opens in it. The
+display fits the window as you resize it. It has the native title
 bar only: its toolbar (Back, Forward, Reload, zoom and Home) is hidden until
-you show it with the chevron that appears in the top-right corner while the
-pointer is over the window, with **Ctrl+T**, or with Show toolbar in the
-right-click menu on the display's background (which also has Close). In
+you show it. While the pointer is over the window, small buttons appear in
+the top-right corner of the display: ◀ Back (while the toolbar is hidden),
+📌 the window's pin, and a chevron that shows or hides the toolbar, as
+**Ctrl+T** and Show toolbar in the right-click menu on the display's
+background (which also has Close) do. In
 every window Ctrl+R reloads, Alt+← and Alt+→ go back and forward, and
 Ctrl+W closes the window. Closing the main window quits bobview and closes
 its windows.
 
 A layout records the open windows: each one's display, Eclipse project and
-effective macros, its position and size, the main window's zoom and whether
-a display window shows its toolbar. It records the trend windows too: each
+effective macros, its position and size, whether it is pinned, the main
+window's zoom and whether a display window shows its toolbar (a layout from
+before windows were pinned pins them all if it was saved in multi-window
+mode, and none if not). It records the trend windows too: each
 one's PVs, time span, log scale, position and size. Layouts are JSON files in
 `$XDG_CONFIG_HOME/bobview/layouts` (by default `~/.config/bobview/layouts`).
 The main toolbar's layout list loads one (closing the display and trend
