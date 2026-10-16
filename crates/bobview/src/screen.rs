@@ -6,6 +6,9 @@ use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use bob::{Display, Macros, Source, Widget};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+
 use pv::{Pv, PvManager};
 
 use crate::rules::CompiledRule;
@@ -18,6 +21,25 @@ pub(crate) const MAX_DEPTH: u32 = 8;
 /// fetched display to show at once, short enough not to stall the window.
 #[cfg(not(target_arch = "wasm32"))]
 pub const QUICK: Duration = Duration::from_millis(50);
+
+/// The stack of a thread that builds a display: building recurses once per
+/// nesting level, through every display it embeds (each nesting up to the
+/// XML depth cap), and the default is platform dependent.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const BUILD_STACK: usize = 16 << 20;
+
+/// The most embedded displays one load builds, however they nest (guards
+/// against displays that embed themselves several times over).
+const MAX_SCREENS: u32 = 256;
+
+/// The most XML, in all the displays a load embeds, that it parses.
+const MAX_EMBEDDED_BYTES: usize = 32 << 20;
+
+/// The most widgets one load builds, counting those of embedded displays.
+const MAX_WIDGETS: u32 = 100_000;
+
+/// The most rules, and the most actions, of a widget that are used.
+const MAX_PER_WIDGET: usize = 256;
 
 /// A display ready to draw. Node rectangles are in this screen's own coordinates.
 pub struct Screen {
@@ -74,6 +96,63 @@ pub struct Node {
     pub series: Vec<Option<crate::trend::Series>>,
     /// The vacuum-space link field that points this widget at a group.
     pub link: Option<crate::group_link::Link>,
+    /// What the load that made this node may still build.
+    budget: Arc<Budget>,
+}
+
+/// Embedded displays and widgets that a load may still make. It belongs to
+/// the root screen and is shared with its nodes, so that displays embedded
+/// later (as the web build fetches them) draw on the same budget.
+struct Budget {
+    screens: AtomicU32,
+    widgets: AtomicU32,
+    /// Bytes of expanded macro values and PV names.
+    macros: AtomicUsize,
+    /// Bytes of embedded display files.
+    files: AtomicUsize,
+}
+
+impl Budget {
+    /// The budget of a new load.
+    fn new() -> Arc<Self> {
+        Arc::new(Budget {
+            screens: AtomicU32::new(MAX_SCREENS),
+            widgets: AtomicU32::new(MAX_WIDGETS),
+            macros: AtomicUsize::new(bob::MAX_LOAD_BYTES),
+            files: AtomicUsize::new(MAX_EMBEDDED_BYTES),
+        })
+    }
+
+    /// Take `n` from `left`, or fail, taking nothing, if less is left. Build
+    /// threads embedding at once can't together take more than there is.
+    fn take_bytes(left: &AtomicUsize, n: usize) -> bool {
+        let mut l = left.load(Ordering::Relaxed);
+        loop {
+            let Some(rest) = l.checked_sub(n) else {
+                return false;
+            };
+            match left.compare_exchange(l, rest, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return true,
+                Err(now) => l = now,
+            }
+        }
+    }
+
+    /// Take one from `left`, or fail if none is left.
+    fn take(left: &AtomicU32) -> bool {
+        loop {
+            let n = left.load(Ordering::Relaxed);
+            if n == 0 {
+                return false;
+            }
+            if left
+                .compare_exchange(n, n - 1, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return true;
+            }
+        }
+    }
 }
 
 /// Widget types bobview draws (anything else gets a placeholder).
@@ -226,7 +305,11 @@ pub fn poll_built(nodes: &mut [Node]) -> bool {
 /// The error for a display whose build thread panicked.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn build_failed(source: &Source) -> bob::Error {
-    let why = "the build failed (see the log)";
+    refused(source, "the build failed (see the log)")
+}
+
+/// The error for a display at `source` that was not read or built, and why.
+fn refused(source: &Source, why: &str) -> bob::Error {
     match source {
         Source::File(path) => bob::Error::Io(path.clone(), std::io::Error::other(why)),
         Source::Url(url) => bob::Error::Fetch(url.clone(), why.into()),
@@ -243,6 +326,7 @@ pub fn building() -> bool {
 /// Builds screens from displays, loading the displays they embed.
 pub struct Builder<'a> {
     pub pvs: &'a PvManager,
+    budget: Arc<Budget>,
     /// Whether this thread may wait on files and servers; on the UI thread
     /// an embedded display is built on a thread of its own instead.
     #[cfg(not(target_arch = "wasm32"))]
@@ -252,21 +336,25 @@ pub struct Builder<'a> {
 impl<'a> Builder<'a> {
     /// A builder that reads embedded displays as it goes, for a thread that
     /// may wait on them (in a browser nothing waits: see [`crate::fetch`]).
+    /// It starts a load, with a budget of its own.
     pub fn new(pvs: &'a PvManager) -> Self {
-        Self {
-            pvs,
-            #[cfg(not(target_arch = "wasm32"))]
-            wait: true,
-        }
+        Self::sharing(pvs, Budget::new(), true)
     }
 
     /// A builder for the UI thread, which builds each embedded display on a
     /// thread of its own, showing it as loading until it is built.
     pub fn ui(pvs: &'a PvManager) -> Self {
+        Self::sharing(pvs, Budget::new(), false)
+    }
+
+    /// A builder drawing on `budget`, that of the load it continues.
+    #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+    fn sharing(pvs: &'a PvManager, budget: Arc<Budget>, wait: bool) -> Self {
         Self {
             pvs,
+            budget,
             #[cfg(not(target_arch = "wasm32"))]
-            wait: false,
+            wait,
         }
     }
 }
@@ -275,6 +363,7 @@ impl Screen {
     /// Load `source` with `macros` layered over the display's own macros.
     pub fn load(source: &Source, macros: &Macros, pvs: &PvManager) -> Result<Self, bob::Error> {
         let display = crate::fetch::load(source)?;
+        bob::rearm_warning();
         Ok(Builder::new(pvs).screen(display, macros, None, 0))
     }
 }
@@ -462,6 +551,18 @@ fn display_id() -> String {
 }
 
 impl Builder<'_> {
+    /// [`expand_for`], taking the size of the text and result from the load's
+    /// macro budget; once it is spent, text is left as written.
+    fn expand_charged(&self, w: &Widget, macros: &Macros, text: &str) -> String {
+        if self.budget.macros.load(Ordering::Relaxed) == 0 {
+            bob::warn_spent();
+            return text.to_string();
+        }
+        let out = expand_for(w, macros, text);
+        bob::spend(&self.budget.macros, text.len() + out.len());
+        out
+    }
+
     pub fn screen(
         &self,
         display: Display,
@@ -470,7 +571,7 @@ impl Builder<'_> {
         depth: u32,
     ) -> Screen {
         // Macros passed in override the display's own defaults.
-        let mut macros = display.macros.with(macros);
+        let mut macros = Macros::over(&display.macros, macros, &self.budget.macros);
         // BOY gives each display it opens a `$(DID)`, which screens use to
         // keep their `loc://$(DID)…` PVs apart. Widgets of an embedded
         // display become the host's, so they share the host's id.
@@ -522,10 +623,20 @@ impl Builder<'_> {
         base: Option<&Source>,
         depth: u32,
     ) -> Vec<Node> {
-        widgets
-            .iter()
-            .map(|w| self.node(w, origin, macros, base, depth))
-            .collect()
+        let mut nodes = Vec::new();
+        for w in widgets {
+            // Widgets past the budget are left out, after one that says so.
+            let over = !Budget::take(&self.budget.widgets);
+            let mut node = self.node(w, origin, macros, base, depth);
+            if over {
+                log::warn!("too many widgets; the rest are left out");
+                node.error = Some("too many widgets; the rest are left out".into());
+                nodes.push(node);
+                break;
+            }
+            nodes.push(node);
+        }
+        nodes
     }
 
     fn node(
@@ -536,7 +647,7 @@ impl Builder<'_> {
         base: Option<&Source>,
         depth: u32,
     ) -> Node {
-        let macros = parent.with(&w.macros());
+        let macros = parent.with_budget(&w.macros(), &self.budget.macros);
         let (dw, dh) = default_size(&w.kind);
         let rect = [
             origin.0 + w.f64("x").unwrap_or(0.0),
@@ -544,36 +655,44 @@ impl Builder<'_> {
             w.f64("width").unwrap_or(dw),
             w.f64("height").unwrap_or(dh),
         ];
-        let pv_name = w
-            .text("pv_name")
-            .map(|t| expand_for(w, &macros, t))
-            .unwrap_or_default();
+        let ex = |t: &str| self.expand_charged(w, &macros, t);
+        let pv_name = w.text("pv_name").map(ex).unwrap_or_default();
         let pv = (!pv_name.is_empty()).then(|| self.pvs.subscribe(&pv_name));
-        let rules = w
-            .rules()
+        let (all_rules, all_actions) = (w.rules(), w.actions());
+        if all_rules.len() > MAX_PER_WIDGET || all_actions.len() > MAX_PER_WIDGET {
+            log::warn!("over {MAX_PER_WIDGET} rules or actions in a widget; the rest are ignored");
+        }
+        let rules = all_rules
             .iter()
-            .map(|r| CompiledRule::new(r, &|t| expand_for(w, &macros, t), self.pvs))
+            .take(MAX_PER_WIDGET)
+            .map(|r| CompiledRule::new(r, &ex, self.pvs))
             .collect();
 
-        let link = crate::group_link::Link::new(w, &|t| expand_for(w, &macros, t), self.pvs);
-        let mut action_pvs: Vec<Pv> = w
-            .actions()
+        let link = crate::group_link::Link::new(w, &ex, self.pvs);
+        let mut action_pvs: Vec<Pv> = all_actions
             .iter()
+            .take(MAX_PER_WIDGET)
             .filter_map(|a| match a {
-                bob::Action::WritePv { pv_name, .. } => {
-                    Some(self.pvs.subscribe(&expand_for(w, &macros, pv_name)))
-                }
+                bob::Action::WritePv { pv_name, .. } => Some(self.pvs.subscribe(&ex(pv_name))),
                 _ => None,
             })
             .collect();
         // A menu mux's targets, which a pick writes, and the values of its
         // initial item, which BOY writes as the display opens.
         if let Some(mux) = w.menu_mux() {
-            let initial = mux.initial.map(|i| mux.writes(i)).unwrap_or_default();
+            let sets = w
+                .get("menu_mux")
+                .map_or(0, |m| m.children.iter().filter(|c| c.name == "set").count());
+            if sets > bob::MAX_MUX_SETS {
+                log::warn!(
+                    "over {} sets in a menu mux; the rest are ignored",
+                    bob::MAX_MUX_SETS
+                );
+            }
             for set in &mux.sets {
-                let target = self.pvs.subscribe(&expand_for(w, &macros, &set.target));
-                if let Some((_, value)) = initial.iter().find(|(t, _)| *t == set.target) {
-                    target.write(expand_for(w, &macros, value));
+                let target = self.pvs.subscribe(&ex(&set.target));
+                if let Some(value) = mux.initial.and_then(|i| set.values.get(i)) {
+                    target.write(ex(value));
                 }
                 action_pvs.push(target);
             }
@@ -583,7 +702,13 @@ impl Builder<'_> {
         }
 
         let mut node = Node {
-            w: w.clone(),
+            // Without the children, which the nodes hold, so that nested
+            // groups don't each keep a copy of everything below them.
+            w: Widget {
+                kind: w.kind.clone(),
+                props: w.props.clone(),
+                children: Vec::new(),
+            },
             rect,
             macros,
             pv,
@@ -608,6 +733,7 @@ impl Builder<'_> {
             traces: Vec::new(),
             series: Vec::new(),
             link,
+            budget: self.budget.clone(),
         };
 
         match w.kind.as_str() {
@@ -654,12 +780,18 @@ impl Builder<'_> {
                 self.embed(&mut node, &file, &macros, &group, depth);
             }
             "xyplot" => {
-                node.traces =
-                    crate::plot::subscribe(w, &|t| expand_for(w, &node.macros, t), self.pvs);
+                node.traces = crate::plot::subscribe(
+                    w,
+                    &|t| self.expand_charged(w, &node.macros, t),
+                    self.pvs,
+                );
             }
             "stripchart" => {
-                node.traces =
-                    crate::plot::subscribe(w, &|t| expand_for(w, &node.macros, t), self.pvs);
+                node.traces = crate::plot::subscribe(
+                    w,
+                    &|t| self.expand_charged(w, &node.macros, t),
+                    self.pvs,
+                );
                 node.series = node
                     .traces
                     .iter()
@@ -681,9 +813,10 @@ impl Builder<'_> {
     /// and the node shows it as loading until [`Node::poll_building`] finds
     /// it built.
     pub fn embed(&self, node: &mut Node, file: &str, macros: &Macros, group: &str, depth: u32) {
+        // Embedded again once the web build has fetched it: counted already.
+        let counted = std::mem::take(&mut node.loading);
         node.embedded = None;
         node.error = None;
-        node.loading = false;
         // Dropping a build still under way discards it when it finishes.
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -696,27 +829,75 @@ impl Builder<'_> {
             node.error = Some("embedded displays nested too deeply".into());
             return;
         }
+        // The node's budget, not this builder's, which may be a fresh one:
+        // the display is part of the load that made the node.
+        let this = Builder::sharing(self.pvs, node.budget.clone(), self.waits());
+        if !counted && !Budget::take(&this.budget.screens) {
+            node.error = Some("too many embedded displays".into());
+            return;
+        }
         let source = node.resolve(file);
         #[cfg(not(target_arch = "wasm32"))]
-        if !self.wait {
+        if !this.wait {
             let (tx, rx) = std::sync::mpsc::channel();
-            let (pvs, src) = (self.pvs.clone(), source.clone());
+            let (pvs, src, budget) = (self.pvs.clone(), source.clone(), this.budget.clone());
             let (macros, group) = (macros.clone(), group.to_string());
             let in_flight = InFlight::new();
-            std::thread::spawn(move || {
-                let built = crate::fetch::load(&src)
-                    .map(|d| Builder::new(&pvs).screen(d, &macros, Some(&group), depth + 1));
-                // Unsent (the node moved on), the result and its count drop here.
-                tx.send((built, in_flight)).ok();
-            });
+            let spawned = std::thread::Builder::new()
+                .name("display-builder".into())
+                .stack_size(BUILD_STACK)
+                .spawn(move || {
+                    // Still the same load, so on the same budget: a display
+                    // that embeds itself can't get a fresh one per thread.
+                    let built =
+                        Builder::sharing(&pvs, budget, true).build(&src, &macros, &group, depth);
+                    // Unsent (the node moved on), the result and its count drop here.
+                    tx.send((built, in_flight)).ok();
+                });
+            if let Err(e) = spawned {
+                let why = format!("cannot start a thread to build it: {e}");
+                node.place(&source, Err(refused(&source, &why)));
+                return;
+            }
             node.error = Some(format!("Loading {source}"));
             node.building = Some(Building { source, rx });
             node.poll_building(QUICK);
             return;
         }
-        let built =
-            crate::fetch::load(&source).map(|d| self.screen(d, macros, Some(group), depth + 1));
+        let built = this.build(&source, macros, group, depth);
         node.place(&source, built);
+    }
+
+    /// Read and build the display at `source`, embedded `depth` deep, if
+    /// the load has enough of its budget for embedded files left.
+    fn build(
+        &self,
+        source: &Source,
+        macros: &Macros,
+        group: &str,
+        depth: u32,
+    ) -> Result<Screen, bob::Error> {
+        let d = crate::fetch::load(source)?;
+        if !Budget::take_bytes(&self.budget.files, d.size) {
+            return Err(refused(source, "embedded displays too large in total"));
+        }
+        Ok(self.screen(d, macros, Some(group), depth + 1))
+    }
+
+    /// Whether this builder may wait on files and servers.
+    fn waits(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        return self.wait;
+        #[cfg(target_arch = "wasm32")]
+        true
+    }
+
+    /// Show tab `index` of a navigation tabs widget because the user picked
+    /// it: a load of its own, on this builder's budget, so that switching
+    /// tabs all day never spends the budget of the load that made the widget.
+    pub fn pick_navtab(&self, node: &mut Node, index: usize, depth: u32) {
+        node.budget = self.budget.clone();
+        self.select_navtab(node, index, depth);
     }
 
     /// Show tab `index` of a navigation tabs widget.
@@ -726,10 +907,11 @@ impl Builder<'_> {
         node.active_tab = index;
         let file = node.expand(tab.child_text("file").unwrap_or(""));
         let group = node.expand(tab.child_text("group_name").unwrap_or(""));
-        let macros = node.macros.with(
+        let macros = node.macros.with_budget(
             &tab.child("macros")
                 .map(Macros::from_element)
                 .unwrap_or_default(),
+            &node.budget.macros,
         );
         self.embed(node, &file, &macros, &group, depth);
     }
@@ -876,6 +1058,313 @@ mod tests {
         let s = Builder::new(&pvs).screen(d, &Macros::default(), None, 0);
         assert_eq!(s.nodes[0].expand("$(p38)"), "xxxx");
         assert!(s.nodes[0].expand("$(p0)").starts_with("$(p0)"));
+    }
+
+    #[test]
+    fn displays_embedding_themselves_stay_bounded() {
+        // Four embeds of itself, 8 deep: 4^8 screens if each were built.
+        let dir = std::env::temp_dir().join(format!("bobview-bomb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("bomb.bob");
+        let embed = "<widget type='embedded'><file>bomb.bob</file></widget>";
+        std::fs::write(&file, format!("<display>{}</display>", embed.repeat(4))).unwrap();
+        let start = std::time::Instant::now();
+        let pvs = PvManager::new();
+        let s = Screen::load(&Source::File(file), &Macros::default(), &pvs).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        fn count(nodes: &[Node], errors: &mut u32) -> u32 {
+            nodes
+                .iter()
+                .map(|n| {
+                    *errors += n.error.is_some() as u32;
+                    1 + n.embedded.as_ref().map_or(0, |e| count(&e.nodes, errors))
+                })
+                .sum()
+        }
+        let mut errors = 0;
+        let total = count(&s.nodes, &mut errors);
+        assert!(total <= MAX_SCREENS * 4 + 4, "{total} nodes");
+        assert!(errors > 0);
+        assert!(start.elapsed().as_secs() < 10);
+    }
+
+    /// Embedded displays under `nodes`, with how many show an error.
+    fn count_screens(nodes: &[Node], errors: &mut u32) -> u32 {
+        nodes
+            .iter()
+            .map(|n| {
+                *errors += n.error.is_some() as u32;
+                n.embedded
+                    .as_ref()
+                    .map_or(0, |e| 1 + count_screens(&e.nodes, errors))
+            })
+            .sum()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn displays_built_on_threads_share_the_load_budget() {
+        // Embeds and navigation tabs of itself, four ways, built from the UI
+        // thread: each is built on a thread of its own, which must draw on
+        // the budget of the load, not start a fresh one (4 x 256 screens).
+        let _builds = BUILDS.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("bobview-threads-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("bomb.bob");
+        let embed = "<widget type='embedded'><file>bomb.bob</file></widget>";
+        let tabs = "<widget type='navtabs'><tabs><tab><file>bomb.bob</file></tab></tabs></widget>";
+        let xml = format!("<display>{embed}{embed}{tabs}{tabs}</display>");
+        std::fs::write(&file, &xml).unwrap();
+        let mut d = Display::parse(&xml).unwrap();
+        d.source = Some(Source::File(file));
+        let pvs = PvManager::new();
+        let mut s = Builder::ui(&pvs).screen(d, &Macros::default(), None, 0);
+        let start = std::time::Instant::now();
+        while poll_built(&mut s.nodes) {
+            assert!(start.elapsed() < patience(), "still building");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::remove_dir_all(&dir).ok();
+        let mut errors = 0;
+        let screens = count_screens(&s.nodes, &mut errors);
+        assert!(screens <= MAX_SCREENS, "{screens} screens");
+        assert!(errors > 0);
+        assert!(s.nodes.iter().all(|n| n.building.is_none()));
+    }
+
+    #[test]
+    fn picking_navigation_tabs_never_spends_the_load_budget() {
+        let dir = std::env::temp_dir().join(format!("bobview-picks-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("tab.bob"),
+            "<display><widget type='label'/></display>",
+        )
+        .unwrap();
+        let tab = "<tab><file>tab.bob</file></tab>";
+        let main = dir.join("main.bob");
+        let xml =
+            format!("<display><widget type='navtabs'><tabs>{tab}{tab}</tabs></widget></display>");
+        std::fs::write(&main, xml).unwrap();
+        let pvs = PvManager::new();
+        let mut s = Screen::load(&Source::File(main), &Macros::default(), &pvs).unwrap();
+        for i in 0..2 * MAX_SCREENS as usize {
+            Builder::new(&pvs).pick_navtab(&mut s.nodes[0], i % 2, 0);
+        }
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(s.nodes[0].error, None);
+        assert!(s.nodes[0].embedded.is_some());
+    }
+
+    #[test]
+    fn menu_mux_sets_are_capped() {
+        // A hand-written `<menu_mux>` with far more sets than BOY allows.
+        let set = |i: usize| {
+            format!(
+                "<set><target>loc://t{i}&lt;VString&gt;</target><values><v>a{i}</v><v>b{i}</v></values></set>"
+            )
+        };
+        let sets: String = (0..10_000).map(set).collect();
+        let xml = format!(
+            "<display><widget type='combo'><menu_mux><initial>1</initial>{sets}</menu_mux></widget></display>"
+        );
+        let (s, took) = load_hostile("mux", &xml);
+        let pvs = &s.nodes[0].action_pvs;
+        assert_eq!(pvs.len(), bob::MAX_MUX_SETS);
+        // Each target is written its own set's value for the initial item.
+        assert!(pvs[3].name().to_string().starts_with("loc://t3"));
+        assert_eq!(pvs[3].state().format(None, false), "b3");
+        assert!(took < patience(), "{took:?}");
+    }
+
+    #[test]
+    fn a_display_embedded_again_once_fetched_is_counted_once() {
+        let dir = std::env::temp_dir().join(format!("bobview-refetch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("inner.bob"), "<display/>").unwrap();
+        let xml = "<display><widget type='embedded'><file>inner.bob</file></widget></display>";
+        std::fs::write(dir.join("main.bob"), xml).unwrap();
+        let pvs = PvManager::new();
+        let s = Screen::load(
+            &Source::File(dir.join("main.bob")),
+            &Macros::default(),
+            &pvs,
+        );
+        let mut s = s.unwrap();
+        let node = &mut s.nodes[0];
+        let before = node.budget.screens.load(Ordering::Relaxed);
+        // As the web build does once the file it was fetching arrives.
+        node.loading = true;
+        Builder::new(&pvs).embed(node, "inner.bob", &Macros::default(), "", 0);
+        assert_eq!(node.budget.screens.load(Ordering::Relaxed), before);
+        assert!(node.embedded.is_some() && !node.loading);
+        // Embedded afresh, it is counted again.
+        Builder::new(&pvs).embed(node, "inner.bob", &Macros::default(), "", 0);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(node.budget.screens.load(Ordering::Relaxed), before - 1);
+    }
+
+    /// How long a hostile display may take; debug builds are far slower.
+    fn patience() -> std::time::Duration {
+        std::time::Duration::from_secs(if cfg!(debug_assertions) { 60 } else { 10 })
+    }
+
+    /// Root macros V0..V9, where V9 is 2 KiB.
+    fn doubling() -> String {
+        let v: String = (1..=9)
+            .map(|i| format!("<V{i}>$(V{n})$(V{n})</V{i}>", n = i - 1))
+            .collect();
+        format!("<macros><V0>xxxx</V0>{v}</macros>")
+    }
+
+    /// Load `xml` from a file, as an untrusted display, and say how long it took.
+    fn load_hostile(name: &str, xml: &str) -> (Screen, std::time::Duration) {
+        let dir = std::env::temp_dir().join(format!("bobview-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("hostile.bob");
+        std::fs::write(&file, xml).unwrap();
+        let start = std::time::Instant::now();
+        let pvs = PvManager::new();
+        let s = Screen::load(&Source::File(file), &Macros::default(), &pvs).unwrap();
+        let took = start.elapsed();
+        std::fs::remove_dir_all(&dir).ok();
+        (s, took)
+    }
+
+    #[test]
+    fn macro_text_is_bounded_across_a_load() {
+        // Every widget has 256 macros naming the 2 KiB V9, and a PV name that
+        // does: 100 widgets would hold 50 MB if each were expanded.
+        let own: String = (0..256).map(|i| format!("<N{i}>$(V9)</N{i}>")).collect();
+        let widget = format!(
+            "<widget type='label'><pv_name>loc://$(V9)</pv_name><macros>{own}</macros></widget>"
+        );
+        let xml = format!("<display>{}{}</display>", doubling(), widget.repeat(100));
+        let (s, took) = load_hostile("macros", &xml);
+        let held: usize = s
+            .nodes
+            .iter()
+            .map(|n| n.macros.own_bytes() + n.pv_name.len())
+            .sum();
+        assert!(held < 2 * bob::MAX_LOAD_BYTES, "{held} bytes held");
+        assert!(took < patience(), "{took:?}");
+    }
+
+    #[test]
+    fn rules_and_actions_per_widget_are_capped() {
+        let rules: String = (0..5000)
+            .map(|i| format!("<rule name='r{i}' prop_id='visible'><exp bool_exp='true'><value>true</value></exp><pv_name>$(V9)u{i}</pv_name></rule>"))
+            .collect();
+        let actions: String = (0..5000)
+            .map(|i| {
+                format!(
+                    "<action type='write_pv'><pv_name>$(V9)w{i}</pv_name><value>1</value></action>"
+                )
+            })
+            .collect();
+        let xml = format!(
+            "<display>{}<widget type='label'><rules>{rules}</rules><actions>{actions}</actions></widget></display>",
+            doubling()
+        );
+        let (s, took) = load_hostile("rules", &xml);
+        assert!(s.nodes[0].rules.len() <= MAX_PER_WIDGET);
+        assert!(s.nodes[0].action_pvs.len() <= MAX_PER_WIDGET);
+        assert!(took < patience(), "{took:?}");
+    }
+
+    #[test]
+    fn deeply_nested_groups_of_macros_load_quickly() {
+        // 30 groups, each in the last and defining 256 macros that name V9.
+        let own: String = (0..256).map(|i| format!("<N{i}>$(V9)</N{i}>")).collect();
+        let mut inner = "<widget type='label'><pv_name>loc://$(N0)</pv_name></widget>".to_string();
+        for _ in 0..30 {
+            inner = format!("<widget type='group'><macros>{own}</macros>{inner}</widget>");
+        }
+        let xml = format!("<display>{}{inner}</display>", doubling());
+        let (_, took) = load_hostile("nest", &xml);
+        assert!(took < patience(), "{took:?}");
+    }
+
+    #[test]
+    fn embedding_does_not_copy_the_caller_chain() {
+        // A self-embedding display with large root macros, passing 256 more
+        // at each level: the ancestors' macros must be shared, not copied.
+        let big: String = (0..2000)
+            .map(|i| format!("<B{i}>{}</B{i}>", "b".repeat(500)))
+            .collect();
+        let own: String = (0..256)
+            .map(|i| format!("<N{i}>{}</N{i}>", "n".repeat(50)))
+            .collect();
+        let embed = format!(
+            "<widget type='embedded'><file>hostile.bob</file><macros>{own}</macros></widget>"
+        );
+        let xml = format!(
+            "<display><macros>{big}</macros>{}</display>",
+            embed.repeat(4)
+        );
+        let (_, took) = load_hostile("embed", &xml);
+        assert!(took < patience(), "{took:?}");
+    }
+
+    /// The text held by a widget's properties.
+    fn prop_bytes(e: &bob::Element) -> usize {
+        e.text.len() + e.children.iter().map(prop_bytes).sum::<usize>()
+    }
+
+    /// Text held by the widgets of `nodes` and everything below them.
+    fn held(nodes: &[Node]) -> usize {
+        nodes
+            .iter()
+            .map(|n| prop_bytes(&n.w.props) + n.w.children.len() + held(&n.children))
+            .sum()
+    }
+
+    #[test]
+    fn nested_groups_do_not_each_keep_their_subtree() {
+        // 50 groups in each other and 1 MB of text at the bottom: kept once
+        // per node would be 50 MB.
+        let mut inner = format!(
+            "<widget type='label'><text>{}</text></widget>",
+            "t".repeat(1 << 20)
+        );
+        for _ in 0..50 {
+            inner = format!("<widget type='group'><x>1</x>{inner}</widget>");
+        }
+        let d = Display::parse(&format!("<display>{inner}</display>")).unwrap();
+        let pvs = PvManager::new();
+        let s = Builder::new(&pvs).screen(d, &Macros::default(), None, 0);
+        assert!(held(&s.nodes) < 2 << 20, "{} bytes", held(&s.nodes));
+    }
+
+    #[test]
+    fn groups_nested_too_deeply_are_refused_as_they_parse() {
+        // Bounded by the XML depth cap, before any widget is built, so a
+        // screen never nests more than that within one display.
+        let mut inner = "<widget type='label'/>".to_string();
+        for _ in 0..100 {
+            inner = format!("<widget type='group'>{inner}</widget>");
+        }
+        let d = Display::parse(&format!("<display>{inner}</display>"));
+        assert!(matches!(d, Err(bob::Error::TooDeep)));
+    }
+
+    #[test]
+    fn ordinary_nested_groups_keep_their_positions() {
+        let mut inner = "<widget type='label'><x>5</x><y>7</y></widget>".to_string();
+        for _ in 0..10 {
+            inner = format!("<widget type='group'><x>10</x><y>20</y>{inner}</widget>");
+        }
+        let d = Display::parse(&format!("<display>{inner}</display>")).unwrap();
+        let pvs = PvManager::new();
+        let s = Builder::new(&pvs).screen(d, &Macros::default(), None, 0);
+        let mut n = &s.nodes[0];
+        while let Some(c) = n.children.first() {
+            n = c;
+        }
+        assert!(n.error.is_none());
+        assert_eq!(n.w.kind, "label");
+        // Each group adds its position and its 18 pixel inset.
+        assert_eq!((n.rect[0], n.rect[1]), (285.0, 387.0));
     }
 
     #[test]
@@ -1178,6 +1667,48 @@ mod tests {
         }
         let nav = &view.screen.as_ref().unwrap().nodes[0];
         assert_eq!(nav.embedded.as_ref().unwrap().display.name, "Tab");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn deep_displays_embedding_themselves_build_on_a_thread() {
+        // Groups as deep as the XML depth cap allows, embedding the file
+        // again at the bottom: built on one thread, the recursion is that
+        // depth for each of the 8 embedding levels.
+        let _builds = BUILDS.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("bobview-deep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut inner = "<widget type='embedded'><file>deep.bob</file></widget>".to_string();
+        for _ in 0..61 {
+            inner = format!("<widget type='group'>{inner}</widget>");
+        }
+        let deep = format!("<display>{inner}</display>");
+        assert!(Display::parse(&deep).is_ok(), "within the XML depth cap");
+        std::fs::write(dir.join("deep.bob"), deep).unwrap();
+        let xml = "<display><widget type='embedded'><file>deep.bob</file></widget></display>";
+        let mut d = Display::parse(xml).unwrap();
+        d.source = Some(Source::File(dir.join("main.bob")));
+        let pvs = PvManager::new();
+        let mut s = Builder::ui(&pvs).screen(d, &Macros::default(), None, 0);
+        built(&mut s.nodes[0]);
+        std::fs::remove_dir_all(&dir).ok();
+        // Down the groups and into each embedded display.
+        let (mut n, mut screens) = (&s.nodes[0], 0);
+        loop {
+            match (n.embedded.as_ref(), n.children.first()) {
+                (Some(e), _) => {
+                    screens += 1;
+                    n = &e.nodes[0];
+                }
+                (None, Some(c)) => n = c,
+                (None, None) => break,
+            }
+        }
+        assert_eq!(screens, MAX_DEPTH);
+        assert_eq!(
+            n.error.as_deref(),
+            Some("embedded displays nested too deeply")
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

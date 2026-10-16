@@ -21,11 +21,17 @@ use std::path::{Path, PathBuf};
 
 pub use element::{Element, MAX_DEPTH as MAX_XML_DEPTH, depth as xml_depth};
 pub use group_link::{GroupLink, LinkSets, group_device, group_frame};
-pub use macros::{Macros, expand};
-pub use menu_mux::{MenuMux, MuxSet};
+pub use macros::{MAX_LOAD_BYTES, Macros, expand, rearm_warning, spend, warn_spent};
+pub use menu_mux::{MAX_SETS as MAX_MUX_SETS, MenuMux, MuxSet};
 pub use model::{Action, Color, Font, FontStyle, Rule, RuleExpr, named_color};
 pub use source::Source;
 pub use trend::{databrowser_pvs, strip_tool_pvs};
+
+/// The largest display file read from disk, as for those fetched by URL.
+const MAX_FILE_SIZE: u64 = 16 << 20;
+
+/// The most XML nodes in a display, so a small file can't expand to a huge tree.
+const MAX_NODES: u32 = 1 << 20;
 
 /// A parsed `.bob` (or translated `.opi`) display.
 #[derive(Clone, Debug)]
@@ -41,6 +47,8 @@ pub struct Display {
     /// Translated from a BOY `.opi` file. BOY clipped widgets to the
     /// declared size, where Phoebus grows the display to show them.
     pub legacy: bool,
+    /// The size of the file's XML, in bytes.
+    pub size: usize,
 }
 
 /// One widget: its type, property elements and child widgets.
@@ -84,7 +92,17 @@ impl Display {
     /// display reached through a launcher's project goes by its real path.
     pub fn load(path: &Path) -> Result<Self, Error> {
         let real = project::locate(path);
-        let text = std::fs::read_to_string(&real).map_err(|e| Error::Io(path.into(), e))?;
+        use std::io::Read;
+        let io = |e| Error::Io(path.into(), e);
+        let file = std::fs::File::open(&real).map_err(io)?;
+        let mut text = String::new();
+        file.take(MAX_FILE_SIZE + 1)
+            .read_to_string(&mut text)
+            .map_err(io)?;
+        if text.len() as u64 > MAX_FILE_SIZE {
+            let why = format!("larger than {} MiB", MAX_FILE_SIZE >> 20);
+            return Err(io(std::io::Error::other(why)));
+        }
         let mut display = Self::parse(&text)?;
         // A launcher's project is for BOY screens: a `.bob` reached through
         // one names its files from where it really is.
@@ -104,7 +122,11 @@ impl Display {
         if xml_depth(xml) > MAX_XML_DEPTH {
             return Err(Error::TooDeep);
         }
-        let doc = roxmltree::Document::parse(xml).map_err(Error::Xml)?;
+        let options = roxmltree::ParsingOptions {
+            nodes_limit: MAX_NODES,
+            ..Default::default()
+        };
+        let doc = roxmltree::Document::parse_with_options(xml, options).map_err(Error::Xml)?;
         let mut root = Element::from_node(doc.root_element());
         if root.name != "display" {
             return Err(Error::NotADisplay(root.name));
@@ -130,6 +152,7 @@ impl Display {
             widgets,
             source: None,
             legacy,
+            size: xml.len(),
         })
     }
 
