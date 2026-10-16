@@ -813,9 +813,10 @@ impl Builder<'_> {
     /// and the node shows it as loading until [`Node::poll_building`] finds
     /// it built.
     pub fn embed(&self, node: &mut Node, file: &str, macros: &Macros, group: &str, depth: u32) {
+        // Embedded again once the web build has fetched it: counted already.
+        let counted = std::mem::take(&mut node.loading);
         node.embedded = None;
         node.error = None;
-        node.loading = false;
         // Dropping a build still under way discards it when it finishes.
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -831,7 +832,7 @@ impl Builder<'_> {
         // The node's budget, not this builder's, which may be a fresh one:
         // the display is part of the load that made the node.
         let this = Builder::sharing(self.pvs, node.budget.clone(), self.waits());
-        if !Budget::take(&this.budget.screens) {
+        if !counted && !Budget::take(&this.budget.screens) {
             node.error = Some("too many embedded displays".into());
             return;
         }
@@ -1174,6 +1175,33 @@ mod tests {
         assert!(pvs[3].name().to_string().starts_with("loc://t3"));
         assert_eq!(pvs[3].state().format(None, false), "b3");
         assert!(took < patience(), "{took:?}");
+    }
+
+    #[test]
+    fn a_display_embedded_again_once_fetched_is_counted_once() {
+        let dir = std::env::temp_dir().join(format!("bobview-refetch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("inner.bob"), "<display/>").unwrap();
+        let xml = "<display><widget type='embedded'><file>inner.bob</file></widget></display>";
+        std::fs::write(dir.join("main.bob"), xml).unwrap();
+        let pvs = PvManager::new();
+        let s = Screen::load(
+            &Source::File(dir.join("main.bob")),
+            &Macros::default(),
+            &pvs,
+        );
+        let mut s = s.unwrap();
+        let node = &mut s.nodes[0];
+        let before = node.budget.screens.load(Ordering::Relaxed);
+        // As the web build does once the file it was fetching arrives.
+        node.loading = true;
+        Builder::new(&pvs).embed(node, "inner.bob", &Macros::default(), "", 0);
+        assert_eq!(node.budget.screens.load(Ordering::Relaxed), before);
+        assert!(node.embedded.is_some() && !node.loading);
+        // Embedded afresh, it is counted again.
+        Builder::new(&pvs).embed(node, "inner.bob", &Macros::default(), "", 0);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(node.budget.screens.load(Ordering::Relaxed), before - 1);
     }
 
     /// How long a hostile display may take; debug builds are far slower.
