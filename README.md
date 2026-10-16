@@ -327,8 +327,31 @@ every window Ctrl+R reloads, Alt+← and Alt+→ go back and forward, and
 Ctrl+W closes the window. Closing the main window quits bobview and closes
 its windows.
 
+### Navigator
+
+🌲 on the main toolbar shows the navigator beside the main window's display:
+a tree of the displays the home display links to, the displays those link
+to, and so on. A display's links are its widgets' Open display actions,
+including those in groups, tabs and embedded displays, each display and
+macros once, named by its button's text (or, in a menu, the action's
+description). Clicking a node opens its display as a link in the main
+window would, so with the main window pinned it goes to the viewer, and
+shift and ctrl work as for a link. The displays open in a window are in
+bold. Showing or hiding the navigator widens or narrows the window by its
+width (unless the window is maximized or full screen), so the display keeps
+its size and zoom.
+
+Displays are read from their files, without connecting their PVs, as their
+nodes are shown, so the tree is read one level ahead of what is open. A
+display that links back to one above it is marked ↻ and not opened again;
+one that can't be read is marked ⚠. A command action's display (a DLS
+launcher script) is found by running its script, so only when its node is
+opened or clicked. The filter box lists the displays read so far whose name
+or file matches; ⟳ reads them all again.
+
 A layout records the open windows: each one's display, Eclipse project and
-effective macros, its position and size, whether it is pinned, the main
+effective macros, its position and size, whether it is pinned, whether the
+main window shows the navigator, the main
 window's zoom and whether a display window shows its toolbar (a layout from
 before windows were pinned pins them all if it was saved in multi-window
 mode, and none if not). It records the trend windows too: each

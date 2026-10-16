@@ -19,6 +19,7 @@ mod screen;
 mod snapshot;
 mod style;
 mod symbol;
+mod tree;
 mod trend;
 mod view;
 mod widgets;

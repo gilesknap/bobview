@@ -11,6 +11,7 @@ use crate::chrome::{self, Chrome, UiScale};
 use crate::layout::{self, Geometry, Layout, TrendLayout, WindowLayout, Zoom};
 use crate::pvmenu;
 use crate::style;
+use crate::tree::{self, Navigator};
 use crate::trend::Trend;
 use crate::view::{LaunchKey, Origin, View, ViewCx, WindowKey, window_title};
 use crate::widgets::{self, Request};
@@ -73,6 +74,12 @@ pub struct BobApp {
     save_as: Option<SaveAs>,
     home: Option<Location>,
     show_open: bool,
+    /// The tree of the displays the main window's links to, its width as
+    /// last drawn (0 when hidden), and whether its toolbar button has just
+    /// shown or hidden it.
+    tree: Navigator,
+    tree_width: f32,
+    tree_toggled: bool,
     /// Use the on-screen keypad for text entries (switched on by the first touch).
     keypad_mode: bool,
     keypad: Option<Keypad>,
@@ -362,6 +369,9 @@ impl BobApp {
             save_as: None,
             home: start.clone(),
             show_open: start.is_none(),
+            tree: Navigator::default(),
+            tree_width: 0.0,
+            tree_toggled: false,
             keypad_mode: false,
             keypad: None,
             details: None,
@@ -754,6 +764,13 @@ impl BobApp {
                     if ui.selectable_label(self.show_open, "Open…").clicked() {
                         self.show_open = !self.show_open;
                     }
+                    if ui
+                        .selectable_label(self.tree.open, "🌲 Navigator")
+                        .clicked()
+                    {
+                        self.tree.open = !self.tree.open;
+                        self.tree_toggled = true;
+                    }
                     if windows {
                         ui.separator();
                         action = layout_controls(
@@ -798,6 +815,14 @@ impl BobApp {
                 }
                 if ui.selectable_label(self.show_open, "Open…").clicked() {
                     self.show_open = !self.show_open;
+                }
+                if ui
+                    .selectable_label(self.tree.open, "🌲")
+                    .on_hover_text(NAVIGATOR_HELP)
+                    .clicked()
+                {
+                    self.tree.open = !self.tree.open;
+                    self.tree_toggled = true;
                 }
                 if windows {
                     ui.separator();
@@ -864,6 +889,7 @@ impl BobApp {
             let mut w = WindowLayout::new(loc, self.geometry);
             w.main = true;
             w.pinned = Some(self.main_pinned);
+            w.tree = self.tree.open;
             w.zoom = Some(Zoom::new(self.main.fit, self.main.zoom));
             windows.push(w);
         }
@@ -932,6 +958,7 @@ impl BobApp {
             }
             self.show_open = false;
             self.main_pinned = layout.pinned(w);
+            self.tree.open = w.tree;
             self.main.open(loc);
         }
         self.trends.clear();
@@ -1080,6 +1107,10 @@ fn can_multi_window(ctx: &egui::Context, touch: bool) -> bool {
     let small = ctx.input(|i| chrome::small_screen(i.viewport(), zoom));
     !cfg!(target_arch = "wasm32") && !ctx.embed_viewports() && !touch && !small
 }
+
+/// What the navigator shows.
+const NAVIGATOR_HELP: &str = "Navigator: a tree of the displays the home display links to, \
+     and those they link to. Click one to open it as a link would (shift and ctrl too).";
 
 /// What a window's pin does.
 const PIN_HELP: &str = "Pinned: links open their displays in the unpinned window used last, \
@@ -1299,6 +1330,14 @@ impl BobApp {
                 .height();
         }
 
+        let (side, clicked) = self.navigator(ui);
+        // Shown or hidden from the toolbar, the navigator widens or narrows
+        // the window, so the display keeps its size and zoom.
+        let grow = side - std::mem::replace(&mut self.tree_width, side);
+        if std::mem::take(&mut self.tree_toggled) && grow != 0.0 {
+            resize_by(&ctx, Vec2::new(grow, 0.0));
+        }
+
         let trends: Vec<(u64, String)> = self.trends.iter().map(|t| (t.id, t.title())).collect();
         let vcx = ViewCx {
             window: WindowKey::Main,
@@ -1314,7 +1353,11 @@ impl BobApp {
             self.chrome.display_changed();
         }
         let display = self.main.natural_size(ui.ctx().zoom_factor());
-        self.chrome.end(ui.ctx(), display);
+        self.chrome
+            .end(ui.ctx(), display.map(|d| d + Vec2::new(side, 0.0)));
+        if let Some(clicked) = clicked {
+            self.open_from_tree(&ctx, clicked);
+        }
 
         let mut requests = drawn.requests;
         requests.extend(self.display_windows(ui, &trends));
@@ -1340,6 +1383,41 @@ impl BobApp {
         );
         self.save_as_window(ui);
         self.trend_windows(ui);
+    }
+
+    /// The navigator beside the main window's display, when shown: its
+    /// width, and the node clicked. Its root is the home display.
+    fn navigator(&mut self, ui: &mut egui::Ui) -> (f32, Option<tree::Clicked>) {
+        let root = self.home.clone().or_else(|| self.main.current.clone());
+        let Some(root) = root.filter(|_| self.tree.open) else {
+            return (0.0, None);
+        };
+        let here: Vec<Location> = std::iter::once(&self.main)
+            .chain(self.windows.iter().map(|w| &w.view))
+            .filter_map(|v| v.current.clone())
+            .collect();
+        let panel = egui::Panel::left("navigator")
+            .resizable(true)
+            .default_size(220.0)
+            .show(ui, |ui| self.tree.ui(ui, &root, &here));
+        (panel.response.rect.width(), panel.inner)
+    }
+
+    /// Open what a navigator node names, as a link in the main window would.
+    fn open_from_tree(&mut self, ctx: &egui::Context, clicked: tree::Clicked) {
+        let origin = Origin {
+            window: WindowKey::Main,
+            ctrl: clicked.ctrl,
+            shift: clicked.shift,
+        };
+        match clicked.target {
+            tree::Target::Display(loc) => self.follow(ctx, origin, loc, "navigator"),
+            tree::Target::Command {
+                base,
+                directory,
+                command,
+            } => self.launch(ctx, origin, base, directory, command),
+        }
     }
 
     /// Act on a request from a widget in `origin`'s window.
@@ -1661,6 +1739,23 @@ fn geometry(ui: &egui::Ui) -> Geometry {
             size: info.inner_rect.map(|r| r.size() * zoom),
         }
     })
+}
+
+/// Make the window being drawn `by` points bigger (or smaller), within its
+/// monitor, unless it is maximized or full screen.
+fn resize_by(ctx: &egui::Context, by: Vec2) {
+    let info = ctx.input(|i| i.viewport().clone());
+    if !chrome::can_resize(&info, ctx.zoom_factor()) {
+        return;
+    }
+    let Some(inner) = info.inner_rect else {
+        return;
+    };
+    let mut size = inner.size() + by;
+    if let Some(monitor) = info.monitor_size {
+        size = size.min(monitor);
+    }
+    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
 }
 
 /// Where the window being drawn is on the desktop (see `Frame`); None where
