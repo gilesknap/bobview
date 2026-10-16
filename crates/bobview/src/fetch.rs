@@ -511,9 +511,13 @@ mod web {
         if !SAME_ORIGIN.load(Ordering::Relaxed) {
             return None;
         }
-        let page = web_sys::window()?.location().href().ok()?;
-        (!pv::same_origin(&page, url))
-            .then(|| "not loading displays from other servers while writes are on".into())
+        // A page whose address cannot be read loads nothing, as the token
+        // is withheld from a PVWS whose origin cannot be judged.
+        let page = web_sys::window().and_then(|w| w.location().href().ok());
+        match page {
+            Some(page) if pv::same_origin(&page, url) => None,
+            _ => Some("not loading displays from other servers while writes are on".into()),
+        }
     }
 
     pub(super) fn get(url: &str) -> Result<Fetched, Error> {
