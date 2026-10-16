@@ -940,9 +940,9 @@ mod tests {
         );
         assert_ne!(one, two);
         // An embedded display shares its host's id; a new one does not.
-        let host = Macros::from_pairs([("DID", "DID_7")]);
-        assert_eq!(open(&host, 1), "loc://DID_7ll");
-        assert_ne!(open(&host, 0), "loc://DID_7ll");
+        let host = Macros::from_pairs([("DID", "DID_host")]);
+        assert_eq!(open(&host, 1), "loc://DID_hostll");
+        assert_ne!(open(&host, 0), "loc://DID_hostll");
         // DID is a BOY built-in, so a .bob has none.
         let bob = "<display><widget type='led'><pv_name>loc://$(DID)x</pv_name></widget></display>";
         let s = b.screen(Display::parse(bob).unwrap(), &Macros::default(), None, 0);

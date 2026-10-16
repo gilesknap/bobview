@@ -265,6 +265,9 @@ fn parse_launcher_with(text: &str, dir: &Path, table: &Path) -> Projects {
 /// How deep `source` may nest in a launcher.
 const SOURCE_DEPTH: usize = 4;
 
+/// How deep `$(…)` commands may nest, functions calling functions.
+const CALL_DEPTH: usize = 16;
+
 /// Just enough of the shell to read a launcher without running it: plain
 /// `name=value` lines, `source FILE`, and in `$(…)` the commands `join SEP
 /// ARG…` (as `opi-versions` defines it), `configure-ioc s -p NAME` and the
@@ -355,11 +358,16 @@ impl Shell {
     /// replaced, as the shell would in double quotes; `None` when a command
     /// is not one [`Shell::command`] knows.
     fn expand(&self, text: &str) -> Option<String> {
-        self.expand_with(text, &HashMap::new())
+        self.expand_with(text, &HashMap::new(), CALL_DEPTH)
     }
 
     /// [`Shell::expand`] with the positional `args` (`$1`…) too.
-    fn expand_with(&self, text: &str, args: &HashMap<String, String>) -> Option<String> {
+    fn expand_with(
+        &self,
+        text: &str,
+        args: &HashMap<String, String>,
+        depth: usize,
+    ) -> Option<String> {
         let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
         let mut out = String::with_capacity(text.len());
         let mut rest = text;
@@ -368,7 +376,7 @@ impl Shell {
             let after = &rest[i + 1..];
             if let Some(inner) = after.strip_prefix('(') {
                 let end = closing_paren(inner)?;
-                out.push_str(self.command(&inner[..end])?.trim_end_matches('\n'));
+                out.push_str(self.command(&inner[..end], depth)?.trim_end_matches('\n'));
                 rest = &inner[end + 1..];
                 continue;
             }
@@ -395,10 +403,12 @@ impl Shell {
     }
 
     /// The output of the simple command `text`, if it is one we know.
-    fn command(&self, text: &str) -> Option<String> {
+    fn command(&self, text: &str, depth: usize) -> Option<String> {
+        // A function calling itself must end.
+        let depth = depth.checked_sub(1)?;
         let words = split_words(text)
             .into_iter()
-            .map(|w| self.expand(unquote(w)))
+            .map(|w| self.expand_with(unquote(w), &HashMap::new(), depth))
             .collect::<Option<Vec<_>>>()?;
         let (name, args) = words.split_first()?;
         match (name.as_str(), args) {
@@ -419,7 +429,7 @@ impl Shell {
                     .enumerate()
                     .map(|(i, a)| ((i + 1).to_string(), a.clone()))
                     .collect();
-                self.expand_with(unquote(echo), &args)
+                self.expand_with(unquote(echo), &args, depth)
             }
         }
     }
@@ -980,6 +990,13 @@ $CSS_RUN_SCRIPT -o "${launch_opi}" -s -l "$links" "$@"
         std::fs::write(root.join(".project"), "<projectDescription/>").unwrap();
         assert!(launcher_path(&opi.join("x.opi")).is_some());
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_function_calling_itself_ends() {
+        let text = "f()\n{\n    echo \"$(f)\"\n}\nx=$(f)\nlinks=\"/a=/p/n\"\n";
+        let projects = parse_launcher_with(text, Path::new("/nowhere"), Path::new("/no/table"));
+        assert_eq!(projects.len(), 1);
     }
 
     #[test]

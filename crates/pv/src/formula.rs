@@ -13,7 +13,8 @@
 //! There is no task: the formula is evaluated again whenever a PV it reads
 //! changes, from the thread that changed it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 use parking_lot::Mutex;
@@ -372,9 +373,10 @@ fn bool_val(b: bool) -> Val {
 
 /// One evaluation over the latest states of the PVs read.
 struct Eval<'a> {
+    /// By [`PvName::key`], so every spelling of a PV reads one state.
     states: &'a HashMap<String, PvState>,
-    /// Every PV the formula reads now.
-    wanted: Vec<String>,
+    /// Every PV the formula reads now: its key, and its name as written.
+    wanted: Vec<(String, String)>,
     severity: Severity,
     timestamp: Option<web_time::SystemTime>,
 }
@@ -384,11 +386,12 @@ struct Missing;
 
 impl Eval<'_> {
     fn read(&mut self, name: String) -> Result<Val, Missing> {
+        let key = PvName::parse(&name).key();
         let state = self
             .states
-            .get(&name)
+            .get(&key)
             .filter(|s| s.connected && s.value != Value::None);
-        self.wanted.push(name);
+        self.wanted.push((key, name));
         let state = state.ok_or(Missing)?;
         self.severity = self.severity.max(state.severity);
         self.timestamp = self.timestamp.max(state.timestamp);
@@ -463,6 +466,9 @@ fn binary(op: Op, a: Val, b: Val) -> Val {
     }
 }
 
+/// A PV a formula reads, with the listener feeding its state to the formula.
+type Input = (Pv, Listener);
+
 /// A formula PV: its inputs, and the state its value is written to.
 pub(crate) struct Formula {
     /// `None` when the text does not parse.
@@ -472,10 +478,18 @@ pub(crate) struct Formula {
     /// manager alive.
     manager: Weak<Inner>,
     me: Weak<Formula>,
-    /// The latest state of each input, by its name in the formula.
+    /// The formula's own key, which it must not read: listening to itself
+    /// would deadlock.
+    key: String,
+    /// The latest state of each input, by its key.
     states: Mutex<HashMap<String, PvState>>,
-    /// The inputs, with the listener feeding `states` from each.
-    inputs: Mutex<HashMap<String, (Pv, Listener)>>,
+    /// The inputs by key, with the listener feeding `states` from each.
+    inputs: Mutex<HashMap<String, Input>>,
+    /// The number of the latest evaluation, and of the one whose inputs
+    /// were last followed: one that finishes late on another thread must
+    /// not follow the PVs an older name named.
+    evaluated: AtomicU64,
+    followed: AtomicU64,
 }
 
 impl Formula {
@@ -493,8 +507,11 @@ impl Formula {
             shared,
             manager,
             me: me.clone(),
+            key: name.key(),
             states: Mutex::new(HashMap::new()),
             inputs: Mutex::new(HashMap::new()),
+            evaluated: AtomicU64::new(0),
+            followed: AtomicU64::new(0),
         })
     }
 
@@ -507,9 +524,10 @@ impl Formula {
     /// Evaluate again, publish the result, and follow the PVs it now reads.
     fn refresh(&self) {
         let Some(expr) = &self.expr else { return };
-        let wanted = {
+        let (wanted, number) = {
             // Held while publishing, so results go out in order.
             let states = self.states.lock();
+            let number = self.evaluated.fetch_add(1, Ordering::Relaxed) + 1;
             let mut ev = Eval {
                 states: &states,
                 wanted: Vec::new(),
@@ -542,53 +560,70 @@ impl Formula {
                 }
                 Err(Missing) => s.connected = false,
             });
-            ev.wanted
+            (ev.wanted, number)
         };
-        self.follow(wanted);
+        self.follow(wanted, number);
     }
 
     /// Subscribe to the PVs in `wanted` not yet subscribed, and drop those
     /// no longer read (when a computed name changes). No lock is held while
     /// subscribing: a new input's listener runs at once, and refreshes.
-    fn follow(&self, wanted: Vec<String>) {
-        let wanted: HashSet<String> = wanted.into_iter().collect();
-        let (new, old): (Vec<String>, Vec<(Pv, Listener)>) = {
+    fn follow(&self, wanted: Vec<(String, String)>, number: u64) {
+        // Keyed, so two spellings of one PV are one input: listening to a
+        // PV again from its own listener would deadlock on its state.
+        let mut names: HashMap<String, String> = HashMap::new();
+        for (key, name) in wanted {
+            if key == self.key {
+                log::warn!("{}: a formula cannot read itself", self.key);
+            } else {
+                names.entry(key).or_insert(name);
+            }
+        }
+        let (new, old): (Vec<(String, String)>, Vec<Input>) = {
             let mut inputs = self.inputs.lock();
-            let new = wanted
+            // Not if a later evaluation has followed its own PVs already.
+            if self.followed.fetch_max(number, Ordering::Relaxed) > number {
+                return;
+            }
+            let new = names
                 .iter()
-                .filter(|n| !inputs.contains_key(*n))
-                .cloned()
+                .filter(|(k, _)| !inputs.contains_key(*k))
+                .map(|(k, n)| (k.clone(), n.clone()))
                 .collect();
             let gone: Vec<String> = inputs
                 .keys()
-                .filter(|n| !wanted.contains(*n))
+                .filter(|k| !names.contains_key(*k))
                 .cloned()
                 .collect();
-            let old = gone.iter().filter_map(|n| inputs.remove(n)).collect();
+            let old = gone.iter().filter_map(|k| inputs.remove(k)).collect();
             (new, old)
         };
         if !old.is_empty() {
             let mut states = self.states.lock();
-            states.retain(|n, _| wanted.contains(n));
+            states.retain(|k, _| names.contains_key(k));
         }
         drop(old);
         let Some(inner) = self.manager.upgrade() else {
             return;
         };
         let manager = PvManager { inner };
-        for name in new {
+        for (key, name) in new {
+            // A later evaluation may have moved on while we subscribed.
+            if self.followed.load(Ordering::Relaxed) > number {
+                return;
+            }
             let pv = manager.subscribe(&name);
             let me = self.me.clone();
-            let key = name.clone();
+            let state_key = key.clone();
             let listener: Listener = Arc::new(move |state: &PvState| {
                 if let Some(me) = me.upgrade() {
-                    me.states.lock().insert(key.clone(), state.clone());
+                    me.states.lock().insert(state_key.clone(), state.clone());
                     me.refresh();
                 }
             });
             self.inputs
                 .lock()
-                .insert(name, (pv.clone(), listener.clone()));
+                .insert(key, (pv.clone(), listener.clone()));
             pv.listen(&listener);
         }
     }
@@ -607,7 +642,7 @@ mod tests {
                     value: v.clone(),
                     ..PvState::default()
                 };
-                (n.to_string(), s)
+                (PvName::parse(n).key(), s)
             })
             .collect();
         let mut ev = Eval {
@@ -617,7 +652,7 @@ mod tests {
             timestamp: None,
         };
         let v = ev.eval(&parse(text).unwrap()).ok();
-        (v, ev.wanted)
+        (v, ev.wanted.into_iter().map(|(_, name)| name).collect())
     }
 
     fn num(text: &str) -> f64 {
@@ -710,6 +745,20 @@ mod tests {
         };
         let inputs = formula.inputs.lock();
         assert!(inputs.contains_key("loc://fsw_b") && !inputs.contains_key("loc://fsw_a"));
+    }
+
+    #[test]
+    fn a_formula_reads_two_spellings_of_a_pv_as_one() {
+        // Each spelling once deadlocked, listening to the PV from its own
+        // listener.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let pvs = PvManager::new();
+            let f = pvs.subscribe("='loc://fsp(1)' + 'loc://fsp' + pv(\" loc://fsp\")");
+            let _ = tx.send(f.state().value);
+        });
+        let value = rx.recv_timeout(std::time::Duration::from_secs(5));
+        assert_eq!(value, Ok(Value::Double(3.0)));
     }
 
     #[test]
