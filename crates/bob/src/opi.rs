@@ -670,9 +670,12 @@ fn widget(mut el: Element) -> Vec<Element> {
 /// A scaled slider or knob. BOY's `show_markers` (true unless given)
 /// hides all four level markers, which Phoebus shows by their own
 /// `show_*` alone, and its major ticks are 50 pixels apart unless given,
-/// not Phoebus' 40.
+/// not Phoebus' 40. BOY's scale ran an inverted range backwards and
+/// widened an empty one by one, where Phoebus falls back to 0 to 100: the
+/// bobview-only `<boy_range>` keeps BOY's.
 fn scaled_slider(el: &mut Element, short: &str) {
     default(el, "major_tick_step_hint", "50");
+    set(el, "boy_range", true);
     if short == "scaledslider" {
         // BOY's slider fills its box with its background colour; Phoebus'
         // is transparent unless told otherwise.
@@ -2665,6 +2668,7 @@ widget.setPropertyValue("opi_file", pv0 + ".opi");"#,
         assert_eq!(w.bool("show_high"), Some(false));
         assert_eq!(w.get("show_lolo"), None);
         assert_eq!(w.f64("major_tick_step_hint"), Some(50.0));
+        assert_eq!(w.bool("boy_range"), Some(true));
         let hint = one(
             "scaledslider",
             "<major_tick_step_hint>20</major_tick_step_hint>",

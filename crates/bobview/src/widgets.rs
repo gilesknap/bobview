@@ -1952,6 +1952,22 @@ fn slider_layout(
     }
 }
 
+/// The range a slider runs over, from its `minimum` and `maximum` or its
+/// PV's: as Phoebus, 0 to 100 for one that is empty or inverted. A BOY
+/// slider (the bobview-only `<boy_range>` from the `.opi` import) keeps
+/// an inverted range, running from the maximum, and widens an empty one
+/// to the minimum plus one, as BOY's scale did.
+fn slider_range(w: &Widget, (min, max): (f64, f64)) -> (f64, f64) {
+    if w.bool("boy_range") == Some(true) {
+        return if min == max {
+            (min, min + 1.0)
+        } else {
+            (min, max)
+        };
+    }
+    if min < max { (min, max) } else { (0.0, 100.0) }
+}
+
 /// A scaled slider's alarm level markers, as Phoebus': each of LOLO, LOW,
 /// HIGH and HIHI there is a level for, unless its `show_*` is false. The
 /// levels are the PV's with `limits_from_pv`, else the widget's `level_*`
@@ -1981,8 +1997,8 @@ fn slider_markers(w: &Widget, s: Option<&PvState>) -> Vec<(f64, &'static str)> {
 /// thumb at the value, and for a scaled slider with `show_scale` labelled
 /// ticks on one side and its alarm level markers on the other, as
 /// Phoebus' JavaFX Slider; no value box. A click or drag moves the thumb,
-/// and its value is written when the button is let go. An empty range (`maximum` equal to `minimum`) leaves the thumb at
-/// the start and writes nothing.
+/// and its value is written when the button is let go, over the range
+/// [`slider_range`] gives.
 fn slider(
     ui: &mut Ui,
     node: &mut Node,
@@ -1996,7 +2012,8 @@ fn slider(
     }
     let w = node.w.clone();
     let z = cx.view.zoom;
-    let (min, max) = crate::meter::limits(&w, s);
+    let (min, max) = slider_range(&w, crate::meter::limits(&w, s));
+    // Only a range too large to widen is still empty.
     let live = min != max;
     let horizontal = w.bool("horizontal").unwrap_or(true);
     let show_scale = w.kind == "scaledslider" && w.bool("show_scale").unwrap_or(true) && live;
@@ -3328,5 +3345,21 @@ pv.setValue(pv_value);
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn slider_ranges_fall_back_as_phoebus_or_boy() {
+        let slider = |props: &str| {
+            let xml = format!(r#"<display><widget type="scaledslider">{props}</widget></display>"#);
+            bob::Display::parse(&xml).unwrap().widgets.remove(0)
+        };
+        let bob = slider("");
+        assert_eq!(slider_range(&bob, (-5.0, 5.0)), (-5.0, 5.0));
+        assert_eq!(slider_range(&bob, (3.0, 3.0)), (0.0, 100.0));
+        assert_eq!(slider_range(&bob, (10.0, 1.0)), (0.0, 100.0));
+        let boy = slider("<boy_range>true</boy_range>");
+        assert_eq!(slider_range(&boy, (-5.0, 5.0)), (-5.0, 5.0));
+        assert_eq!(slider_range(&boy, (3.0, 3.0)), (3.0, 4.0));
+        assert_eq!(slider_range(&boy, (10.0, 1.0)), (10.0, 1.0));
     }
 }
