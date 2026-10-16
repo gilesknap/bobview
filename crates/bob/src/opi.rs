@@ -5,8 +5,9 @@
 //! properties are renamed and converted as Phoebus's own legacy import does
 //! it (in its widgets' `CustomConfigurator`s), so nothing downstream needs to
 //! know where a display came from. Scripts are not translated, except the
-//! DLS `get_pv_name.py` widget script (see [`crate::group_link`]); script
-//! actions stay as unsupported actions unless [`action`] recognises them.
+//! DLS `get_pv_name.py` widget script (see [`crate::group_link`]) and the
+//! scripts that choose a linking container's display (see
+//! [`crate::opi_file_script`]); script actions stay as unsupported actions unless [`action`] recognises them.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -418,11 +419,22 @@ fn widget(mut el: Element) -> Vec<Element> {
     el.children = props;
     // Read before the scripts and widget type are dropped as noise.
     let group_link = crate::group_link::from_opi(&el);
-    // Kept for `has_scripts` unless bobview runs them as a group link.
+    let opi_file = (short == "linkingContainer")
+        .then(|| crate::opi_file_script::from_opi(&el))
+        .flatten();
+    // Kept for `has_scripts` unless bobview runs them as a group link, or
+    // knows the display they choose.
     let scripts = el
         .child("scripts")
-        .filter(|s| group_link.is_none() && !s.children.is_empty())
+        .filter(|s| group_link.is_none() && opi_file.is_none() && !s.children.is_empty())
         .cloned();
+    if let Some((file, macros)) = opi_file {
+        el.set_child(Element::with_text("opi_file", file));
+        // The script's macros replace the container's own.
+        if let Some(macros) = macros {
+            el.set_child(macros);
+        }
+    }
     remove(&mut el, NOISE);
     el.children.extend(group_link);
     el.children.extend(scripts);
@@ -1926,6 +1938,49 @@ ScriptUtil.executeEclipseCommand(command_id, ['pvnames', '$(dom)-VA-GAUGE-01:PLO
             ("action_button", Some("Spaces"))
         );
         assert_eq!(w.actions().len(), 2);
+    }
+
+    #[test]
+    fn linking_container_scripts_choose_the_display() {
+        let script = |text: &str, pv: &str| {
+            format!(
+                r#"<macros><include_parent_macros>true</include_parent_macros><a>1</a></macros>
+                <scripts><path pathString="EmbeddedJs" checkConnect="true"><scriptName>OPIFileScript</scriptName>
+                <scriptText><![CDATA[{text}]]></scriptText><pv trig="true">{pv}</pv></path></scripts>"#
+            )
+        };
+        // The EDM converter's script, at its PV's initial value.
+        let w = one(
+            "linkingContainer",
+            &script(
+                r#"var pv0 = PVUtil.getLong(pvs[0]);
+if(pv0==0){
+var macroInput = DataUtil.createMacrosInput(true);
+macroInput.put("device", "LI-DI-YAG-01");
+widget.setPropertyValue("macros", macroInput);
+widget.setPropertyValue("opi_file","../xbpm/xbpmsi.opi");
+}"#,
+                "loc://menu0&lt;VDouble&gt;(0)",
+            ),
+        );
+        assert_eq!(w.text("file"), Some("../xbpm/xbpmsi.opi"));
+        assert_eq!(
+            (w.macros().get("device"), w.macros().get("a")),
+            (Some("LI-DI-YAG-01"), None)
+        );
+        assert!(!w.has_scripts());
+        // A file named by a macro, through the PV.
+        let w = one(
+            "linkingContainer",
+            &script(
+                r#"var pv0 = PVUtil.getString(pvs[0]);
+widget.setPropertyValue("opi_file", pv0 + ".opi");"#,
+                r#"loc://$(DID)dummy&lt;VString&gt;("$(control)")"#,
+            ),
+        );
+        assert_eq!(w.text("file"), Some("$(control).opi"));
+        assert_eq!(w.macros().get("a"), Some("1"));
+        assert!(!w.has_scripts());
     }
 
     #[test]

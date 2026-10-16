@@ -12,6 +12,7 @@ mod macros;
 mod menu_mux;
 mod model;
 mod opi;
+mod opi_file_script;
 pub mod project;
 mod source;
 mod trend;
