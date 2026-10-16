@@ -129,7 +129,7 @@ for confirmation before it writes; displays from local files write at once.
 
 | widgets | notes |
 | --- | --- |
-| label, textupdate, textentry | formats: default, exponential, hex, binary, string; units, precision |
+| label, textupdate, textentry | formats: default, decimal, exponential, engineering, hex, compact, string, sexagesimal (also HMS and DMS), binary, significant; units, precision; typed text is parsed as Phoebus does (units dropped, `0x`/`0b` numbers, enum labels) |
 | led, multi_state_led, byte_monitor | |
 | action_button, bool_button, choice, radio, combo, checkbox | open display and write PV actions |
 | scaledslider, scrollbar, spinner | |
@@ -146,7 +146,10 @@ for confirmation before it writes; displays from local files write at once.
 Also: macros (`$(X)`, `${X}`, defaults, widget properties such as
 `$(pv_name)`, and `$(actions)` in a tooltip), rules (expressions over `pv0`, `pvStr0`, `pvSev0`,
 `pvLegacySev0` … with arithmetic, bitwise and logical operators, that set any
-property, or one item of a list such as `symbols[0]`; output expression rules),
+property, or one item of a list such as `symbols[0]`, including the position,
+size and PV; output expression rules; macros expanded; operators bind as in
+Phoebus's Jython, or BOY's JavaScript for an `.opi`), macros fall back to
+environment variables in displays opened from files,
 `border_width`/`border_color` borders, label and text update `rotation_step`,
 alarm borders and dashed borders for disconnected PVs, back and
 forward navigation, `loc://` and `sim://` PVs. The display name, with macros
@@ -156,7 +159,8 @@ Unsupported widgets, such as table, webbrowser, array, fileselector and
 byte-array, are drawn as a grey placeholder labelled with the widget type
 and PV name.
 
-Not yet: compressed (codec) images, image axes, ROIs and cursor PVs, the XY plot
+Not yet: formula PVs (`=…`, `eq://`), `sys://` and other PV types (shown
+as disconnected), PV Access field paths (`pva://name/field`), compressed (codec) images, image axes, ROIs and cursor PVs, the XY plot
 `markers`, error bars and toolbar, the strip chart's toolbar and second y axes, GIF and JPEG
 images (symbols and pictures show their fallback or a placeholder), text inside
 SVG images, and scripts: an `execute` action logs that it is not supported,
