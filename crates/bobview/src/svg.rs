@@ -152,16 +152,6 @@ const HREF_ELEMENTS: &[&str] = &[
     "filter",
 ];
 
-/// Properties holding references that an element's descendants inherit.
-const INHERITED: &[&str] = &[
-    "fill",
-    "stroke",
-    "marker",
-    "marker-start",
-    "marker-mid",
-    "marker-end",
-];
-
 /// Elements that a reference uses, but whose content is never drawn, so
 /// inherits nothing: a gradient names its stops and a filter its
 /// primitives (and a filter image what it draws by its own reference).
