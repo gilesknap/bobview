@@ -1,5 +1,6 @@
 //! The application window: navigation bar, display area and status line.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,9 +11,11 @@ use eframe::egui::{self, Id, Pos2, Rect, Vec2};
 use pv::PvManager;
 
 use crate::chrome::{self, Chrome, UiScale};
+use crate::icons::{self, Icon};
 use crate::layout::{self, Geometry, Layout, TrendLayout, WindowLayout, Zoom};
 use crate::pvmenu;
 use crate::style;
+use crate::tree::{self, Navigator};
 use crate::trend::Trend;
 use crate::view::{LaunchKey, Origin, View, ViewCx, WindowKey, window_title};
 use crate::widgets::{self, Request};
@@ -26,7 +29,7 @@ pub struct Location {
 impl Location {
     /// The same display with the same effective macros, however they were
     /// layered (later definitions win).
-    fn same_display(&self, other: &Location) -> bool {
+    pub(crate) fn same_display(&self, other: &Location) -> bool {
         fn effective(m: &Macros) -> std::collections::BTreeMap<&str, &str> {
             m.iter().collect()
         }
@@ -73,18 +76,30 @@ pub struct BobApp {
     monitors_at: Option<f64>,
     /// Where the main window is on the desktop, to open windows beside it.
     main_frame: Option<Frame>,
+    /// The main window's place and size from a layout, and when (input
+    /// time) the wait for them began, until it has them or `RESTORE_WAIT`
+    /// has passed: a window manager that sized it before moving it may have
+    /// cut it to the monitor it was on.
+    restoring: Option<(Geometry, Option<f64>)>,
     settings: layout::Settings,
     /// The Save as… dialog, when open.
     save_as: Option<SaveAs>,
     home: Option<Location>,
     show_open: bool,
-    /// Use the on-screen keypad for text entries (switched on by the first touch).
-    keypad_mode: bool,
-    keypad: Option<Keypad>,
+    /// The tree of the displays the main window's links to, its width as
+    /// last drawn (0 when hidden), and whether its toolbar button has just
+    /// shown or hidden it.
+    tree: Navigator,
+    tree_width: f32,
+    tree_toggled: bool,
+    /// Touch mode: finger-sized controls and no windows of their own
+    /// (switched on by the first touch).
+    touch: bool,
     /// The PV details dialog, and the window it was asked for in.
     details: Option<(WindowKey, pvmenu::Details)>,
-    /// A write from a display from the web, waiting for the user's say-so.
-    confirm: Option<Confirm>,
+    /// Writes from a display from the web, waiting for the user's say-so,
+    /// asked about one at a time (see [`MAX_CONFIRMS`]).
+    confirm: VecDeque<Confirm>,
     /// The saved layouts, for the toolbar's menus.
     layouts: LayoutList,
     /// Open trend windows, and the id the next one gets.
@@ -111,14 +126,15 @@ struct Confirm {
     window: WindowKey,
     pv: pv::Pv,
     value: String,
+    /// Whether Cancel has been given the focus, which happens once, as the
+    /// dialog first shows this write.
+    focused: bool,
 }
 
-struct Keypad {
-    /// The window it was asked for in, which it is drawn in.
-    window: WindowKey,
-    pv: pv::Pv,
-    text: String,
-}
+/// Writes that may wait for confirmation at once. One click can ask for
+/// several (an action list run together), but a display must not be able
+/// to pile up writes behind the dialog; more are refused.
+const MAX_CONFIRMS: usize = 16;
 
 /// The saved layouts' names, read when a menu listing them opens and after
 /// a save or delete, not on every frame it is open.
@@ -308,7 +324,8 @@ enum Route {
 /// Where a link from `origin` goes, whatever its target, since most links
 /// are `replace`. Ctrl+click navigates in place, as every link does where
 /// displays have no `windows` of their own. Otherwise a display already
-/// open with the same macros is raised (`showing`); shift+click opens a new
+/// open with the same macros is raised (`showing`), or shown again in place
+/// when that is the link's own window; shift+click opens a new
 /// window; a link in an unpinned window navigates in place, and one in a
 /// `pinned` window opens in the `viewer`, or a new window when every window
 /// is pinned.
@@ -323,6 +340,8 @@ fn route(
         return Route::InPlace;
     }
     match (showing, viewer) {
+        // Shown again, with fresh PVs, as a Refresh button wants.
+        (Some(window), _) if window == origin.window => Route::InPlace,
         (Some(window), _) => Route::Raise(window),
         _ if origin.shift => Route::NewWindow,
         _ if !pinned => Route::InPlace,
@@ -378,14 +397,17 @@ impl BobApp {
             monitors: Vec::new(),
             monitors_at: None,
             main_frame: None,
+            restoring: None,
             settings: layout::Settings::load(),
             save_as: None,
             home: start.clone(),
             show_open: start.is_none(),
-            keypad_mode: false,
-            keypad: None,
+            tree: Navigator::default(),
+            tree_width: 0.0,
+            tree_toggled: false,
+            touch: false,
             details: None,
-            confirm: None,
+            confirm: VecDeque::new(),
             layouts: LayoutList::default(),
             trends: Vec::new(),
             next_trend: 0,
@@ -405,10 +427,6 @@ impl BobApp {
     )]
     pub fn set_read_only(&mut self, on: bool) {
         self.pvs.set_read_only(on);
-    }
-
-    pub fn set_keypad(&mut self, on: bool) {
-        self.keypad_mode = on;
     }
 
     /// Restore `layout` (saved as `name`) once the window is up.
@@ -495,15 +513,15 @@ impl BobApp {
             .map(|(window, _)| window)
     }
 
-    /// The window showing `loc` (the same display and macros), if any.
+    /// The window showing `loc` (the same display and macros, see
+    /// `View::shows`), if any.
     fn showing(&self, loc: &Location) -> Option<WindowKey> {
-        let same = |cur: Option<&Location>| cur.is_some_and(|c| c.same_display(loc));
-        if same(self.main.current.as_ref()) {
+        if self.main.shows(loc) {
             return Some(WindowKey::Main);
         }
         self.windows
             .iter()
-            .find(|w| !w.close && same(w.view.current.as_ref()))
+            .find(|w| !w.close && w.view.shows(loc))
             .map(|w| WindowKey::Child(w.id))
     }
 
@@ -511,8 +529,23 @@ impl BobApp {
     /// viewer or in a window of its own (see `route`).
     fn follow(&mut self, ctx: &egui::Context, origin: Origin, loc: Location, target: &str) {
         let pinned = self.pinned(origin.window);
-        let (showing, viewer) = (self.showing(&loc), self.viewer());
+        // The link's own window first: another may show the display too.
+        let own = self.view_mut(origin.window).is_some_and(|v| v.shows(&loc));
+        let showing = if own {
+            Some(origin.window)
+        } else {
+            self.showing(&loc)
+        };
+        let viewer = self.viewer();
         match route(self.can_windows, origin, pinned, showing, viewer) {
+            // The display it shows: read again, as a Refresh button wants,
+            // without adding to Back.
+            Route::InPlace if own => {
+                log::info!("reload {} ({target})", loc.source);
+                if let Some(view) = self.view_mut(origin.window) {
+                    view.reload();
+                }
+            }
             Route::InPlace => {
                 log::info!("open {} ({target})", loc.source);
                 if let Some(view) = self.view_mut(origin.window) {
@@ -639,7 +672,9 @@ impl BobApp {
     /// worked out.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn is_loading(&self) -> bool {
-        self.main.is_loading() || self.windows.iter().any(|w| w.view.is_loading())
+        self.main.is_loading()
+            || self.windows.iter().any(|w| w.view.is_loading())
+            || crate::screen::building()
     }
 
     /// Run a command action on a thread, so a slow launcher script or file
@@ -723,129 +758,203 @@ impl BobApp {
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
-        // One row whatever the width, so a window sized to the display shows it
-        // near 100%; the display name is elided when there is no room. A narrow
-        // window (a phone) keeps the navigation and Fit, and moves the rest
-        // into a menu.
+        // One row whatever the width, so a window sized to the display shows
+        // it near 100%: navigation, zoom and the panels on the left, the
+        // display's name in the middle (elided when there is no room), the
+        // window's pin, layouts and a menu of the rest on the right. A narrow
+        // window (a phone) keeps Back, Home, the zoom and Fit, and moves the
+        // rest into the menu.
         let compact = ui.available_width() < chrome::FULL_TOOLBAR_WIDTH;
         let windows = self.can_windows;
         let was_pinned = self.main_pinned;
         let mut action = None;
-        let view = &mut self.main;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().button_padding = Vec2::new(10.0, 6.0);
-            let back = ui
-                .add_enabled(!view.back.is_empty(), egui::Button::new("◀"))
-                .on_hover_text("Back");
-            self.chrome.button = back.rect.height();
-            if back.clicked() {
-                view.go_back();
-            }
-            if ui
-                .add_enabled(!view.forward.is_empty(), egui::Button::new("▶"))
-                .on_hover_text("Forward")
-                .clicked()
-            {
-                view.go_forward();
-            }
-            if ui
-                .add_enabled(self.home.is_some(), egui::Button::new("⌂"))
-                .on_hover_text("Home")
-                .clicked()
-                && let Some(home) = self.home.clone()
-            {
-                view.open(home);
-            }
-            if compact {
-                ui.separator();
-                if ui.selectable_label(view.fit, "Fit").clicked() {
+        let mut actual_size = false;
+        let mut all_windows = None;
+        let others = !self.windows.is_empty() || !self.trends.is_empty();
+        ui.spacing_mut().button_padding = Vec2::new(10.0, 6.0);
+        ui.spacing_mut().item_spacing.x = 8.0;
+        // Every item is as tall as a framed group (single buttons in an
+        // invisible frame), all along the top of the row, so they line up.
+        let button = icons::height(ui);
+        ui.spacing_mut().interact_size.y = button;
+        let row = Vec2::new(ui.available_width(), icons::group_height(ui));
+        let along = egui::Layout::left_to_right(egui::Align::Min);
+        ui.allocate_ui_with_layout(row, along, |ui| {
+            let view = &mut self.main;
+            icons::group(ui, true, |ui| {
+                let back = icons::button(ui, Icon::Back, false, !view.back.is_empty())
+                    .on_hover_text("Back (Alt+←)");
+                self.chrome.button = back.rect.height();
+                if back.clicked() {
+                    view.go_back();
+                }
+                if !compact
+                    && icons::button(ui, Icon::Forward, false, !view.forward.is_empty())
+                        .on_hover_text("Forward (Alt+→)")
+                        .clicked()
+                {
+                    view.go_forward();
+                }
+                if icons::button(ui, Icon::Home, false, self.home.is_some())
+                    .on_hover_text("Home")
+                    .clicked()
+                    && let Some(home) = self.home.clone()
+                {
+                    view.open(home);
+                }
+                if !compact
+                    && icons::button(ui, Icon::Reload, false, true)
+                        .on_hover_text("Reload (Ctrl+R)")
+                        .clicked()
+                {
+                    view.reload();
+                }
+            });
+            icons::group(ui, true, |ui| {
+                if !compact
+                    && icons::button(ui, Icon::ZoomOut, false, true)
+                        .on_hover_text("Zoom out")
+                        .clicked()
+                {
+                    view.zoom_by(1.0 / 1.25);
+                }
+                let readout = egui::Button::new(format!("{:.0}%", view.zoom * 100.0))
+                    .min_size(Vec2::new(56.0, button));
+                actual_size = ui
+                    .add(readout)
+                    .on_hover_text("Actual size: 100%, and the window sized to fit the display")
+                    .clicked();
+                if !compact
+                    && icons::button(ui, Icon::ZoomIn, false, true)
+                        .on_hover_text("Zoom in")
+                        .clicked()
+                {
+                    view.zoom_by(1.25);
+                }
+                if ui
+                    .add(egui::Button::selectable(view.fit, "Fit").min_size(Vec2::new(0.0, button)))
+                    .on_hover_text("Fit the display to the window")
+                    .clicked()
+                {
                     view.fit = !view.fit;
                 }
-                ui.label(format!("{:.0}%", view.zoom * 100.0));
-                ui.menu_button("☰", |ui| {
-                    if ui.button("⟳ Reload").clicked() {
-                        view.reload();
-                    }
-                    if ui.button("+ Zoom in").clicked() {
-                        view.zoom_by(1.25);
-                    }
-                    if ui.button("− Zoom out").clicked() {
-                        view.zoom_by(1.0 / 1.25);
-                    }
-                    if ui
-                        .selectable_label(self.chrome.auto_size, "🗖 Auto-size window")
+            });
+            if !compact {
+                icons::group(ui, false, |ui| {
+                    if icons::button(ui, Icon::Navigator, self.tree.open, true)
+                        .on_hover_text(NAVIGATOR_HELP)
                         .clicked()
+                    {
+                        self.tree.open = !self.tree.open;
+                        self.tree_toggled = true;
+                    }
+                    if icons::button(ui, Icon::Open, self.show_open, true)
+                        .on_hover_text("Open a display file")
+                        .clicked()
+                    {
+                        self.show_open = !self.show_open;
+                    }
+                });
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                let menu = icons::group(ui, false, |ui| icons::button(ui, Icon::Menu, false, true))
+                    .on_hover_text("More");
+                egui::Popup::menu(&menu).show(|ui| {
+                    if compact {
+                        if ui
+                            .add_enabled(!view.forward.is_empty(), egui::Button::new("Forward"))
+                            .clicked()
+                        {
+                            view.go_forward();
+                        }
+                        if ui.button("Reload").clicked() {
+                            view.reload();
+                        }
+                        if ui.button("Zoom in").clicked() {
+                            view.zoom_by(1.25);
+                        }
+                        if ui.button("Zoom out").clicked() {
+                            view.zoom_by(1.0 / 1.25);
+                        }
+                        ui.separator();
+                        if ui.checkbox(&mut self.tree.open, "Navigator").changed() {
+                            self.tree_toggled = true;
+                        }
+                        ui.checkbox(&mut self.show_open, "Open…");
+                    }
+                    let mut auto_size = self.chrome.auto_size;
+                    if ui
+                        .checkbox(&mut auto_size, "Auto-size window")
+                        .on_hover_text("Resize the window to fit each display opened")
+                        .changed()
                     {
                         toggle_auto_size(&mut self.chrome);
                     }
-                    if ui.selectable_label(self.keypad_mode, "⌨ Keypad").clicked() {
-                        self.keypad_mode = !self.keypad_mode;
-                    }
-                    if ui.selectable_label(self.show_open, "Open…").clicked() {
-                        self.show_open = !self.show_open;
-                    }
+                    ui.separator();
+                    all_windows = window_items(ui, others);
                     if windows {
                         ui.separator();
-                        action = layout_controls(
+                        if compact {
+                            ui.checkbox(&mut self.main_pinned, "Pinned")
+                                .on_hover_text(PIN_HELP);
+                            ui.menu_button("Load layout", |ui| {
+                                action =
+                                    layout_list(ui, self.layout_name.as_deref(), &mut self.layouts);
+                            });
+                        }
+                        action = layout_menu(
                             ui,
-                            &mut self.main_pinned,
                             self.layout_name.as_deref(),
                             &mut self.settings,
                             &mut self.layouts,
-                            true,
-                        );
+                        )
+                        .or(action.take());
                     }
                 });
-            } else {
-                if ui.button("⟳").on_hover_text("Reload").clicked() {
-                    view.reload();
+                if windows && !compact {
+                    icons::group(ui, false, |ui| {
+                        egui::ComboBox::from_id_salt("layout")
+                            .selected_text(self.layout_name.as_deref().unwrap_or("Layout"))
+                            .show_ui(ui, |ui| {
+                                action =
+                                    layout_list(ui, self.layout_name.as_deref(), &mut self.layouts);
+                            })
+                            .response
+                            .on_hover_text("Load a saved layout");
+                    });
+                    let pin = icons::group(ui, false, |ui| {
+                        icons::button(ui, Icon::Pin, self.main_pinned, true)
+                    });
+                    if pin.on_hover_text(PIN_HELP).clicked() {
+                        self.main_pinned = !self.main_pinned;
+                    }
                 }
-                ui.separator();
-                if ui.button("−").clicked() {
-                    view.zoom_by(1.0 / 1.25);
+                if let Some(s) = &view.screen {
+                    // The rest of the row, the name centred in it.
+                    let rest = Vec2::new(ui.available_width(), icons::group_height(ui));
+                    let centred =
+                        egui::Layout::centered_and_justified(egui::Direction::LeftToRight);
+                    ui.allocate_ui_with_layout(rest, centred, |ui| {
+                        ui.add(egui::Label::new(egui::RichText::new(&s.title).strong()).truncate())
+                            .on_hover_text(&s.title);
+                    });
                 }
-                if ui.selectable_label(view.fit, "Fit").clicked() {
-                    view.fit = !view.fit;
-                }
-                if ui.button("+").clicked() {
-                    view.zoom_by(1.25);
-                }
-                ui.label(format!("{:.0}%", view.zoom * 100.0));
-                if ui
-                    .selectable_label(self.chrome.auto_size, "🗖")
-                    .on_hover_text("Auto-size: resize the window to fit each display opened")
-                    .clicked()
-                {
-                    toggle_auto_size(&mut self.chrome);
-                }
-                ui.separator();
-                if ui
-                    .selectable_label(self.keypad_mode, "⌨")
-                    .on_hover_text("Edit values with an on-screen keypad")
-                    .clicked()
-                {
-                    self.keypad_mode = !self.keypad_mode;
-                }
-                if ui.selectable_label(self.show_open, "Open…").clicked() {
-                    self.show_open = !self.show_open;
-                }
-                if windows {
-                    ui.separator();
-                    action = layout_controls(
-                        ui,
-                        &mut self.main_pinned,
-                        self.layout_name.as_deref(),
-                        &mut self.settings,
-                        &mut self.layouts,
-                        false,
-                    );
-                }
-            }
-            if let Some(s) = &view.screen {
-                ui.add(egui::Label::new(egui::RichText::new(&s.title).strong()).truncate())
-                    .on_hover_text(&s.title);
-            }
+            });
         });
+        if let Some(req) = all_windows {
+            let origin = Origin {
+                window: WindowKey::Main,
+                ctrl: false,
+                shift: false,
+            };
+            self.request(ui.ctx(), origin, req);
+        }
+        // Actual size: 100%, and the window (with the navigator) sized to it.
+        if actual_size {
+            self.main.fit = false;
+            self.main.zoom = 1.0;
+            self.chrome.fit_window();
+        }
         if was_pinned && !self.main_pinned {
             self.main_used.touch(&mut self.clock);
         }
@@ -890,15 +999,16 @@ impl BobApp {
     /// The open windows as a layout.
     fn layout(&self) -> Layout {
         let mut windows = Vec::new();
-        if let Some(loc) = &self.main.current {
+        if let Some(loc) = self.main.saved_location() {
             let mut w = WindowLayout::new(loc, self.geometry);
             w.main = true;
             w.pinned = Some(self.main_pinned);
+            w.tree = self.tree.open;
             w.zoom = Some(Zoom::new(self.main.fit, self.main.zoom));
             windows.push(w);
         }
         for dw in self.windows.iter().filter(|w| !w.close) {
-            if let Some(loc) = &dw.view.current {
+            if let Some(loc) = dw.view.saved_location() {
                 let mut w = WindowLayout::new(loc, dw.geometry);
                 w.toolbar = dw.toolbar;
                 w.pinned = Some(dw.pinned);
@@ -926,6 +1036,43 @@ impl BobApp {
         Ok(())
     }
 
+    /// Once the main window is where a layout put it, ask again for the
+    /// layout's size if it hasn't that: a window manager may have cut it to
+    /// fit the monitor the window started on.
+    fn finish_restoring(&mut self, ctx: &egui::Context) {
+        let Some((want, since)) = self.restoring else {
+            return;
+        };
+        // One that never gets there (kept on screen, fullscreen, tiled) is
+        // given up, so a later move across that place doesn't resize it.
+        // The wait begins on the first frame after the layout was applied,
+        // not in it: that frame loads every display, which may take a while.
+        let time = ctx.input(|i| i.time);
+        let since = since.unwrap_or(time);
+        self.restoring = Some((want, Some(since)));
+        if time - since > RESTORE_WAIT {
+            self.restoring = None;
+            return;
+        }
+        let (Some(size), Some(now)) = (want.size, self.geometry.size) else {
+            return;
+        };
+        let near = |a: Vec2, b: Vec2| (a - b).length() < 2.0;
+        let there = match (want.position, self.geometry.position) {
+            (Some(p), Some(q)) => near(p.to_vec2(), q.to_vec2()),
+            // The window system doesn't say (Wayland): once it has moved.
+            _ => true,
+        };
+        if !there {
+            return;
+        }
+        self.restoring = None;
+        if !near(size, now) {
+            log::info!("the main window is {now:?}, not {size:?}: resizing it");
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size / ctx.zoom_factor()));
+        }
+    }
+
     /// Close the display windows and open those of `layout`; the main
     /// window moves, takes the layout's size and shows its display.
     fn apply_layout(&mut self, ctx: &egui::Context, layout: Layout, name: Option<String>) {
@@ -934,6 +1081,7 @@ impl BobApp {
         let zoom = ctx.zoom_factor();
         let monitors = self.monitors(ctx);
         self.windows.clear();
+        self.restoring = None;
         for w in &layout.windows {
             let geometry = w.geometry(&monitors);
             if w.position.is_some() && geometry.position.is_none() {
@@ -944,15 +1092,25 @@ impl BobApp {
                 self.open_window(ctx, loc, geometry, w.toolbar, layout.pinned(w));
                 continue;
             }
-            if let Some(size) = geometry.size {
-                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size / zoom));
-                self.chrome.hold_size();
-            }
+            log::debug!(
+                "restore the main window: size {:?}, position {:?}, navigator {}",
+                geometry.size,
+                geometry.position,
+                if w.tree { "shown" } else { "hidden" }
+            );
+            // Moved before it is sized: a window manager keeps a window
+            // within the monitor it is on, and a new window starts on the
+            // first, which may be smaller than the one it is going to.
             if let Some(pos) = geometry.position {
                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(
                     Pos2::ZERO + pos.to_vec2() / zoom,
                 ));
             }
+            if let Some(size) = geometry.size {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size / zoom));
+                self.chrome.hold_size();
+            }
+            self.restoring = geometry.size.map(|_| (geometry, None));
             if let Some(z) = &w.zoom {
                 self.main.fit = z.factor().is_none();
                 self.main.zoom = z.factor().unwrap_or(self.main.zoom);
@@ -962,6 +1120,7 @@ impl BobApp {
             }
             self.show_open = false;
             self.main_pinned = layout.pinned(w);
+            self.tree.open = w.tree;
             self.main.open(loc);
         }
         self.trends.clear();
@@ -1037,7 +1196,7 @@ impl BobApp {
             ui.label("File or URL:");
             let edit = ui.add(egui::TextEdit::singleline(&mut *path).desired_width(f32::INFINITY));
             if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                chosen = Some(Source::parse(path));
+                chosen = Some(crate::fetch::user_named(path));
             }
         });
         // Nothing to list for a URL (an empty path lists nothing).
@@ -1111,10 +1270,19 @@ fn can_multi_window(ctx: &egui::Context, touch: bool) -> bool {
     !cfg!(target_arch = "wasm32") && !ctx.embed_viewports() && !touch && !small
 }
 
+/// How long (seconds) the main window has to reach a layout's place before
+/// `finish_restoring` gives up on it.
+const RESTORE_WAIT: f64 = 2.0;
+
+/// What the navigator shows.
+const NAVIGATOR_HELP: &str = "Navigator: a tree of the displays the home display links to, \
+     and those they link to. Click one to open it as a link would (shift and ctrl too).";
+
 /// What a window's pin does.
 const PIN_HELP: &str = "Pinned: links open their displays in the unpinned window used last, \
      or a new one (shift+click: a new window, ctrl+click: in place). \
-     Unpinned: links open in place.";
+     Unpinned: links open in place. \
+     A display already open in another window is raised.";
 
 /// What the main toolbar's layout controls ask for.
 enum LayoutAction {
@@ -1124,82 +1292,71 @@ enum LayoutAction {
     Delete(String),
 }
 
-/// The main window's pin, the layout list and the layout menu; in the
-/// `compact` toolbar's menu, the list is a submenu.
-fn layout_controls(
+/// The saved layouts, to load one.
+fn layout_list(
     ui: &mut egui::Ui,
-    pinned: &mut bool,
+    current: Option<&str>,
+    layouts: &mut LayoutList,
+) -> Option<LayoutAction> {
+    let names = layouts.get(ui.ctx());
+    if names.is_empty() {
+        ui.weak("No saved layouts");
+    }
+    let mut action = None;
+    for name in names {
+        if ui
+            .selectable_label(current == Some(name.as_str()), &name)
+            .clicked()
+        {
+            action = Some(LayoutAction::Load(name));
+        }
+    }
+    action
+}
+
+/// The menu's layout items: save, save as, delete, and saving the default
+/// on exit.
+fn layout_menu(
+    ui: &mut egui::Ui,
     current: Option<&str>,
     settings: &mut layout::Settings,
     layouts: &mut LayoutList,
-    compact: bool,
 ) -> Option<LayoutAction> {
     let mut action = None;
-    let toggle = if compact { "📌 Pinned" } else { "📌" };
+    let save = match current {
+        Some(name) => format!("Save layout {name}"),
+        None => "Save layout".to_string(),
+    };
     if ui
-        .selectable_label(*pinned, toggle)
-        .on_hover_text(PIN_HELP)
+        .add_enabled(current.is_some(), egui::Button::new(save))
         .clicked()
+        && let Some(name) = current
     {
-        *pinned = !*pinned;
+        action = Some(LayoutAction::Save(name.to_string()));
     }
-    let mut load = |ui: &mut egui::Ui| {
+    if ui.button("Save layout as…").clicked() {
+        action = Some(LayoutAction::SaveAs);
+    }
+    if ui.button("Save as default").clicked() {
+        action = Some(LayoutAction::Save(layout::DEFAULT.to_string()));
+    }
+    ui.menu_button("Delete layout", |ui| {
         let names = layouts.get(ui.ctx());
         if names.is_empty() {
             ui.weak("No saved layouts");
         }
         for name in names {
-            if ui
-                .selectable_label(current == Some(name.as_str()), &name)
-                .clicked()
-            {
-                action = Some(LayoutAction::Load(name));
+            if ui.button(&name).clicked() {
+                action = Some(LayoutAction::Delete(name));
             }
         }
-    };
-    if compact {
-        ui.menu_button("Load layout", load);
-    } else {
-        egui::ComboBox::from_id_salt("layout")
-            .selected_text(current.unwrap_or("Layout"))
-            .show_ui(ui, &mut load);
+    });
+    if ui
+        .checkbox(&mut settings.save_default_on_exit, "Save default on exit")
+        .changed()
+    {
+        settings.save();
     }
-    let menu = if compact { "Layout" } else { "▾" };
-    ui.menu_button(menu, |ui| {
-        if ui
-            .add_enabled(current.is_some(), egui::Button::new("Save"))
-            .clicked()
-            && let Some(name) = current
-        {
-            action = Some(LayoutAction::Save(name.to_string()));
-        }
-        if ui.button("Save as default").clicked() {
-            action = Some(LayoutAction::Save(layout::DEFAULT.to_string()));
-        }
-        if ui.button("Save as…").clicked() {
-            action = Some(LayoutAction::SaveAs);
-        }
-        ui.menu_button("Delete", |ui| {
-            let names = layouts.get(ui.ctx());
-            if names.is_empty() {
-                ui.weak("No saved layouts");
-            }
-            for name in names {
-                if ui.button(&name).clicked() {
-                    action = Some(LayoutAction::Delete(name));
-                }
-            }
-        });
-        ui.separator();
-        if ui
-            .checkbox(&mut settings.save_default_on_exit, "Save default on exit")
-            .changed()
-        {
-            settings.save();
-        }
-    })
-    .response
-    .on_hover_text("Save, save as or delete layouts");
     action
 }
 
@@ -1287,9 +1444,19 @@ impl eframe::App for BobApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        if self.settings.save_default_on_exit
-            && let Err(e) = layout::save(layout::DEFAULT, &self.layout())
-        {
+        if !self.settings.save_default_on_exit {
+            return;
+        }
+        let layout = self.layout();
+        if let Some(main) = layout.windows.iter().find(|w| w.main) {
+            log::debug!(
+                "save the default layout: main window size {:?}, position {:?}, navigator {}",
+                main.size,
+                main.position,
+                if main.tree { "shown" } else { "hidden" }
+            );
+        }
+        if let Err(e) = layout::save(layout::DEFAULT, &layout) {
             log::error!("{e}");
         }
     }
@@ -1303,14 +1470,18 @@ impl BobApp {
             w.view.poll_loading(&ctx);
         }
         self.poll_launched(&ctx);
-        if !self.keypad_mode && ui.input(|i| i.any_touches()) {
-            self.keypad_mode = true;
+        if !self.touch && ui.input(|i| i.any_touches()) {
+            self.touch = true;
         }
-        widgets::touch_targets(ui.ctx(), self.keypad_mode);
-        self.can_windows = can_multi_window(&ctx, self.keypad_mode);
+        widgets::touch_targets(ui.ctx(), self.touch);
+        self.can_windows = can_multi_window(&ctx, self.touch);
         self.main_used
             .focus(ui.input(|i| i.focused), &mut self.clock);
         self.chrome.begin(ui.ctx());
+        // Before a layout is applied, so the wait for one applied this
+        // frame begins on the next, after this frame's loading.
+        self.geometry = geometry(ui);
+        self.finish_restoring(&ctx);
         // Once the controls' scale has settled, as positions and sizes
         // depend on it.
         if self.chrome.settled()
@@ -1321,7 +1492,6 @@ impl BobApp {
         if shortcuts(ui, &mut self.main).close {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        self.geometry = geometry(ui);
         self.main_frame = frame(ui);
         self.main
             .update_title(ui.ctx(), self.main_pinned && self.can_windows);
@@ -1336,10 +1506,18 @@ impl BobApp {
                 .height();
         }
 
+        let (side, clicked) = self.navigator(ui);
+        // Shown or hidden from the toolbar, the navigator widens or narrows
+        // the window, so the display keeps its size and zoom.
+        let grow = side - std::mem::replace(&mut self.tree_width, side);
+        if std::mem::take(&mut self.tree_toggled) && grow != 0.0 {
+            self.resize_main_by(&ctx, Vec2::new(grow, 0.0));
+        }
+
         let trends: Vec<(u64, String)> = self.trends.iter().map(|t| (t.id, t.title())).collect();
         let vcx = ViewCx {
             window: WindowKey::Main,
-            keypad: self.keypad_mode,
+            touch: self.touch,
             trends: &trends,
         };
         let drawn = self.main.draw(ui, &vcx);
@@ -1351,7 +1529,11 @@ impl BobApp {
             self.chrome.display_changed();
         }
         let display = self.main.natural_size(ui.ctx().zoom_factor());
-        self.chrome.end(ui.ctx(), display);
+        self.chrome
+            .end(ui.ctx(), display.map(|d| d + Vec2::new(side, 0.0)));
+        if let Some(clicked) = clicked {
+            self.open_from_tree(&ctx, clicked);
+        }
 
         let mut requests = drawn.requests;
         requests.extend(self.display_windows(ui, &trends));
@@ -1363,24 +1545,81 @@ impl BobApp {
             WindowKey::Main => false,
             WindowKey::Child(id) => !self.windows.iter().any(|dw| dw.id == id),
         };
-        if self.keypad.as_ref().is_some_and(|k| closed(k.window)) {
-            self.keypad = None;
-        }
         if self.details.as_ref().is_some_and(|(w, _)| closed(*w)) {
             self.details = None;
         }
-        if self.confirm.as_ref().is_some_and(|c| closed(c.window)) {
-            self.confirm = None;
-        }
+        self.confirm.retain(|c| !closed(c.window));
         dialogs(
             ui.ctx(),
             WindowKey::Main,
-            &mut self.keypad,
             &mut self.details,
             &mut self.confirm,
         );
         self.save_as_window(ui);
         self.trend_windows(ui);
+    }
+
+    /// Make the main window `by` points bigger (or smaller), within its
+    /// monitor, unless it is maximized or full screen.
+    fn resize_main_by(&self, ctx: &egui::Context, by: Vec2) {
+        let info = ctx.input(|i| i.viewport().clone());
+        if !chrome::can_resize(&info, ctx.zoom_factor()) {
+            return;
+        }
+        let Some(inner) = info.inner_rect else {
+            return;
+        };
+        let mut size = inner.size() + by;
+        if let Some(monitor) = info.monitor_size {
+            size = size.min(monitor);
+        }
+        log::debug!(
+            "resize the window from {:?} to {size:?} for the navigator",
+            inner.size()
+        );
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+    }
+
+    /// The navigator beside the main window's display, when shown: its
+    /// width, and the node clicked. Its root is the home display.
+    fn navigator(&mut self, ui: &mut egui::Ui) -> (f32, Option<tree::Clicked>) {
+        let root = self.home.clone().or_else(|| self.main.current.clone());
+        let Some(root) = root.filter(|_| self.tree.open) else {
+            return (0.0, None);
+        };
+        // Shown in bold by the same test a click makes (see `View::shows`).
+        let (main, windows) = (&self.main, &self.windows);
+        let here = |loc: &Location| {
+            std::iter::once(main)
+                .chain(windows.iter().filter(|w| !w.close).map(|w| &w.view))
+                .any(|v| v.shows(loc))
+        };
+        let panel = egui::Panel::left("navigator")
+            .resizable(true)
+            .default_size(220.0)
+            .show(ui, |ui| self.tree.ui(ui, &root, &here));
+        (panel.response.rect.width(), panel.inner)
+    }
+
+    /// Open what a navigator node names, as a link in the main window would;
+    /// the display the main window shows is not opened again.
+    fn open_from_tree(&mut self, ctx: &egui::Context, clicked: tree::Clicked) {
+        let origin = Origin {
+            window: WindowKey::Main,
+            ctrl: clicked.ctrl,
+            shift: clicked.shift,
+        };
+        match clicked.target {
+            // The main window's own display (shown bold) is left as it is,
+            // its PVs connected, whatever the modifiers.
+            tree::Target::Display(loc) if self.main.shows(&loc) => {}
+            tree::Target::Display(loc) => self.follow(ctx, origin, loc, "navigator"),
+            tree::Target::Command {
+                base,
+                directory,
+                command,
+            } => self.launch(ctx, origin, base, directory, command),
+        }
     }
 
     /// Act on a request from a widget in `origin`'s window.
@@ -1393,15 +1632,21 @@ impl BobApp {
                 target,
             } => self.follow(ctx, origin, Location { source, macros }, &target),
             // Shown in the window asked from, which may have been drawn
-            // already this frame.
-            Request::Keypad { pv, text } => {
-                self.keypad = Some(Keypad { window, pv, text });
-                ctx.request_repaint();
-            }
-            // A second one replaces a pending one: the dialog is modal in
-            // spirit, and a display cannot make writes pile up behind it.
+            // already this frame, after any asked for before it.
             Request::ConfirmWrite { pv, value } => {
-                self.confirm = Some(Confirm { window, pv, value });
+                if self.confirm.len() < MAX_CONFIRMS {
+                    self.confirm.push_back(Confirm {
+                        window,
+                        pv,
+                        value,
+                        focused: false,
+                    });
+                } else {
+                    log::warn!(
+                        "not writing '{value}' to {}: {MAX_CONFIRMS} writes already wait to be confirmed",
+                        pv.name()
+                    );
+                }
                 ctx.request_repaint();
             }
             Request::Details(details) => {
@@ -1437,6 +1682,26 @@ impl BobApp {
                     }
                 }
             },
+            Request::RaiseAll => {
+                for w in &self.windows {
+                    raise(ctx, WindowKey::Child(w.id));
+                }
+                for t in &self.trends {
+                    raise_trend(ctx, t.id);
+                }
+                raise(ctx, WindowKey::Main);
+                // The window asking stays on top.
+                if window != WindowKey::Main {
+                    raise(ctx, window);
+                }
+            }
+            Request::CloseOthers => {
+                log::info!("close all other windows");
+                for w in &mut self.windows {
+                    w.close |= WindowKey::Child(w.id) != window;
+                }
+                self.trends.clear();
+            }
             Request::Webpage(url) => open_webpage(&url),
         }
     }
@@ -1453,19 +1718,19 @@ impl BobApp {
         let mut requests = Vec::new();
         // Closed by Exit or Ctrl+W since they were last drawn.
         self.windows.retain(|w| !w.close);
-        let (home, keypad, auto_size) = (&self.home, self.keypad_mode, self.chrome.auto_size);
+        let (home, touch, auto_size) = (&self.home, self.touch, self.chrome.auto_size);
         let desk = Desk {
             monitors: self.monitors(&ctx),
             pinned: self.pinned_frames(),
         };
-        let (pad, details, confirm) = (&mut self.keypad, &mut self.details, &mut self.confirm);
+        let (details, confirm) = (&mut self.details, &mut self.confirm);
         let clock = &mut self.clock;
         let can_windows = self.can_windows;
         for w in &mut self.windows {
             let key = WindowKey::Child(w.id);
             let vcx = ViewCx {
                 window: key,
-                keypad,
+                touch,
                 trends,
             };
             let title = w.view.screen.as_ref().map_or_else(
@@ -1482,7 +1747,7 @@ impl BobApp {
                     .show(&ctx, |ui| {
                         requests.extend(child_ui(ui, w, home, &vcx, None, clock, &desk));
                     });
-                dialogs(&ctx, key, pad, details, confirm);
+                dialogs(&ctx, key, details, confirm);
                 w.close |= !open;
                 continue;
             }
@@ -1491,7 +1756,7 @@ impl BobApp {
                 // No native windows after all: a window in this one.
                 let native = (class != egui::ViewportClass::EmbeddedWindow).then_some(auto_size);
                 requests.extend(child_ui(ui, w, home, &vcx, native, clock, &desk));
-                dialogs(ui.ctx(), key, pad, details, confirm);
+                dialogs(ui.ctx(), key, details, confirm);
                 // Closing the window drops its view, and its PVs with it.
                 if ui.input(|i| i.viewport().close_requested()) {
                     w.close = true;
@@ -1559,29 +1824,26 @@ impl BobApp {
     }
 }
 
-/// The keypad and PV details dialogs, when asked for in `window`: drawn in
-/// that window.
+/// The write confirmation and PV details dialogs, when asked for in
+/// `window`: drawn in that window.
 fn dialogs(
     ctx: &egui::Context,
     window: WindowKey,
-    keypad: &mut Option<Keypad>,
     details: &mut Option<(WindowKey, pvmenu::Details)>,
-    confirm: &mut Option<Confirm>,
+    confirm: &mut VecDeque<Confirm>,
 ) {
-    if confirm.as_ref().is_some_and(|c| c.window == window) {
+    if confirm.front().is_some_and(|c| c.window == window) {
         confirm_window(ctx, confirm);
-    }
-    if keypad.as_ref().is_some_and(|k| k.window == window) {
-        keypad_window(ctx, keypad);
     }
     if details.as_ref().is_some_and(|(w, _)| *w == window) {
         details_window(ctx, details);
     }
 }
 
-/// Ask whether to write the value a display from the web asked for.
-fn confirm_window(ctx: &egui::Context, confirm: &mut Option<Confirm>) {
-    let Some(c) = confirm.as_ref() else {
+/// Ask whether to write the first value a display from the web asked for.
+fn confirm_window(ctx: &egui::Context, confirm: &mut VecDeque<Confirm>) {
+    let waiting = confirm.len().saturating_sub(1);
+    let Some(c) = confirm.front_mut() else {
         return;
     };
     let mut answer = None;
@@ -1592,12 +1854,18 @@ fn confirm_window(ctx: &egui::Context, confirm: &mut Option<Confirm>) {
         .show(ctx, |ui| {
             ui.label("A display loaded from the web asks to write");
             ui.monospace(format!("{} = {}", plain_name(c.pv.name()), c.value));
+            if waiting > 0 {
+                ui.label(format!("{waiting} more to ask about after this one"));
+            }
             ui.horizontal(|ui| {
                 let write = ui.button("Write").clicked();
                 let cancel = ui.button("Cancel");
-                // Cancel has the focus, so Enter cancels; only a click writes.
-                if !ui.memory(|m| m.focused().is_some()) {
+                // Cancel takes the focus from whatever had it (the button
+                // that asked for the write, perhaps), so Enter cancels; only
+                // a click writes. Once: the user may then tab to Write.
+                if !c.focused {
                     cancel.request_focus();
+                    c.focused = true;
                 }
                 answer = if write {
                     Some(true)
@@ -1615,7 +1883,9 @@ fn confirm_window(ctx: &egui::Context, confirm: &mut Option<Confirm>) {
         if yes {
             c.pv.write(c.value.clone());
         }
-        *confirm = None;
+        confirm.pop_front();
+        // The next one, if any, is shown next frame.
+        ctx.request_repaint();
     }
 }
 
@@ -1630,75 +1900,6 @@ fn details_window(ctx: &egui::Context, details: &mut Option<(WindowKey, pvmenu::
     }
     if !open {
         *details = None;
-    }
-}
-
-fn keypad_window(ctx: &egui::Context, keypad: &mut Option<Keypad>) {
-    let Some(pad) = keypad.as_mut() else {
-        return;
-    };
-    let mut done = None;
-    let title = plain_name(pad.pv.name());
-    let state = pad.pv.state();
-    egui::Window::new(title)
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_BOTTOM, Vec2::new(0.0, -8.0))
-        .show(ctx, |ui| {
-            let size = Vec2::new(64.0, 48.0);
-            let font = egui::FontId::proportional(22.0);
-            ui.add(
-                egui::TextEdit::singleline(&mut pad.text)
-                    .font(font.clone())
-                    .desired_width(4.0 * size.x + 12.0),
-            );
-            // Enums get one button per state instead of digits.
-            if !state.labels.is_empty() {
-                for label in &state.labels {
-                    let b = egui::Button::new(egui::RichText::new(label).font(font.clone()));
-                    if ui
-                        .add_sized(Vec2::new(4.0 * size.x + 12.0, size.y), b)
-                        .clicked()
-                    {
-                        done = Some(Some(label.clone()));
-                    }
-                }
-            } else {
-                let rows = [
-                    ["7", "8", "9", "Del"],
-                    ["4", "5", "6", "-"],
-                    ["1", "2", "3", "e"],
-                    ["0", ".", "C", "OK"],
-                ];
-                for row in rows {
-                    ui.horizontal(|ui| {
-                        for key in row {
-                            let b = egui::Button::new(egui::RichText::new(key).font(font.clone()));
-                            if ui.add_sized(size, b).clicked() {
-                                match key {
-                                    "Del" => {
-                                        pad.text.pop();
-                                    }
-                                    "C" => pad.text.clear(),
-                                    "OK" => done = Some(Some(pad.text.clone())),
-                                    k => pad.text.push_str(k),
-                                }
-                            }
-                        }
-                    });
-                }
-            }
-            if ui.button("Cancel").clicked() {
-                done = Some(None);
-            }
-        });
-    match done {
-        Some(Some(value)) => {
-            pad.pv.write(value);
-            *keypad = None;
-        }
-        Some(None) => *keypad = None,
-        None => {}
     }
 }
 
@@ -1729,6 +1930,25 @@ fn viewport(window: WindowKey) -> egui::ViewportId {
 /// The display window `id` inside the main one, where windows are embedded.
 fn display_window_id(id: egui::ViewportId) -> Id {
     Id::new(("display window", id))
+}
+
+/// The menu items acting on all of bobview's windows, enabled when there
+/// are `others` than the main one; the request of the one clicked.
+fn window_items(ui: &mut egui::Ui, others: bool) -> Option<Request> {
+    let raise = ui
+        .add_enabled(others, egui::Button::new("Bring all windows to front"))
+        .clicked();
+    let close = ui
+        .add_enabled(others, egui::Button::new("Close all other windows"))
+        .on_hover_text("Close every display and trend window but the main one and this one")
+        .clicked();
+    if raise {
+        Some(Request::RaiseAll)
+    } else if close {
+        Some(Request::CloseOthers)
+    } else {
+        None
+    }
 }
 
 /// Bring `window` to the front, as a link to its display is followed.
@@ -1833,7 +2053,7 @@ fn child_ui(
             .rect
             .height();
     }
-    let drawn = w.view.draw(ui, vcx);
+    let mut drawn = w.view.draw(ui, vcx);
     panels += drawn.status;
     if let Some(background) = &drawn.background {
         background.context_menu(|ui| {
@@ -1847,6 +2067,15 @@ fn child_ui(
             }
             if ui.button("Close").clicked() {
                 w.close = true;
+            }
+            ui.separator();
+            if let Some(req) = window_items(ui, true) {
+                let origin = Origin {
+                    window: WindowKey::Child(w.id),
+                    ctrl: false,
+                    shift: false,
+                };
+                drawn.requests.push((origin, req));
             }
         });
     }
@@ -1868,6 +2097,10 @@ fn child_ui(
         // sized to the next.
         let fit = w.fit_next;
         w.fit_next = auto_size || fit && display.is_none();
+        // Taken with the display it was for, sized or not (the window may
+        // be maximized, or the display failed), so it can't move the window
+        // later.
+        let origin = w.beside.take();
         if fit
             && chrome::can_resize(&info, zoom)
             && let Some(display) = display
@@ -1879,7 +2112,7 @@ fn child_ui(
                     .send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
             }
             // Beside the window it was opened from, at its new size.
-            if let Some(origin) = w.beside.take()
+            if let Some(origin) = origin
                 && let Some(pos) = beside(origin, &desk.clear_of(w.id), size * zoom, &desk.monitors)
             {
                 ui.ctx()
@@ -1909,13 +2142,13 @@ fn corner(ui: &egui::Ui, w: &mut DisplayWindow, clock: &mut u64) {
                 if !w.toolbar {
                     let enabled = !w.view.back.is_empty();
                     let resp = corner_button(ui, false, enabled);
-                    corner_glyph(ui, &resp, "◀");
+                    corner_glyph(ui, &resp, Icon::Back);
                     if resp.on_hover_text("Back (Alt+←)").clicked() {
                         w.view.go_back();
                     }
                 }
                 let resp = corner_button(ui, w.pinned, true);
-                corner_glyph(ui, &resp, "📌");
+                corner_glyph(ui, &resp, Icon::Pin);
                 if resp.on_hover_text(PIN_HELP).clicked() {
                     w.pinned = !w.pinned;
                     // Unpinned, it is the viewer; pinned, new windows go
@@ -1970,20 +2203,14 @@ fn corner_button(ui: &mut egui::Ui, selected: bool, enabled: bool) -> egui::Resp
     resp
 }
 
-/// A `corner` button's symbol, faded when the button is disabled.
-fn corner_glyph(ui: &egui::Ui, resp: &egui::Response, glyph: &str) {
+/// A `corner` button's icon, faded when the button is disabled.
+fn corner_glyph(ui: &egui::Ui, resp: &egui::Response, icon: Icon) {
     let color = if resp.sense.senses_click() {
         ui.style().interact(resp).fg_stroke.color
     } else {
         ui.visuals().weak_text_color()
     };
-    ui.painter().text(
-        resp.rect.center(),
-        egui::Align2::CENTER_CENTER,
-        glyph,
-        egui::FontId::proportional(11.0),
-        color,
-    );
+    icon.paint(ui.painter(), resp.rect, 12.0, color);
 }
 
 /// A display window's toolbar: navigation, reload and zoom. The window and
@@ -2064,8 +2291,62 @@ pub(crate) fn plain_name(name: &pv::PvName) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::plain_name;
+    use super::{Confirm, WindowKey, confirm_window, plain_name};
+    use eframe::egui;
     use pv::PvName;
+    use std::collections::VecDeque;
+
+    #[test]
+    fn writes_are_confirmed_one_at_a_time_and_enter_cancels() {
+        let pvs = pv::PvManager::new();
+        let pv = pvs.subscribe("loc://confirm_test(0)");
+        let ctx = egui::Context::default();
+        let mut confirm: VecDeque<Confirm> = ["1", "2"]
+            .map(|value| Confirm {
+                window: WindowKey::Main,
+                pv: pv.clone(),
+                value: value.into(),
+                focused: false,
+            })
+            .into();
+        // One frame; the display's button, which asked for the writes, has
+        // the focus to begin with, as one pressed with the keyboard keeps it.
+        let frame = |enter: bool, first: bool, confirm: &mut VecDeque<Confirm>| {
+            let mut input = egui::RawInput::default();
+            if enter {
+                input.events.push(egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            let out = ctx.run_ui(input, |ui| {
+                let asked = ui.button("Ask");
+                if first {
+                    asked.request_focus();
+                }
+                confirm_window(ui.ctx(), confirm);
+            });
+            out.drop_without_applying_deltas();
+        };
+        frame(false, true, &mut confirm);
+        frame(false, false, &mut confirm);
+        assert_eq!(confirm.len(), 2);
+        assert!(confirm[0].focused);
+        // Enter cancels the first write, not presses the display's button.
+        frame(true, false, &mut confirm);
+        assert_eq!(confirm.len(), 1);
+        assert_eq!(confirm[0].value, "2");
+        // The second gets Cancel focused in its turn.
+        frame(false, false, &mut confirm);
+        frame(false, false, &mut confirm);
+        assert!(confirm[0].focused);
+        frame(true, false, &mut confirm);
+        assert!(confirm.is_empty());
+        assert_eq!(pv.state().value.as_f64(), Some(0.0));
+    }
 
     #[test]
     fn lists_displays_and_project_links() {
@@ -2115,8 +2396,10 @@ mod tests {
         app.launch(&ctx, main, None, None, "no-such-launcher".into());
         app.launch(&ctx, main, None, None, "no-such-launcher".into());
         assert_eq!(app.main.launching.len(), 1);
-        assert!(app.is_loading());
-        while app.is_loading() {
+        // The main view's own loading: app.is_loading() also counts tab
+        // builds of other tests running at the same time.
+        assert!(app.main.is_loading());
+        while app.main.is_loading() {
             std::thread::sleep(std::time::Duration::from_millis(5));
             app.poll_launched(&ctx);
         }
@@ -2139,7 +2422,7 @@ mod tests {
             })
             .unwrap();
         app.poll_launched(&ctx);
-        assert!(app.main.current.is_none() && !app.is_loading());
+        assert!(app.main.current.is_none() && !app.main.is_loading());
         // In the pinned main window a ctrl+clicked command opens in place,
         // as a ctrl+clicked link does.
         app.launched
@@ -2200,9 +2483,25 @@ mod tests {
                 Route::Raise(child)
             );
         }
+        let from_child = Origin {
+            window: child,
+            ..plain
+        };
         assert_eq!(
-            route(true, plain, true, Some(WindowKey::Main), None),
+            route(true, from_child, true, Some(WindowKey::Main), None),
             Route::Raise(WindowKey::Main)
+        );
+        // A link to the display its own window shows: shown again in place,
+        // as a Refresh button wants.
+        for (origin, pinned) in [(plain, true), (plain, false), (shift, true)] {
+            assert_eq!(
+                route(true, origin, pinned, Some(WindowKey::Main), Some(viewer)),
+                Route::InPlace
+            );
+        }
+        assert_eq!(
+            route(true, from_child, true, Some(child), None),
+            Route::InPlace
         );
         // Ctrl+click navigates in place, even to a display already open.
         assert_eq!(
@@ -2416,14 +2715,275 @@ mod tests {
         // The main window still goes back first.
         app.request(&ctx, plain(main), Request::Close);
         assert_eq!(app.main.current, Some(display("a")));
+
+        // Closing all other windows keeps the main one and the one asking.
+        let open_windows = |app: &BobApp| app.windows.iter().filter(|w| !w.close).count();
+        assert_eq!(open_windows(&app), 2);
+        app.request(&ctx, plain(first), Request::CloseOthers);
+        assert_eq!(open_windows(&app), 1);
+        assert!(app.view_mut(first).is_some());
+        app.request(&ctx, plain(main), Request::CloseOthers);
+        assert_eq!(open_windows(&app), 0);
+        assert_eq!(app.main.current, Some(display("a")));
     }
 
     #[test]
-    fn keypad_title_is_the_plain_name() {
+    fn a_link_to_its_own_windows_display_reloads_it() {
+        use super::{BobApp, Location, Origin, WindowKey};
+        use crate::tree::{Clicked, Target};
+        use crate::widgets::Request;
+        // Following a link to the display shown reloads it, clearing the
+        // fetch cache.
+        let _cache = crate::fetch::tests::CACHE_USERS.lock();
+        let ctx = eframe::egui::Context::default();
+        let mut app = BobApp::new(&ctx, None, Some(1.0), crate::chrome::UiScale::Auto);
+        let display = |name: &str| Location {
+            source: bob::Source::File(format!("/no/such/{name}.bob").into()),
+            macros: bob::Macros::from_pairs([("P", name)]),
+        };
+        let open = |app: &mut BobApp, window, ctrl, loc: Location| {
+            let req = Request::Open {
+                source: loc.source,
+                macros: loc.macros,
+                target: "replace".into(),
+            };
+            let origin = Origin {
+                window,
+                ctrl,
+                shift: false,
+            };
+            app.request(&ctx, origin, req);
+        };
+        let main = WindowKey::Main;
+        // The main window and a child both show a; the child came from b.
+        open(&mut app, main, true, display("a"));
+        open(&mut app, main, false, display("b"));
+        let child = WindowKey::Child(app.windows[0].id);
+        open(&mut app, child, true, display("a"));
+        assert_eq!(app.windows[0].view.back, [display("b")]);
+        // The child's link to a reloads the child, not raising the main
+        // window, and adds nothing to Back however often it is pressed.
+        let shown = (app.main.shown, app.windows[0].view.shown);
+        open(&mut app, child, false, display("a"));
+        open(&mut app, child, false, display("a"));
+        assert_eq!(app.windows[0].view.current, Some(display("a")));
+        assert_eq!(app.windows[0].view.back, [display("b")]);
+        assert_eq!(app.windows[0].view.shown, shown.1 + 2);
+        assert_eq!(app.main.shown, shown.0);
+        assert_eq!(app.windows.len(), 1);
+        // The main window's from its own link too.
+        open(&mut app, main, false, display("a"));
+        assert!(app.main.back.is_empty());
+        assert_eq!(app.main.shown, shown.0 + 1);
+
+        // A navigator click on the main window's display leaves it be.
+        for (ctrl, shift) in [(false, false), (true, false), (false, true)] {
+            app.open_from_tree(
+                &ctx,
+                Clicked {
+                    target: Target::Display(display("a")),
+                    ctrl,
+                    shift,
+                },
+            );
+        }
+        assert_eq!(app.main.shown, shown.0 + 1);
+        assert!(app.main.back.is_empty());
+        assert_eq!(app.windows.len(), 1);
+    }
+
+    #[test]
+    fn a_link_to_its_own_display_counts_the_displays_own_macros() {
+        use super::{BobApp, Location, Origin, WindowKey};
+        use crate::widgets::Request;
+        let dir = std::env::temp_dir().join(format!("bobview-own-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("own.bob");
+        std::fs::write(
+            &file,
+            r#"<display version="2.0.0"><name>Own</name><macros><X>1</X></macros></display>"#,
+        )
+        .unwrap();
+        let at = |pairs: &[(&str, &str)]| Location {
+            source: bob::Source::File(file.clone()),
+            macros: bob::Macros::from_pairs(pairs.iter().copied()),
+        };
+        // Following a link to the display shown reloads it, clearing the
+        // fetch cache.
+        let _cache = crate::fetch::tests::CACHE_USERS.lock();
+        let ctx = eframe::egui::Context::default();
+        let mut app = BobApp::new(&ctx, None, Some(1.0), crate::chrome::UiScale::Auto);
+        let open = |app: &mut BobApp, ctrl, loc: Location| {
+            let req = Request::Open {
+                source: loc.source,
+                macros: loc.macros,
+                target: "replace".into(),
+            };
+            let origin = Origin {
+                window: WindowKey::Main,
+                ctrl,
+                shift: false,
+            };
+            app.request(&ctx, origin, req);
+        };
+        open(&mut app, true, at(&[("P", "a")]));
+        // Showing a display waits only briefly for its build thread.
+        wait_loaded(&ctx, &mut app.main);
+        assert!(app.main.screen.is_some());
+        let shown = app.main.shown;
+        // Its link has the display's own macros too: reloaded in place, in
+        // the pinned main window, not opened in a new one.
+        open(&mut app, false, at(&[("X", "1"), ("P", "a")]));
+        wait_loaded(&ctx, &mut app.main);
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(app.main.back.is_empty());
+        assert_eq!(app.main.shown, shown + 1);
+        assert!(app.windows.is_empty());
+    }
+
+    #[test]
+    fn plain_names_drop_the_ca_prefix_and_type() {
         let t = |n: &str| plain_name(&PvName::parse(n));
         assert_eq!(t("loc://t1<VDouble>(1.5)"), "loc://t1");
         assert_eq!(t("ca://BL01T:X"), "BL01T:X");
         assert_eq!(t("BL01T:X"), "BL01T:X");
         assert_eq!(t("pva://BL01T:Y"), "pva://BL01T:Y");
+    }
+
+    /// Poll `view` until its display has loaded, which takes as long as its
+    /// build thread does under load.
+    fn wait_loaded(ctx: &eframe::egui::Context, view: &mut crate::view::View) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while view.is_loading() {
+            assert!(std::time::Instant::now() < until, "never loaded");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            view.poll_loading(ctx);
+        }
+    }
+
+    /// Draw `frames` frames of `app` in a window of `size` points, as a
+    /// window manager would: the window takes the sizes the app asks for.
+    fn run(
+        ctx: &eframe::egui::Context,
+        app: &mut super::BobApp,
+        size: &mut eframe::egui::Vec2,
+        frames: usize,
+    ) {
+        use eframe::egui::{self, Pos2, Rect, Vec2};
+        let monitor = Vec2::new(1920.0, 1080.0);
+        // Past `frames`, keep drawing while this app's displays still load:
+        // under load the build threads can take longer than the frames do.
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut drawn = 0;
+        while drawn < frames
+            || (std::time::Instant::now() < until
+                && (app.main.is_loading() || app.windows.iter().any(|w| w.view.is_loading())))
+        {
+            drawn += 1;
+            let zoom = ctx.zoom_factor();
+            let screen = Rect::from_min_size(Pos2::ZERO, *size / zoom);
+            let mut input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            let info = input.viewports.entry(egui::ViewportId::ROOT).or_default();
+            info.native_pixels_per_point = Some(1.0);
+            info.inner_rect = Some(screen);
+            info.outer_rect = Some(screen);
+            info.monitor_size = Some(monitor / zoom);
+            let mut output = ctx.run_ui(input, |ui| app.draw(ui));
+            output.textures_delta.clear();
+            if let Some(vp) = output.viewport_output.get(&egui::ViewportId::ROOT) {
+                for cmd in &vp.commands {
+                    if let egui::ViewportCommand::InnerSize(s) = cmd {
+                        *size = (*s * zoom).round().min(monitor);
+                    }
+                }
+            }
+            // Displays load, and the navigator reads them, on threads.
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn a_saved_navigator_is_restored_with_its_room() {
+        use super::{BobApp, Location};
+        use crate::chrome::UiScale;
+        let display = Location {
+            source: bob::Source::File(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../tests/displays/index.bob"),
+            ),
+            macros: bob::Macros::default(),
+        };
+        // Open the display: the window takes its size.
+        let ctx = eframe::egui::Context::default();
+        let mut app = BobApp::new(&ctx, Some(display), None, UiScale::Fixed(1.0));
+        let mut size = crate::chrome::DEFAULT_WINDOW;
+        run(&ctx, &mut app, &mut size, 40);
+        let alone = size;
+        // Show the navigator: the window widens by it.
+        app.tree.open = true;
+        app.tree_toggled = true;
+        run(&ctx, &mut app, &mut size, 20);
+        let with_tree = size;
+        assert!(with_tree.x > alone.x + 100.0, "{alone:?} -> {with_tree:?}");
+        // Saved and restored: the same size, the navigator shown.
+        let layout = app.layout();
+        let ctx = eframe::egui::Context::default();
+        let mut app = BobApp::new(&ctx, None, None, UiScale::Fixed(1.0));
+        app.restore_layout(layout, Some("default".into()));
+        let mut size = crate::chrome::DEFAULT_WINDOW;
+        run(&ctx, &mut app, &mut size, 60);
+        assert!(app.tree.open);
+        assert_eq!(size, with_tree);
+    }
+
+    #[test]
+    fn a_restored_window_cut_to_its_first_monitor_is_sized_again() {
+        use super::BobApp;
+        use crate::layout::Geometry;
+        use eframe::egui::{Pos2, Vec2};
+        let ctx = eframe::egui::Context::default();
+        let mut app = BobApp::new(&ctx, None, None, crate::chrome::UiScale::Fixed(1.0));
+        // The layout's place reached, but the width cut to a 1200 wide
+        // monitor the window started on.
+        app.restoring = Some((
+            Geometry {
+                position: Some(Pos2::ZERO),
+                size: Some(Vec2::new(1471.0, 900.0)),
+            },
+            None,
+        ));
+        let mut size = Vec2::new(1200.0, 900.0);
+        run(&ctx, &mut app, &mut size, 3);
+        assert_eq!(size, Vec2::new(1471.0, 900.0));
+        assert!(app.restoring.is_none());
+    }
+
+    #[test]
+    fn a_restored_window_that_never_gets_there_is_left_alone() {
+        use super::{BobApp, RESTORE_WAIT};
+        use crate::layout::Geometry;
+        use eframe::egui::{Pos2, Vec2};
+        let ctx = eframe::egui::Context::default();
+        let mut app = BobApp::new(&ctx, None, None, crate::chrome::UiScale::Fixed(1.0));
+        // Kept away from the layout's place (by the window manager, or
+        // fullscreen): not sized while it waits, then given up.
+        app.restoring = Some((
+            Geometry {
+                position: Some(Pos2::new(500.0, 300.0)),
+                size: Some(Vec2::new(1471.0, 900.0)),
+            },
+            None,
+        ));
+        let mut size = Vec2::new(1200.0, 900.0);
+        run(&ctx, &mut app, &mut size, 3);
+        assert!(app.restoring.is_some());
+        // Frames are 1/60 s apart when the input gives no time.
+        let frames = (RESTORE_WAIT * 60.0) as usize + 10;
+        run(&ctx, &mut app, &mut size, frames);
+        assert!(app.restoring.is_none());
+        assert_eq!(size, Vec2::new(1200.0, 900.0));
     }
 }

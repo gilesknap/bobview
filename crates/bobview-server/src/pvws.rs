@@ -5,7 +5,7 @@
 //! changed. Like PVWS, an update with neither `value` nor `text` means the PV
 //! is not connected.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -17,9 +17,9 @@ use axum::http::header::{HOST, ORIGIN};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use base64::Engine;
-use pv::{Pv, PvManager, PvState, Severity, Value};
+use pv::{Listener, Pv, PvManager, PvState, Scheme, Severity, Value};
 use serde_json::{Map, Value as Json, json};
-use tokio::sync::watch;
+use tokio::sync::Notify;
 
 pub struct Config {
     /// Accept `write` messages.
@@ -33,7 +33,8 @@ pub struct Config {
     /// `localhost`, this machine's name and the hosts of `allow_origins`;
     /// checked against `Host` to stop DNS rebinding.
     pub hosts: Vec<String>,
-    /// Least time between two rounds of updates to one client.
+    /// Least time between two rounds of updates to one client; a PV that
+    /// changes faster sends only its latest state.
     pub throttle: Duration,
     /// Most clients connected at once from one address.
     pub max_per_ip: usize,
@@ -46,10 +47,8 @@ pub struct Config {
 pub struct Hub {
     manager: PvManager,
     config: Config,
-    /// Bumped after every PV change.
-    changed: watch::Sender<()>,
     started: String,
-    /// Clients connected now, by address.
+    /// Clients connected now, by address (see [`client_key`]).
     clients: Mutex<HashMap<IpAddr, usize>>,
     /// PVs subscribed to by all clients together.
     subscriptions: Arc<AtomicUsize>,
@@ -57,9 +56,6 @@ pub struct Hub {
 
 impl Hub {
     pub fn new(manager: PvManager, config: Config) -> Self {
-        let (changed, _) = watch::channel(());
-        let tx = changed.clone();
-        manager.set_notifier(Arc::new(move || tx.send_replace(())));
         let started = UNIX_EPOCH
             .elapsed()
             .unwrap_or_default()
@@ -68,7 +64,6 @@ impl Hub {
         Self {
             manager,
             config,
-            changed,
             started,
             clients: Mutex::new(HashMap::new()),
             subscriptions: Arc::new(AtomicUsize::new(0)),
@@ -82,6 +77,7 @@ struct ClientSlot(Arc<Hub>, IpAddr);
 impl ClientSlot {
     /// A slot for a client at `ip`, or why there is none.
     fn take(hub: &Arc<Hub>, ip: IpAddr) -> Result<Self, String> {
+        let ip = client_key(ip);
         let mut clients = hub.clients.lock().unwrap();
         if clients.values().sum::<usize>() >= MAX_CLIENTS {
             return Err(format!("{MAX_CLIENTS} clients already connected"));
@@ -110,6 +106,19 @@ impl Drop for ClientSlot {
     }
 }
 
+/// The address clients are counted by: an IPv4 address (also when mapped
+/// into IPv6), or the /64 network of an IPv6 one, as one machine may hold
+/// all of a /64.
+fn client_key(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V6(v6) => {
+            let net = u128::from(v6) & !((1u128 << 64) - 1);
+            IpAddr::V6(Ipv6Addr::from(net))
+        }
+        v4 => v4,
+    }
+}
+
 /// The largest message a client may send.
 const MAX_MESSAGE: usize = 1 << 20;
 /// The most PVs one client may subscribe to.
@@ -120,8 +129,13 @@ const MAX_CLIENTS: usize = 100;
 const MAX_TOTAL_PVS: usize = 50_000;
 /// The longest PV name accepted.
 const MAX_NAME: usize = 256;
-/// The longest a send to one client may take before it is dropped.
+/// The longest one message to a client may take to send before the
+/// client is dropped.
 const SEND_TIMEOUT: Duration = Duration::from_secs(10);
+/// New PVs one client may subscribe to at once ...
+const SUBSCRIBE_BURST: f64 = MAX_PVS as f64;
+/// ... and each second after that: more are delayed, not refused.
+const SUBSCRIBE_RATE: f64 = 1000.0;
 
 pub async fn socket(
     State(hub): State<Arc<Hub>>,
@@ -170,7 +184,9 @@ fn browser_allowed(headers: &HeaderMap, config: &Config) -> bool {
         return false;
     };
     let host = host.to_ascii_lowercase();
-    if !host_allowed(host_name(&host), config) {
+    // `name.` is the fully qualified `name`.
+    let name = host_name(&host);
+    if !host_allowed(name.strip_suffix('.').unwrap_or(name), config) {
         return false;
     }
     let origin = normalise_origin(origin);
@@ -197,16 +213,8 @@ fn host_allowed(host: &str, config: &Config) -> bool {
     {
         return true;
     }
-    let short = |name: &str| name.split('.').next().unwrap_or_default().to_string();
-    let ours = machine_names().iter().any(|name| {
-        let short = short(name);
-        host == name
-            || host == short
-            || host
-                .strip_prefix(&short)
-                .is_some_and(|d| d.starts_with('.'))
-    });
-    ours || config.hosts.iter().any(|h| h.eq_ignore_ascii_case(host))
+    machine_names().iter().any(|name| name == host)
+        || config.hosts.iter().any(|h| h.eq_ignore_ascii_case(host))
         || config.allow_origins.iter().any(|a| {
             let origin = normalise_origin(a);
             let host_port = origin.split_once("://").map_or(&*origin, |(_, h)| h);
@@ -240,19 +248,47 @@ fn strip_default_port<'a>(scheme: &str, host: &'a str) -> &'a str {
     host.strip_suffix(port).unwrap_or(host)
 }
 
-/// This machine's names, as the kernel and /etc/hostname have them.
+/// This machine's names: as the kernel and /etc/hostname have them, each
+/// without its domain, and in each domain of /etc/resolv.conf.
 fn machine_names() -> &'static [String] {
     static NAMES: OnceLock<Vec<String>> = OnceLock::new();
     NAMES.get_or_init(|| {
-        let mut names: Vec<String> = ["/proc/sys/kernel/hostname", "/etc/hostname"]
-            .iter()
-            .filter_map(|f| std::fs::read_to_string(f).ok())
-            .map(|n| n.trim().to_ascii_lowercase())
-            .filter(|n| !n.is_empty())
-            .collect();
-        names.dedup();
-        names
+        let read = |f: &str| std::fs::read_to_string(f).unwrap_or_default();
+        let hostnames = [read("/proc/sys/kernel/hostname"), read("/etc/hostname")];
+        names_of(&hostnames, &resolv_domains(&read("/etc/resolv.conf")))
     })
+}
+
+/// Every name of a machine called `hostnames` in `domains`: exact names
+/// only, so `ws01.evil.com` is not `ws01.site.org`.
+fn names_of(hostnames: &[String], domains: &[String]) -> Vec<String> {
+    let mut names = Vec::new();
+    for name in hostnames {
+        let name = name.trim().trim_end_matches('.').to_ascii_lowercase();
+        if name.is_empty() {
+            continue;
+        }
+        let short = name.split('.').next().unwrap_or_default().to_string();
+        names.extend(domains.iter().map(|d| format!("{short}.{d}")));
+        names.push(short);
+        names.push(name);
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// The domains of a resolv.conf: its `domain` and `search` lines.
+fn resolv_domains(conf: &str) -> Vec<String> {
+    conf.lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            matches!(words.next(), Some("domain" | "search")).then_some(words)
+        })
+        .flatten()
+        .map(|d| d.trim_end_matches('.').to_ascii_lowercase())
+        .filter(|d| !d.is_empty())
+        .collect()
 }
 
 pub async fn info(State(hub): State<Arc<Hub>>) -> axum::Json<Json> {
@@ -267,8 +303,90 @@ struct Sub {
     pv: Pv,
     /// The state the client last heard about.
     sent: Option<PvState>,
+    /// Marks the PV changed for this client, until dropped.
+    _listener: Listener,
     /// Gives this subscription back to the server-wide count when dropped.
     _slot: SubSlot,
+}
+
+/// The PVs that changed since a client last heard, and a wake-up for it.
+#[derive(Default)]
+struct Changed {
+    names: Mutex<HashSet<String>>,
+    wake: Notify,
+}
+
+impl Changed {
+    fn mark(&self, name: &str) {
+        let mut names = self.names.lock().unwrap();
+        if !names.contains(name) {
+            names.insert(name.to_string());
+        }
+        drop(names);
+        self.wake.notify_one();
+    }
+
+    fn take(&self) -> HashSet<String> {
+        std::mem::take(&mut *self.names.lock().unwrap())
+    }
+}
+
+/// One client's subscriptions.
+#[derive(Default)]
+struct Subs {
+    map: BTreeMap<String, Sub>,
+    changed: Arc<Changed>,
+}
+
+impl Subs {
+    /// Subscribe to `pv` as `name`, which the client hears about now and
+    /// whenever it changes.
+    fn add(&mut self, name: &str, pv: Pv, slot: SubSlot) {
+        let changed = Arc::downgrade(&self.changed);
+        let key = name.to_string();
+        let listener: Listener = Arc::new(move |_: &PvState| {
+            if let Some(changed) = changed.upgrade() {
+                changed.mark(&key);
+            }
+        });
+        // Marks it changed now, so the client hears of it.
+        pv.listen(&listener);
+        let sub = Sub {
+            pv,
+            sent: None,
+            _listener: listener,
+            _slot: slot,
+        };
+        self.map.insert(name.to_string(), sub);
+    }
+}
+
+/// Paces a client's new subscriptions: each spends a token, and tokens
+/// come back at [`SUBSCRIBE_RATE`] a second up to [`SUBSCRIBE_BURST`].
+struct Pace {
+    tokens: f64,
+    at: Instant,
+}
+
+impl Pace {
+    fn new() -> Self {
+        Self {
+            tokens: SUBSCRIBE_BURST,
+            at: Instant::now(),
+        }
+    }
+
+    /// Spend `n` tokens at `now`, returning how long to wait first.
+    fn spend(&mut self, n: usize, now: Instant) -> Duration {
+        let earned = now.saturating_duration_since(self.at).as_secs_f64() * SUBSCRIBE_RATE;
+        self.tokens = (self.tokens + earned).min(SUBSCRIBE_BURST) - n as f64;
+        self.at = now;
+        if self.tokens >= 0.0 {
+            Duration::ZERO
+        } else {
+            Duration::from_secs_f64(-self.tokens / SUBSCRIBE_RATE)
+        }
+    }
 }
 
 struct SubSlot(Arc<AtomicUsize>);
@@ -293,6 +411,17 @@ fn valid_name(name: &str) -> bool {
     !name.is_empty() && name.len() <= MAX_NAME && name.bytes().all(|b| b.is_ascii_graphic())
 }
 
+/// Whether a client may have `name` from this server: not `loc://` PVs,
+/// which would live here for ever and be shared by every client, nor
+/// `sim://` ones, which cost the server for nothing, nor formulas, which
+/// could read the server's `loc://` PVs. A page makes all three itself.
+fn served_scheme(name: &str) -> bool {
+    !matches!(
+        pv::PvName::parse(name).scheme,
+        Scheme::Loc | Scheme::Sim | Scheme::Formula
+    )
+}
+
 /// Whether `given` is the write token, without stopping at the first
 /// difference.
 fn token_ok(given: &str, token: &str) -> bool {
@@ -301,8 +430,9 @@ fn token_ok(given: &str, token: &str) -> bool {
 }
 
 async fn serve(hub: &Hub, mut ws: WebSocket, peer: SocketAddr) {
-    let mut subs = BTreeMap::new();
-    let mut changed = hub.changed.subscribe();
+    let mut subs = Subs::default();
+    let changed = subs.changed.clone();
+    let mut pace = Pace::new();
     let mut last_round = Instant::now();
     // Without pings a client that has vanished (or stopped reading) would
     // keep its slot for ever.
@@ -314,10 +444,17 @@ async fn serve(hub: &Hub, mut ws: WebSocket, peer: SocketAddr) {
                 heard = Instant::now();
                 match msg {
                     Some(Ok(Message::Text(text))) => {
+                        // Subscribing costs the control system a search per
+                        // PV, so a client churning through them is slowed.
+                        let wait = pace.spend(new_names(&subs, &text), Instant::now());
+                        if !wait.is_zero() {
+                            log::debug!("pacing PVWS client {peer}'s subscriptions: {wait:?}");
+                            tokio::time::sleep(wait).await;
+                        }
                         let replies = handle(hub, &mut subs, &text, peer);
                         // New subscriptions may already hold a value.
-                        if !sent(send_all(&mut ws, replies)).await
-                            || !sent(send_updates(hub, &mut ws, &mut subs)).await
+                        if !send_all(&mut ws, replies).await
+                            || !send_updates(hub, &mut ws, &mut subs).await
                         {
                             break;
                         }
@@ -331,39 +468,55 @@ async fn serve(hub: &Hub, mut ws: WebSocket, peer: SocketAddr) {
                     log::info!("dropping PVWS client {peer}: no answer to pings");
                     break;
                 }
-                if !sent(async { ws.send(Message::Ping(Default::default())).await.is_ok() }).await {
+                if !send(&mut ws, Message::Ping(Default::default())).await {
                     break;
                 }
             }
-            result = changed.changed() => {
-                if result.is_err() {
-                    break;
-                }
+            () = changed.wake.notified() => {
                 tokio::time::sleep_until((last_round + hub.config.throttle).into()).await;
                 last_round = Instant::now();
-                if !sent(send_updates(hub, &mut ws, &mut subs)).await {
+                if !send_updates(hub, &mut ws, &mut subs).await {
                     break;
                 }
             }
         }
     }
-    log::debug!("PVWS client {peer} left with {} PVs", subs.len());
+    log::debug!("PVWS client {peer} left with {} PVs", subs.map.len());
 }
 
-/// Whether a send finished, and in time.
-async fn sent(send: impl std::future::Future<Output = bool>) -> bool {
-    tokio::time::timeout(SEND_TIMEOUT, send)
-        .await
-        .unwrap_or(false)
+/// How many PVs a message subscribes to that the client does not have.
+fn new_names(subs: &Subs, text: &str) -> usize {
+    let Ok(Json::Object(msg)) = serde_json::from_str::<Json>(text) else {
+        return 0;
+    };
+    if !matches!(
+        msg.get("type").and_then(Json::as_str),
+        Some("subscribe" | "monitor")
+    ) {
+        return 0;
+    }
+    let new: HashSet<&str> = msg
+        .get("pvs")
+        .and_then(Json::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Json::as_str)
+        .filter(|name| valid_name(name) && served_scheme(name) && !subs.map.contains_key(*name))
+        .collect();
+    // Only those `handle` will take.
+    new.len().min(MAX_PVS.saturating_sub(subs.map.len()))
+}
+
+/// Send one message, giving up on a client that takes too long to take it.
+async fn send(ws: &mut WebSocket, msg: Message) -> bool {
+    matches!(
+        tokio::time::timeout(SEND_TIMEOUT, ws.send(msg)).await,
+        Ok(Ok(()))
+    )
 }
 
 /// Act on one client message, returning any replies.
-fn handle(
-    hub: &Hub,
-    subs: &mut BTreeMap<String, Sub>,
-    text: &str,
-    peer: SocketAddr,
-) -> Vec<String> {
+fn handle(hub: &Hub, subs: &mut Subs, text: &str, peer: SocketAddr) -> Vec<String> {
     let Ok(Json::Object(msg)) = serde_json::from_str::<Json>(text) else {
         return vec![error(format!("cannot parse {text:.100}"))];
     };
@@ -379,24 +532,20 @@ fn handle(
             let mut refused = 0;
             let mut refused_total = 0;
             let mut invalid = 0;
+            let mut local = 0;
             for name in names() {
                 // A repeat subscription gets the full state again.
-                if let Some(sub) = subs.get_mut(name) {
+                if let Some(sub) = subs.map.get_mut(name) {
                     sub.sent = None;
+                    subs.changed.mark(name);
                 } else if !valid_name(name) {
                     invalid += 1;
-                } else if subs.len() >= MAX_PVS {
+                } else if !served_scheme(name) {
+                    local += 1;
+                } else if subs.map.len() >= MAX_PVS {
                     refused += 1;
-                } else if let Some(_slot) = SubSlot::take(&hub.subscriptions) {
-                    let pv = hub.manager.subscribe(name);
-                    subs.insert(
-                        name.to_string(),
-                        Sub {
-                            pv,
-                            sent: None,
-                            _slot,
-                        },
-                    );
+                } else if let Some(slot) = SubSlot::take(&hub.subscriptions) {
+                    subs.add(name, hub.manager.subscribe(name), slot);
                 } else {
                     refused_total += 1;
                 }
@@ -406,6 +555,13 @@ fn handle(
                 return vec![error(format!(
                     "Cannot subscribe to {invalid} PVs: names are at most {MAX_NAME} \
                      printable characters with no spaces"
+                ))];
+            }
+            if local > 0 {
+                log::warn!("PVWS client {peer} asked for {local} loc://, sim:// or formula PVs");
+                return vec![error(format!(
+                    "Cannot subscribe to {local} PVs: loc:// and sim:// PVs and formulas \
+                     are made by the page, not this server"
                 ))];
             }
             if refused > 0 {
@@ -423,34 +579,46 @@ fn handle(
         }
         Some("clear") => {
             for name in names() {
-                subs.remove(name);
+                subs.map.remove(name);
             }
             vec![]
         }
         Some("list") => {
-            vec![json!({"type": "list", "pvs": subs.keys().collect::<Vec<_>>()}).to_string()]
+            vec![json!({"type": "list", "pvs": subs.map.keys().collect::<Vec<_>>()}).to_string()]
         }
         Some("write") => {
             let name = msg.get("pv").and_then(Json::as_str).unwrap_or_default();
-            let Some(sub) = subs.get(name) else {
+            let Some(sub) = subs.map.get(name) else {
                 return vec![error(format!("Cannot write unknown PV {name}"))];
             };
             if !hub.config.write {
-                return vec![error("writes are disabled on this server (--write)".into())];
+                return vec![write_error(
+                    name,
+                    "writes are disabled on this server (--write)",
+                )];
             }
             let given = msg.get("token").and_then(Json::as_str).unwrap_or_default();
             if !token_ok(given, &hub.config.write_token) {
                 log::warn!("refused a write to {name} from {peer}: bad token");
-                return vec![error(format!("Cannot write {name}: bad or missing token"))];
+                return vec![write_error(name, "bad or missing token")];
             }
-            match msg.get("value").and_then(write_text) {
-                Some(value) => {
-                    log::info!("write {name} = {value} from {peer}");
-                    sub.pv.write(value);
-                    vec![]
-                }
-                None => vec![error(format!("Cannot write {name}: no value"))],
+            let Some(value) = msg.get("value").and_then(write_text) else {
+                return vec![write_error(name, "no value")];
+            };
+            // Said to the client, not the log, which would fill with them.
+            // A PV that has yet to connect takes the write into its queue.
+            if sub.pv.dropped() {
+                return vec![write_error(name, "not connected")];
             }
+            log::info!("write {name} = {value} from {peer}");
+            // bobview's own mark for a string-format write (see
+            // `pv::Pv::write_long_string`).
+            if msg.get("long_string").and_then(Json::as_bool) == Some(true) {
+                sub.pv.write_long_string(value);
+            } else {
+                sub.pv.write(value);
+            }
+            vec![]
         }
         Some("echo") => vec![text.to_string()],
         Some("ping") => vec![],
@@ -460,6 +628,18 @@ fn handle(
 
 fn error(message: String) -> String {
     json!({"type": "error", "message": message}).to_string()
+}
+
+/// An error naming the PV a write was refused for, so the page can show
+/// it by the PV as well as log it.
+fn write_error(name: &str, why: &str) -> String {
+    json!({
+        "type": "error",
+        "pv": name,
+        "message": format!("Cannot write {name}: {why}"),
+        "write_error": why,
+    })
+    .to_string()
 }
 
 /// A written value as the text `Pv::write` takes; whole numbers lose their
@@ -478,7 +658,7 @@ fn write_text(value: &Json) -> Option<String> {
 
 async fn send_all(ws: &mut WebSocket, messages: Vec<String>) -> bool {
     for msg in messages {
-        if ws.send(Message::Text(msg.into())).await.is_err() {
+        if !send(ws, Message::Text(msg.into())).await {
             return false;
         }
     }
@@ -486,16 +666,24 @@ async fn send_all(ws: &mut WebSocket, messages: Vec<String>) -> bool {
 }
 
 /// Tell the client about every PV that changed since it last heard.
-async fn send_updates(hub: &Hub, ws: &mut WebSocket, subs: &mut BTreeMap<String, Sub>) -> bool {
+async fn send_updates(hub: &Hub, ws: &mut WebSocket, subs: &mut Subs) -> bool {
+    send_all(ws, updates(hub, subs)).await
+}
+
+/// The updates for the PVs that changed since the client last heard.
+fn updates(hub: &Hub, subs: &mut Subs) -> Vec<String> {
     let mut messages = Vec::new();
-    for (name, sub) in subs.iter_mut() {
+    for name in subs.changed.take() {
+        let Some(sub) = subs.map.get_mut(&name) else {
+            continue;
+        };
         let state = sub.pv.state();
-        if let Some(msg) = update(name, &state, sub.sent.as_ref(), hub.config.write) {
+        if let Some(msg) = update(&name, &state, sub.sent.as_ref(), hub.config.write) {
             messages.push(msg);
         }
         sub.sent = Some(state);
     }
-    send_all(ws, messages).await
+    messages
 }
 
 /// The `update` message taking a client from `last` to `s`, if anything
@@ -537,6 +725,21 @@ fn update(name: &str, s: &PvState, last: Option<&PvState>, write: bool) -> Optio
             m.insert("min".into(), number(lo));
             m.insert("max".into(), number(hi));
         }
+        // Alarm and warning limits as PVWS sends them, and control limits,
+        // which it does not: meters and sliders take their ranges from them.
+        let limits = [
+            (s.warning_range, "warn_low", "warn_high"),
+            (s.alarm_range, "alarm_low", "alarm_high"),
+            (s.control_range, "ctrl_low", "ctrl_high"),
+        ];
+        let last_limits = last.map(|l| [l.warning_range, l.alarm_range, l.control_range]);
+        for (i, (range, lo_key, hi_key)) in limits.into_iter().enumerate() {
+            let Some((lo, hi)) = range else { continue };
+            if first || last_limits.is_some_and(|l| !same_range(l[i], range)) {
+                m.insert(lo_key.into(), number(lo));
+                m.insert(hi_key.into(), number(hi));
+            }
+        }
         if matches!(s.value, Value::Enum(_)) && changed(&|l| l.labels != s.labels) {
             m.insert("labels".into(), json!(s.labels));
         }
@@ -563,6 +766,17 @@ fn update(name: &str, s: &PvState, last: Option<&PvState>, write: bool) -> Optio
     msg.insert("pv".into(), json!(name));
     msg.extend(m);
     Some(Json::Object(msg).to_string())
+}
+
+/// Whether two limit pairs are equal, with NaN equal to NaN (unset alarm
+/// limits are NaN, which would otherwise be sent on every update).
+fn same_range(a: Option<(f64, f64)>, b: Option<(f64, f64)>) -> bool {
+    let same = |x: f64, y: f64| x == y || (x.is_nan() && y.is_nan());
+    match (a, b) {
+        (Some(a), Some(b)) => same(a.0, b.0) && same(a.1, b.1),
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 /// Whether two values are equal, without comparing arrays that are the
@@ -651,7 +865,11 @@ fn encode_value(m: &mut Map<String, Json>, s: &PvState) {
             m.insert("b64dbl".into(), b64(bytes));
         }
         Value::StrArray(a) => {
+            // The text, as PVWS sends it, for any PVWS client; the items
+            // for bobview under a key of its own, so that a client reading
+            // `value` as a number (cs-web-lib) never sees an array.
             m.insert("text".into(), json!(a.join(", ")));
+            m.insert("strings".into(), json!(a.as_ref()));
         }
         Value::Image(img) => {
             // Images need a video stream, not JSON (bobview#20).
@@ -761,6 +979,39 @@ mod tests {
     }
 
     #[test]
+    fn limits_and_string_arrays() {
+        let mut a = PvState {
+            alarm_range: Some((f64::NAN, f64::NAN)),
+            warning_range: Some((1.0, 9.0)),
+            control_range: Some((0.0, 10.0)),
+            ..double(5.0)
+        };
+        let m = parse(update("X", &a, None, false));
+        assert_eq!(m["warn_low"], 1.0);
+        assert_eq!(m["warn_high"], 9.0);
+        assert_eq!(m["alarm_low"], "NaN");
+        assert_eq!(m["ctrl_high"], 10.0);
+        // Unchanged NaN limits are not sent again; a changed limit is.
+        assert!(update("X", &a.clone(), Some(&a), false).is_none());
+        let before = a.clone();
+        a.control_range = Some((0.0, 20.0));
+        let m = parse(update("X", &a, Some(&before), false));
+        assert_eq!(m["ctrl_high"], 20.0);
+        assert!(!m.contains_key("warn_low"));
+
+        let s = PvState {
+            connected: true,
+            value: Value::StrArray(vec!["a, b".into(), "c".into()].into()),
+            ..Default::default()
+        };
+        let m = parse(update("X", &s, None, false));
+        assert_eq!(m["vtype"], "VStringArray");
+        assert_eq!(m["strings"], json!(["a, b", "c"]));
+        assert_eq!(m["text"], "a, b, c");
+        assert!(!m.contains_key("value"), "PVWS sends no value for these");
+    }
+
+    #[test]
     fn writes_off_means_readonly() {
         let m = parse(update("X", &double(1.0), None, false));
         assert_eq!(m["readonly"], true);
@@ -842,6 +1093,15 @@ mod tests {
         assert!(ok("127.0.0.1:8080", Some("http://127.0.0.1:8080"), &none));
         assert!(ok("[::1]:8080", Some("http://[::1]:8080"), &none));
         assert!(ok("localhost:8080", Some("http://localhost:8080"), &none));
+        // A trailing dot is the same name, fully qualified.
+        assert!(ok("localhost.:8080", Some("http://localhost.:8080"), &none));
+        assert!(ok("server.", Some("http://server."), &none));
+        assert!(!ok(
+            "evil.example.:8080",
+            Some("http://evil.example.:8080"),
+            &none
+        ));
+        assert!(!ok("server..", Some("http://server.."), &none));
         assert!(!ok("[evil]:8080", Some("http://[evil]:8080"), &none));
         // The host of an allowed origin is one of ours.
         assert!(ok(
@@ -853,15 +1113,138 @@ mod tests {
 
     #[test]
     fn machine_names_are_hosts() {
-        let Some(name) = machine_names().first() else {
-            return;
-        };
-        let short = name.split('.').next().unwrap();
         let config = config(&[], &[]);
-        assert!(host_allowed(name, &config));
-        assert!(host_allowed(short, &config));
-        assert!(host_allowed(&format!("{short}.some.domain"), &config));
-        assert!(!host_allowed(&format!("{short}x.some.domain"), &config));
+        for name in machine_names() {
+            assert!(host_allowed(name, &config), "{name}");
+            let short = name.split('.').next().unwrap();
+            // Any other domain is someone else's name for this machine.
+            assert!(!host_allowed(&format!("{short}.evil.com"), &config));
+            assert!(!host_allowed(&format!("{short}x"), &config));
+        }
+    }
+
+    #[test]
+    fn only_exact_machine_names() {
+        let names = names_of(
+            &["WS01.site.org\n".into(), "ws01".into(), String::new()],
+            &resolv_domains("# a comment\ndomain site.org\nsearch Other.org. site.org\n"),
+        );
+        assert_eq!(
+            names,
+            ["ws01", "ws01.other.org", "ws01.site.org"].map(String::from)
+        );
+        let names = names_of(&["ws01".into()], &[]);
+        assert_eq!(names, ["ws01"]);
+        assert_eq!(
+            resolv_domains("nameserver 10.0.0.1\n"),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn clients_are_counted_by_v4_address_or_v6_network() {
+        let ip = |s: &str| client_key(s.parse().unwrap());
+        assert_eq!(ip("192.0.2.1"), ip("::ffff:192.0.2.1"));
+        assert_ne!(ip("192.0.2.1"), ip("192.0.2.2"));
+        assert_eq!(ip("2001:db8:1:2::1"), ip("2001:db8:1:2:ffff::9"));
+        assert_eq!(ip("2001:db8:1:2::1"), ip("2001:db8:1:2::"));
+        assert_ne!(ip("2001:db8:1:2::1"), ip("2001:db8:1:3::1"));
+    }
+
+    #[test]
+    fn one_v6_network_shares_a_cap() {
+        let hub = Arc::new(Hub::new(PvManager::new(), config(&[], &[])));
+        let slots: Vec<_> = (0..10u16)
+            .map(|n| {
+                let ip = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 1, 0, 0, 0, n));
+                ClientSlot::take(&hub, ip).expect("under the cap")
+            })
+            .collect();
+        let next = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 1, 9, 9, 9, 9));
+        assert!(ClientSlot::take(&hub, next).is_err());
+        let other = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 2, 0, 0, 0, 1));
+        assert!(ClientSlot::take(&hub, other).is_ok());
+        drop(slots);
+    }
+
+    #[test]
+    fn subscriptions_are_paced() {
+        let t0 = Instant::now();
+        let mut pace = Pace::new();
+        assert_eq!(pace.spend(MAX_PVS, t0), Duration::ZERO);
+        // The bucket is empty: 500 more wait half a second.
+        let wait = pace.spend(500, t0);
+        assert!((wait.as_secs_f64() - 0.5).abs() < 1e-9, "{wait:?}");
+        // Ten seconds later it is full again, but no fuller.
+        let later = t0 + Duration::from_secs(20);
+        assert_eq!(pace.spend(MAX_PVS, later), Duration::ZERO);
+        assert!(pace.spend(1, later) > Duration::ZERO);
+    }
+
+    #[test]
+    fn pacing_counts_only_pvs_that_would_be_subscribed() {
+        let mut subs = Subs::default();
+        let total = Arc::new(AtomicUsize::new(0));
+        let pvs = PvManager::new();
+        subs.add(
+            "HAVE",
+            pvs.subscribe("loc://pace_have"),
+            SubSlot::take(&total).unwrap(),
+        );
+        let msg = |names: Vec<&str>| json!({"type": "subscribe", "pvs": names}).to_string();
+        let mut names = vec!["DUP:X"; 30_000];
+        names.extend([
+            "HAVE",
+            "bad name",
+            "loc://x",
+            "sim://sine",
+            "NEW",
+            "pva://NEW",
+        ]);
+        assert_eq!(new_names(&subs, &msg(names)), 3);
+        // No more than the client may still have.
+        let many: Vec<String> = (0..MAX_PVS + 5).map(|i| format!("PV{i}")).collect();
+        let many = msg(many.iter().map(String::as_str).collect());
+        assert_eq!(new_names(&subs, &many), MAX_PVS - 1);
+        assert_eq!(new_names(&subs, r#"{"type": "clear", "pvs": ["A"]}"#), 0);
+    }
+
+    #[test]
+    fn local_and_simulated_pvs_are_refused() {
+        let hub = Hub::new(PvManager::new(), config(&[], &[]));
+        let peer: SocketAddr = "192.0.2.1:5000".parse().unwrap();
+        let mut subs = Subs::default();
+        for name in ["loc://x(1)", "sim://sine", "loc://y", "=pv('loc://x')"] {
+            let msg = json!({"type": "subscribe", "pvs": [name]}).to_string();
+            let replies = handle(&hub, &mut subs, &msg, peer);
+            assert!(replies[0].contains("loc:// and sim://"), "{replies:?}");
+        }
+        assert!(subs.map.is_empty());
+        assert_eq!(hub.subscriptions.load(Ordering::SeqCst), 0);
+        assert!(served_scheme("ca://X") && served_scheme("pva://X") && served_scheme("X"));
+    }
+
+    #[test]
+    fn only_changed_pvs_are_sent() {
+        let hub = Hub::new(PvManager::new(), config(&[], &[]));
+        let mut subs = Subs::default();
+        let total = Arc::new(AtomicUsize::new(0));
+        let a = hub.manager.subscribe("loc://changed_a(1)");
+        let b = hub.manager.subscribe("loc://changed_b(1)");
+        subs.add("a", a.clone(), SubSlot::take(&total).unwrap());
+        subs.add("b", b.clone(), SubSlot::take(&total).unwrap());
+        // Both are new.
+        assert_eq!(updates(&hub, &mut subs).len(), 2);
+        assert!(updates(&hub, &mut subs).is_empty());
+        a.write("2");
+        let sent = updates(&hub, &mut subs);
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].contains("\"pv\":\"a\""), "{sent:?}");
+        // A cleared PV marks nothing.
+        subs.map.remove("b");
+        b.write("3");
+        assert!(subs.changed.take().is_empty());
+        assert_eq!(total.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -997,15 +1380,15 @@ mod tests {
     fn writes_need_the_token() {
         let hub = Hub::new(PvManager::new(), config(&[], &[]));
         let peer: SocketAddr = "192.0.2.1:5000".parse().unwrap();
-        let mut subs = BTreeMap::new();
-        let sub = |subs: &mut BTreeMap<String, Sub>, name: &str| {
+        let mut subs = Subs::default();
+        let sub = |subs: &mut Subs, name: &str| {
             let msg = json!({"type": "subscribe", "pvs": [name]}).to_string();
             handle(&hub, subs, &msg, peer)
         };
-        assert!(sub(&mut subs, "loc://x(1)").is_empty());
+        assert!(sub(&mut subs, "TEST:WRITE").is_empty());
         assert_eq!(hub.subscriptions.load(Ordering::SeqCst), 1);
-        let write = |subs: &mut BTreeMap<String, Sub>, token: Option<&str>| {
-            let mut msg = json!({"type": "write", "pv": "loc://x(1)", "value": 2});
+        let write = |subs: &mut Subs, token: Option<&str>| {
+            let mut msg = json!({"type": "write", "pv": "TEST:WRITE", "value": 2});
             if let Some(t) = token {
                 msg["token"] = json!(t);
             }
@@ -1013,12 +1396,50 @@ mod tests {
         };
         assert!(write(&mut subs, None)[0].contains("token"));
         assert!(write(&mut subs, Some("wrong"))[0].contains("token"));
+        // The right token: TEST:WRITE has yet to connect, so the write is
+        // queued for it.
         assert!(write(&mut subs, Some("secret")).is_empty());
+        // Once it has connected and dropped, the client hears so at once.
+        let pv = &subs.map["TEST:WRITE"].pv;
+        pv.set_connected_for_test(true);
+        pv.set_connected_for_test(false);
+        let refused = write(&mut subs, Some("secret"));
+        let m: Map<String, Json> = serde_json::from_str(&refused[0]).unwrap();
+        assert_eq!(m["pv"], "TEST:WRITE");
+        assert_eq!(m["write_error"], "not connected");
         // Bad names are refused and not counted.
         assert!(sub(&mut subs, "bad name")[0].contains("Cannot subscribe"));
-        assert_eq!(subs.len(), 1);
-        subs.clear();
+        assert_eq!(subs.map.len(), 1);
+        subs.map.clear();
         assert_eq!(hub.subscriptions.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn long_string_writes_are_marked() {
+        let hub = Hub::new(PvManager::new(), config(&[], &[]));
+        let peer: SocketAddr = "192.0.2.1:5000".parse().unwrap();
+        let mut subs = Subs::default();
+        // Clients may not subscribe to a local PV, but one shows the value
+        // written.
+        let name = "loc://srv_long_string<VLongArray>(0,0)";
+        let slot = SubSlot::take(&hub.subscriptions).unwrap();
+        subs.add(name, hub.manager.subscribe(name), slot);
+        let write = |subs: &mut Subs, value: &str, long_string: bool| {
+            let mut msg = json!({"type": "write", "pv": name, "value": value, "token": "secret"});
+            if long_string {
+                msg["long_string"] = json!(true);
+            }
+            assert!(handle(&hub, subs, &msg.to_string(), peer).is_empty());
+            subs.map[name].pv.state().value
+        };
+        assert_eq!(
+            write(&mut subs, "ab", true),
+            Value::LongArray(Arc::from(vec![97, 98, 0]))
+        );
+        assert_eq!(
+            write(&mut subs, "[1, 2]", false),
+            Value::LongArray(Arc::from(vec![1, 2]))
+        );
     }
 
     #[test]

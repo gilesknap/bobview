@@ -20,10 +20,17 @@ On the phone (Android Linux Terminal), an x86_64 Linux desktop or a Mac
 (Apple silicon or Intel, macOS 11 or later); `install.sh` picks the aarch64
 or x86_64, Linux or macOS release build to match the machine.
 
-Pre-requisites on debian distros (none on macOS):
+Pre-requisites on Debian and Ubuntu:
 ```bash
 sudo apt install libxkbcommon0 libwayland-client0 libegl1 libgl1-mesa-dri
 ```
+
+On RHEL, Rocky, Alma and Fedora:
+```bash
+sudo dnf install libxkbcommon libwayland-client libglvnd-egl mesa-dri-drivers
+```
+
+None are needed on macOS.
 
 Install:
 ```
@@ -98,10 +105,15 @@ full screen, `--snapshot out.png` renders headless and exits (with `--size WxH`
 or `--size auto`, `--scale-factor F` to render as on a high-DPI screen,
 `--wait SECONDS`, and `--click X,Y` or `--right-click X,Y` to interact
 first, with `--settle SECONDS` after the last click), `BOBVIEW_LOG=debug` gives more output. The window opens at the size
-of the first display (when the screen has room). With Auto-size (🗖 in the
-toolbar, on by default) it is resized to each display you open, unless it
-is maximised or full screen; turn it off to keep the window's size and scale
-each display to fit. The toolbar, menus and keypad are scaled down on a
+of the first display (when the screen has room). With Auto-size (in the
+toolbar's ☰ menu, on by default) it is resized to each display you open,
+unless it is maximised or full screen; turn it off to keep the window's size
+and scale each display to fit. The toolbar has Back, Forward, Home and
+Reload; zoom out, the zoom, zoom in and Fit; the navigator and Open; the
+display's name; and on the right the window's pin, the layout list and ☰,
+a menu of the rest (Auto-size and the layout actions). Clicking the zoom shows the display at 100% and sizes the window
+to it (and the navigator, when shown). A narrow window keeps Back, Home,
+the zoom and Fit, and moves the rest into ☰. The toolbar and menus are scaled down on a
 small high-DPI screen so that they take a small share of it; `--ui-scale F`
 (or `BOBVIEW_UI_SCALE=F`) fixes their size, 1 being the desktop's own scale. Hover over a widget to see its
 PV and value; right-click it (long-press on a touch screen) to copy the PV
@@ -114,7 +126,10 @@ action says in the status line why it did nothing. `loc://` PVs are exempt,
 as they live inside bobview and cannot reach a control system. PV Access
 does not report access rights, so such a PV is assumed writable (the PV
 details say "unknown") and a put the server refuses is shown as a write
-error in the status line and the PV details. A `write_pv` action (or the
+error in the status line and the PV details. A write to a CA or PVA PV that
+was connected and has dropped is refused at once, as is one while 16 earlier
+writes to it still wait, rather than applied late; the status line says so. A
+write to a PV that has yet to connect waits in that queue. A `write_pv` action (or the
 toggle script) of a display loaded from an `http://` or `https://` URL asks
 for confirmation before it writes; displays from local files write at once.
 
@@ -302,16 +317,17 @@ a symbol click …) open their displays, whatever their target:
 
 The **viewer** is the unpinned window used last (focused, opened or
 unpinned), so clicking a window once makes it where the next link goes.
-"Already open" means the same display with the same macros. A display
-opened in place or in the viewer keeps that window's history for Back and
-Forward.
+"Already open" means the same display with the same macros, in another
+window. A display opened in place or in the viewer keeps that window's
+history for Back and Forward. A link to the display its own window shows
+reloads it in place, as a Refresh button wants, without adding to Back.
 
 The main window starts pinned, so it stays where it is while the displays
 it links to come and go in one other window; pin that one too to keep it,
 and the next link opens a new viewer. Unpinned, the main window navigates in
 place as one window does. Holding shift opens every display in a window of
-its own, as the old multi-window mode did. The main window's pin is 📌 on
-its toolbar; a display window's is in the corner of its display (below).
+its own, as the old multi-window mode did. The main window's pin is on its
+toolbar; a display window's is in the corner of its display (below).
 Pinned windows have 📌 before their title. In a browser, and on a touch or
 small screen, displays have no windows of their own: every link navigates
 in place, and the pin and layout controls are not shown. BOY Exit buttons
@@ -330,25 +346,55 @@ placed so again for each display a pinned window's link opens in it. The
 display fits the window as you resize it. It has the native title
 bar only: its toolbar (Back, Forward, Reload, zoom and Home) is hidden until
 you show it. While the pointer is over the window, small buttons appear in
-the top-right corner of the display: ◀ Back (while the toolbar is hidden),
-📌 the window's pin, and a chevron that shows or hides the toolbar, as
+the top-right corner of the display: Back (while the toolbar is hidden),
+the window's pin, and a chevron that shows or hides the toolbar, as
 **Ctrl+T** and Show toolbar in the right-click menu on the display's
 background (which also has Close) do. In
 every window Ctrl+R reloads, Alt+← and Alt+→ go back and forward, and
 Ctrl+W closes the window. Closing the main window quits bobview and closes
 its windows.
 
+### Navigator
+
+The navigator button on the main toolbar shows the navigator beside the
+main window's display:
+a tree of the displays the home display links to, the displays those link
+to, and so on. A display's links are its widgets' Open display actions,
+including those in groups, tabs and embedded displays, each display and
+macros once, named by its button's text (or, in a menu, the action's
+description). Clicking a node opens its display as a link in the main
+window would, so with the main window pinned it goes to the viewer, and
+shift and ctrl work as for a link. The displays open in a window are in
+bold. Showing or hiding the navigator widens or narrows the window by its
+width (unless the window is maximized or full screen), so the display keeps
+its size and zoom.
+
+A link with no text of its own, or the same text as another link on its
+display (a row of identical device symbols), is named by the display it
+opens once that has been read: by the words of its title that macros fill
+in, such as `LB-VA-IONP-04` from `Ion Pump Controller - $(device)`, else by
+its whole title. The tooltip gives the title, file and macros.
+
+Displays are read from their files, without connecting their PVs, as their
+nodes are shown, so the tree is read one level ahead of what is open. A
+display that links back to one above it is marked ↻ and not opened again;
+one that can't be read is marked ⚠. A command action's display (a DLS
+launcher script) is found by running its script, so only when its node is
+opened or clicked. The filter box lists the displays read so far whose name
+or file matches; ⟳ reads them all again.
+
 A layout records the open windows: each one's display, Eclipse project and
-effective macros, its position and size, whether it is pinned, the main
+effective macros, its position and size, whether it is pinned, whether the
+main window shows the navigator, the main
 window's zoom and whether a display window shows its toolbar (a layout from
 before windows were pinned pins them all if it was saved in multi-window
 mode, and none if not). It records the trend windows too: each
 one's PVs, time span, log scale, position and size. Layouts are JSON files in
 `$XDG_CONFIG_HOME/bobview/layouts` (by default `~/.config/bobview/layouts`).
 The main toolbar's layout list loads one (closing the display and trend
-windows open now), and the ▾ menu next to it has Save (to the layout last loaded or
-saved), Save as default, Save as… (asking before replacing a layout),
-Delete, and Save default on exit (off unless ticked).
+windows open now), and its ☰ menu has Save layout (to the layout last
+loaded or saved), Save layout as… (asking before replacing a layout), Save
+as default, Delete layout, and Save default on exit (off unless ticked).
 
 ```bash
 bobview                     # restores the default layout if there is one
@@ -384,35 +430,49 @@ and open `http://localhost:8080/?display=index.bob` (on this machine; from anoth
 a checkout, `./scripts/build-web.sh` writes `dist/web` (it needs the
 `wasm-bindgen` CLI matching `Cargo.lock`) and `--web DIR` picks another. Files
 in `--opi` take precedence over same-named files in the web build (which has
-the test displays); dot-files such as `.git` are never served. The server
+the test displays); dot-files such as `.git` are never served, nor files
+reached through a symbolic link that leads out of `--opi` or `--web` (unless
+`--follow-symlinks`). Other sites cannot frame the pages (`X-Frame-Options`,
+`frame-ancestors 'self'`). The server
 listens on `--bind 127.0.0.1 --port 8080` by default, so only this machine can
 reach it; use `--bind 0.0.0.0` (every interface) or a specific address to serve
 others, ideally behind a firewall or an authenticating reverse proxy, since
 reading PVs needs no login. The server holds at most 100 clients and 50,000
 subscribed PVs, and refuses PV names over 256 characters or with spaces or
-non-ASCII characters (so `loc://s("hello world")` is refused). One address
-may hold 10 clients (`--max-per-ip N`), and a client that stops answering
-websocket pings is dropped. Behind a reverse proxy every client has the
+non-ASCII characters. It serves no `loc://` or `sim://` PVs: the page makes
+those itself. One address (or one IPv6 /64) may hold 10 clients
+(`--max-per-ip N`); a client subscribing to more than 1,000 new PVs a second,
+after its first 10,000, is slowed down; and a client that stops answering
+websocket pings, or takes over 10 s to take one message, is dropped. Each
+client gets the PVs that changed at most every `--throttle-ms` (100 ms),
+each with its latest state. Behind a reverse proxy every client has the
 proxy's address, so raise `--max-per-ip` and expect the logs to show the proxy;
 the `Host` the proxy passes on must also be one of the server's names, so give
 a public name with `--host NAME` (the Origin/Host check now applies to read-only
 servers too).
 
-The page also takes `&macros=P=X,R=Y`, `&zoom=F`, `&keypad` and, to use
+The page also takes `&macros=P=X,R=Y`, `&zoom=F` and, to use
 another PVWS server, `&pvws=host[:port]` (meaning `wss://host[:port]/pvws/pv`,
 or `ws://` when the page is plain `http:` and the port isn't 443) or a full
 `ws://` or `wss://` URL; `display` may be a URL on another server that allows
-cross-origin requests. Writes are off unless the server has `--write`, since
+cross-origin requests, unless the page has a write token (below). Writes are off unless the server has `--write`, since
 they go out as the server's user, and then each write must carry a token:
 `--write-token TOKEN` (arguments show in `ps`, so prefer the
 `BOBVIEW_WRITE_TOKEN` environment variable), or a random one that the server
-prints to stderr at startup; open the page with `&token=TOKEN`. The page removes
-the token from its address after reading it, so a reload needs it again. Browsers let any page open a websocket, so the
+prints to stderr at startup; open the page with `&token=TOKEN`. An empty
+`BOBVIEW_WRITE_TOKEN` counts as unset. The page removes
+the token from its address after reading it, so a reload needs it again. A page
+with a token loads displays only from its own server, and sends the token only
+to a PVWS on its own server, so a link naming someone else's display or
+`&pvws=` cannot write with it. Writes to a PV that was connected and has
+dropped fail at once, and at most 16 may wait for one PV. Browsers let any page open a websocket, so the
 server always accepts only pages from itself (by `Origin`), plus
 any named with `--allow-origin https://host.example.com` (repeatable). Those
 pages must also call the server by an IP address, `localhost`, this machine's
-name, the host of an `--allow-origin` or a name given with `--host NAME`
-(repeatable), so a page cannot reach it through a DNS name of its own.
+name (as the kernel has it, without its domain, or in a domain of
+`/etc/resolv.conf`), the host of an `--allow-origin` or a name given with
+`--host NAME` (repeatable), so a page cannot reach it through a DNS name of its
+own.
 Images from PVA are not sent over PVWS yet.
 
 ## Build

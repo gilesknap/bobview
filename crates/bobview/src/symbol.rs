@@ -9,18 +9,20 @@
 //! widget keeps its own texture at the size it is drawn.
 
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock};
 
 use bob::Source;
 use eframe::egui::{
     self, Align2, Color32, ColorImage, CornerRadius, FontId, Id, Mesh, Pos2, Rect, Response, Sense,
     TextureHandle, TextureOptions, Vec2,
 };
+use parking_lot::Mutex;
 use pv::{PvState, Value};
 use resvg::{tiny_skia, usvg};
 
 use crate::screen::Node;
 use crate::style::{color, named};
+use crate::svg;
 use crate::widgets::{Cx, placeholder, run_action};
 
 /// Largest texture side we render an SVG at.
@@ -74,15 +76,23 @@ static QUEUE: LazyLock<Mutex<std::sync::mpsc::Sender<Job>>> = LazyLock::new(|| {
     let rx = Arc::new(Mutex::new(rx));
     for _ in 0..LOADERS {
         let rx = rx.clone();
-        std::thread::spawn(move || {
-            loop {
-                let job = rx.lock().unwrap().recv();
-                match job {
-                    Ok(job) => load(job),
-                    Err(_) => break,
+        // An explicit stack: usvg recurses per element and the default is
+        // platform dependent.
+        let spawned = std::thread::Builder::new()
+            .name("image-loader".into())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || {
+                loop {
+                    let job = rx.lock().recv();
+                    match job {
+                        Ok(job) => load(job),
+                        Err(_) => break,
+                    }
                 }
-            }
-        });
+            });
+        if let Err(e) = spawned {
+            log::error!("cannot start an image loader: {e}");
+        }
     }
     Mutex::new(tx)
 });
@@ -95,7 +105,7 @@ struct Job {
 
 /// Drop every image, loaded or loading, so they are read again on a reload.
 pub fn forget() {
-    let mut images = IMAGES.lock().unwrap();
+    let mut images = IMAGES.lock();
     images.entries.clear();
     images.generation += 1;
 }
@@ -105,7 +115,6 @@ pub fn forget() {
 pub fn loading() -> bool {
     IMAGES
         .lock()
-        .unwrap()
         .entries
         .values()
         .any(|e| matches!(e, Entry::Loading))
@@ -114,7 +123,7 @@ pub fn loading() -> bool {
 /// The image at `source`: `Some(Ok)` when loaded, `Some(Err)` when it cannot
 /// be, and `None` while it loads (a repaint follows when it has).
 fn image(ctx: &egui::Context, source: &Source) -> Option<Result<Image, ()>> {
-    let mut images = IMAGES.lock().unwrap();
+    let mut images = IMAGES.lock();
     match images.entries.get(source) {
         Some(Entry::Ready(img)) => return Some(Ok(img.clone())),
         Some(Entry::Failed) => return Some(Err(())),
@@ -129,7 +138,7 @@ fn image(ctx: &egui::Context, source: &Source) -> Option<Result<Image, ()>> {
     };
     drop(images);
     #[cfg(not(target_arch = "wasm32"))]
-    let _ = QUEUE.lock().unwrap().send(job);
+    let _ = QUEUE.lock().send(job);
     // A browser has one thread: fetch without blocking, then decode.
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_futures::spawn_local(async move {
@@ -150,7 +159,10 @@ fn load(job: Job) {
 fn finish(job: Job, data: Result<Vec<u8>, bob::Error>) {
     let source = &job.source;
     let data = data.map_err(|e| e.to_string());
-    // A decoder that panics on a bad file must not leave it loading.
+    // The release profile uses `panic = "abort"`, so this cannot catch a
+    // decoder panic there: hostile input is instead rejected up front (image
+    // sizes are capped before anything is allocated). Where panics do unwind
+    // (debug and test builds) a decoder panic must not leave it loading.
     let read = || match data {
         Ok(data) => match decode(source, &data) {
             Ok(img) => Entry::Ready(img),
@@ -165,7 +177,7 @@ fn finish(job: Job, data: Result<Vec<u8>, bob::Error>) {
         }
     };
     let entry = std::panic::catch_unwind(read).unwrap_or(Entry::Failed);
-    let mut images = IMAGES.lock().unwrap();
+    let mut images = IMAGES.lock();
     if images.generation == job.generation {
         images.entries.insert(job.source, entry);
     }
@@ -191,26 +203,26 @@ fn decode(source: &Source, data: &[u8]) -> Result<Image, String> {
     if !svg {
         return Err("only SVG and PNG images are supported".into());
     }
-    // An SVG may embed images as data: URLs, but never names files or URLs:
-    // a display from the web is not trusted with local files.
-    let options = usvg::Options {
-        image_href_resolver: usvg::ImageHrefResolver {
-            resolve_string: Box::new(|href, _| {
-                log::warn!("SVG image '{href}' is not shown: only embedded images are");
-                None
-            }),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let tree = usvg::Tree::from_data(data, &options).map_err(|e| e.to_string())?;
-    Ok(Image::Svg(Arc::new(tree)))
+    // (usvg is built without `svgz`, so a gzipped file fails to parse.)
+    svg::parse(data).map(|tree| Image::Svg(Arc::new(tree)))
 }
+
+/// Most bytes the PNG decoder may allocate for itself, besides the image.
+const MAX_PNG_DECODER_BYTES: usize = 64 * 1024 * 1024;
 
 fn decode_png(data: &[u8]) -> Result<ColorImage, String> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(data));
     decoder.set_transformations(png::Transformations::normalize_to_color8());
+    decoder.set_limits(png::Limits {
+        bytes: MAX_PNG_DECODER_BYTES,
+    });
     let mut reader = decoder.read_info().map_err(|e| e.to_string())?;
+    // `Limits` don't cover the output buffer we allocate next: a few bytes
+    // can declare gigabytes of pixels.
+    let (width, height) = reader.info().size();
+    if !svg::size_ok(width, height) {
+        return Err(format!("PNG of {width}x{height} pixels is too large"));
+    }
     let mut buf = vec![0; reader.output_buffer_size().ok_or("PNG too large")?];
     let info = reader.next_frame(&mut buf).map_err(|e| e.to_string())?;
     let buf = &buf[..info.buffer_size()];
@@ -264,13 +276,7 @@ fn texture<'a>(
             return None;
         }
         Image::Raster(r) => r.size,
-        Image::Svg(_) => {
-            let px = (size * ctx.pixels_per_point())
-                .round()
-                .max(Vec2::splat(1.0));
-            let px = px * (MAX_SIDE.min(max_side) / px.max_elem()).min(1.0);
-            [px.x as usize, px.y as usize]
-        }
+        Image::Svg(_) => svg_pixels(size * ctx.pixels_per_point(), MAX_SIDE.min(max_side)),
     };
     let key = (source.clone(), px);
     if slot.as_ref().is_none_or(|t| t.key != key) {
@@ -293,6 +299,19 @@ fn texture<'a>(
         }
     }
     slot.as_ref().map(|t| &t.handle)
+}
+
+/// The pixels to draw an SVG in to show it `size` pixels big, at most
+/// `max_side` on a side. The size goes up in steps of a fourth of an octave
+/// (19%), so that resizing it smoothly, as a pinch zoom does, draws it again
+/// a few times rather than on every frame; the texture is drawn scaled.
+fn svg_pixels(size: Vec2, max_side: f32) -> [usize; 2] {
+    let size = size.max(Vec2::splat(1.0));
+    let longest = size.max_elem();
+    let step = (longest.log2() * 4.0).ceil() / 4.0;
+    let scale = (step.exp2() / longest).min(max_side / longest);
+    let px = (size * scale).round().max(Vec2::splat(1.0));
+    [px.x as usize, px.y as usize]
 }
 
 fn render_svg(tree: &usvg::Tree, [w, h]: [usize; 2]) -> ColorImage {
@@ -602,9 +621,96 @@ fn picture_size(w: &bob::Widget, native: Vec2, room: Vec2, angle: f32) -> Vec2 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn svgs_are_redrawn_in_steps_as_they_grow() {
+        // A pinch zoom from 100 to 400 pixels, a pixel a frame.
+        let mut sizes: Vec<[usize; 2]> = (100..=400)
+            .map(|w| svg_pixels(Vec2::new(w as f32, w as f32 / 2.0), 4096.0))
+            .collect();
+        for (i, [w, h]) in sizes.iter().enumerate() {
+            let want = 100 + i;
+            assert!(
+                *w >= want && (*w as f32) < want as f32 * 1.2,
+                "{w} for {want}"
+            );
+            assert!(h.abs_diff(w / 2) <= 1, "the shape is kept: {w} x {h}");
+        }
+        sizes.dedup();
+        assert!(sizes.len() <= 9, "{} renders", sizes.len());
+        // Never more than the most a texture can be.
+        assert_eq!(svg_pixels(Vec2::new(9000.0, 3000.0), 4096.0), [4096, 1365]);
+        assert_eq!(svg_pixels(Vec2::ZERO, 4096.0), [1, 1]);
+    }
+
     fn widget(xml: &str) -> bob::Widget {
         let d = bob::Display::parse(&format!("<display>{xml}</display>")).unwrap();
         d.widgets.into_iter().next().unwrap()
+    }
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &b in bytes {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ (0xEDB8_8320 & (!(crc & 1)).wrapping_add(1));
+            }
+        }
+        !crc
+    }
+
+    /// A 1x1 RGBA PNG whose header claims `width` x `height`.
+    fn png_claiming(width: u32, height: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut enc = png::Encoder::new(&mut out, 1, 1);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut w = enc.write_header().unwrap();
+        w.write_image_data(&[1, 2, 3, 4]).unwrap();
+        w.finish().unwrap();
+        out[16..20].copy_from_slice(&width.to_be_bytes());
+        out[20..24].copy_from_slice(&height.to_be_bytes());
+        let crc = crc32(&out[12..29]);
+        out[29..33].copy_from_slice(&crc.to_be_bytes());
+        out
+    }
+
+    #[test]
+    fn png_decompression_bomb_is_refused_before_allocating() {
+        assert!(decode_png(&png_claiming(1, 1)).is_ok());
+        let bomb = png_claiming(30_000, 30_000);
+        let err = decode_png(&bomb).unwrap_err();
+        assert!(err.contains("too large"), "{err}");
+        assert!(decode_png(&png_claiming(u32::MAX >> 1, 1)).is_err());
+    }
+
+    #[test]
+    fn svg_with_embedded_png_bomb_drops_the_image() {
+        use std::fmt::Write;
+        let mut b64 = String::new();
+        // Plain base64 of the bomb PNG.
+        let bomb = png_claiming(30_000, 30_000);
+        const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        for c in bomb.chunks(3) {
+            let n = (u32::from(c[0]) << 16)
+                | (u32::from(*c.get(1).unwrap_or(&0)) << 8)
+                | u32::from(*c.get(2).unwrap_or(&0));
+            for i in 0..4 {
+                if i <= c.len() {
+                    b64.push(T[(n >> (18 - 6 * i) & 63) as usize] as char);
+                } else {
+                    b64.push('=');
+                }
+            }
+        }
+        let mut svg = String::new();
+        write!(
+            svg,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="10" height="10"><image width="10" height="10" xlink:href="data:image/png;base64,{b64}"/></svg>"#
+        )
+        .unwrap();
+        let img = decode(&Source::File("x.svg".into()), svg.as_bytes()).unwrap();
+        let Image::Svg(tree) = img else { panic!() };
+        assert!(tree.root().children().is_empty());
     }
 
     #[test]

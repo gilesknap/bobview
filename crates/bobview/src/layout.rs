@@ -79,6 +79,9 @@ pub struct WindowLayout {
     /// were pinned (see `Layout::pinned`).
     #[serde(default)]
     pub pinned: Option<bool>,
+    /// Whether the main window shows the navigator.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub tree: bool,
 }
 
 /// A number, or the string "fit".
@@ -165,12 +168,13 @@ impl WindowLayout {
             zoom: None,
             toolbar: false,
             pinned: None,
+            tree: false,
         }
     }
 
     /// The display and macros to show.
     pub fn location(&self) -> Location {
-        let mut source = Source::parse(&self.display);
+        let mut source = crate::fetch::user_named(&self.display);
         let mut project = self.project.clone();
         // A DLS launcher's project is named after the module's version, so
         // after the version changes take the launcher's project as it is now.
@@ -569,6 +573,7 @@ mod tests {
             zoom: None,
             toolbar: false,
             pinned: None,
+            tree: false,
         };
         let laptop = [Rect::from_min_size(Pos2::ZERO, Vec2::new(1920.0, 1080.0))];
         let docked = [

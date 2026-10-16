@@ -1,7 +1,11 @@
 //! A loaded display: widgets with resolved positions, macros and PVs.
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::mpsc::Receiver;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Duration;
+
 use bob::{Display, Macros, Source, Widget};
-use std::cell::Cell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
@@ -10,7 +14,13 @@ use pv::{Pv, PvManager};
 use crate::rules::CompiledRule;
 
 /// How deep embedded displays may nest before we stop (guards against loops).
-const MAX_DEPTH: u32 = 8;
+pub(crate) const MAX_DEPTH: u32 = 8;
+
+/// How long the UI thread waits for a display being built on a thread
+/// before showing it as loading: long enough for a local or already
+/// fetched display to show at once, short enough not to stall the window.
+#[cfg(not(target_arch = "wasm32"))]
+pub const QUICK: Duration = Duration::from_millis(50);
 
 /// The most embedded displays one load builds, however they nest (guards
 /// against displays that embed themselves several times over).
@@ -21,9 +31,6 @@ const MAX_EMBEDDED_BYTES: usize = 32 << 20;
 
 /// The most widgets one load builds, counting those of embedded displays.
 const MAX_WIDGETS: u32 = 100_000;
-
-/// The most groups, tabs and the like that widgets may nest in.
-const MAX_NEST: u32 = 64;
 
 /// The most rules, and the most actions, of a widget that are used.
 const MAX_PER_WIDGET: usize = 256;
@@ -56,6 +63,8 @@ pub struct Node {
     /// Properties before any rule changed them, and the last rule outcomes.
     pub orig_props: Option<bob::Element>,
     pub rule_outcomes: Vec<(String, crate::rules::Outcome)>,
+    /// The rule PVs' versions when the rules were last evaluated.
+    pub rule_versions: Option<Vec<u64>>,
     /// PVs written by this widget's actions, connected in advance.
     pub action_pvs: Vec<Pv>,
     /// Text being typed into a text entry, while it has focus.
@@ -65,6 +74,10 @@ pub struct Node {
     /// The embedded display is still being fetched (in a browser), so
     /// should be loaded again once it is.
     pub loading: bool,
+    /// The embedded display (or navigation tab) being read and built on a
+    /// thread, so the UI thread never waits on a file or server.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub building: Option<Building>,
     /// The display file or URL this node came from, to resolve relative paths.
     pub base: Option<Source>,
     /// The image widget's texture and the frame it shows.
@@ -94,6 +107,31 @@ struct Budget {
 }
 
 impl Budget {
+    /// The budget of a new load.
+    fn new() -> Arc<Self> {
+        Arc::new(Budget {
+            screens: AtomicU32::new(MAX_SCREENS),
+            widgets: AtomicU32::new(MAX_WIDGETS),
+            macros: AtomicUsize::new(bob::MAX_LOAD_BYTES),
+            files: AtomicUsize::new(MAX_EMBEDDED_BYTES),
+        })
+    }
+
+    /// Take `n` from `left`, or fail, taking nothing, if less is left. Build
+    /// threads embedding at once can't together take more than there is.
+    fn take_bytes(left: &AtomicUsize, n: usize) -> bool {
+        let mut l = left.load(Ordering::Relaxed);
+        loop {
+            let Some(rest) = l.checked_sub(n) else {
+                return false;
+            };
+            match left.compare_exchange(l, rest, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return true,
+                Err(now) => l = now,
+            }
+        }
+    }
+
     /// Take one from `left`, or fail if none is left.
     fn take(left: &AtomicU32) -> bool {
         loop {
@@ -207,24 +245,110 @@ impl Compat {
     }
 }
 
+/// An embedded display being built on a thread: where it comes from, and
+/// the screen or error once built.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct Building {
+    source: Source,
+    rx: Receiver<(Result<Screen, bob::Error>, InFlight)>,
+}
+
+/// Embedded displays being built whose results have not been shown yet.
+#[cfg(not(target_arch = "wasm32"))]
+static IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Counts an embedded display in [`IN_FLIGHT`] from when its thread starts
+/// until its result is shown or thrown away (or the thread panics).
+#[cfg(not(target_arch = "wasm32"))]
+struct InFlight;
+
+#[cfg(not(target_arch = "wasm32"))]
+impl InFlight {
+    fn new() -> Self {
+        IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        InFlight
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Show every embedded display under `nodes` whose thread has built it,
+/// drawn or not (a hidden tab's too), so none stays counted by
+/// [`building`]; true while any is still being built.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn poll_built(nodes: &mut [Node]) -> bool {
+    let mut any = false;
+    for n in nodes {
+        any |= n.poll_building(Duration::ZERO);
+        any |= poll_built(&mut n.children);
+        for tab in &mut n.tabs {
+            any |= poll_built(tab);
+        }
+        if let Some(s) = &mut n.embedded {
+            any |= poll_built(&mut s.nodes);
+        }
+    }
+    any
+}
+
+/// The error for a display whose build thread panicked.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn build_failed(source: &Source) -> bob::Error {
+    refused(source, "the build failed (see the log)")
+}
+
+/// The error for a display at `source` that was not read or built, and why.
+fn refused(source: &Source, why: &str) -> bob::Error {
+    match source {
+        Source::File(path) => bob::Error::Io(path.clone(), std::io::Error::other(why)),
+        Source::Url(url) => bob::Error::Fetch(url.clone(), why.into()),
+    }
+}
+
+/// Whether any embedded display or navigation tab is still being built on
+/// a thread, or built but not yet shown, so a snapshot waits for it.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn building() -> bool {
+    IN_FLIGHT.load(std::sync::atomic::Ordering::SeqCst) > 0
+}
+
+/// Builds screens from displays, loading the displays they embed.
 pub struct Builder<'a> {
     pub pvs: &'a PvManager,
     budget: Arc<Budget>,
-    /// How many groups deep the widgets being built are.
-    nest: Cell<u32>,
+    /// Whether this thread may wait on files and servers; on the UI thread
+    /// an embedded display is built on a thread of its own instead.
+    #[cfg(not(target_arch = "wasm32"))]
+    wait: bool,
 }
 
 impl<'a> Builder<'a> {
+    /// A builder that reads embedded displays as it goes, for a thread that
+    /// may wait on them (in a browser nothing waits: see [`crate::fetch`]).
+    /// It starts a load, with a budget of its own.
     pub fn new(pvs: &'a PvManager) -> Self {
+        Self::sharing(pvs, Budget::new(), true)
+    }
+
+    /// A builder for the UI thread, which builds each embedded display on a
+    /// thread of its own, showing it as loading until it is built.
+    pub fn ui(pvs: &'a PvManager) -> Self {
+        Self::sharing(pvs, Budget::new(), false)
+    }
+
+    /// A builder drawing on `budget`, that of the load it continues.
+    #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+    fn sharing(pvs: &'a PvManager, budget: Arc<Budget>, wait: bool) -> Self {
         Self {
             pvs,
-            nest: Cell::new(0),
-            budget: Arc::new(Budget {
-                screens: AtomicU32::new(MAX_SCREENS),
-                widgets: AtomicU32::new(MAX_WIDGETS),
-                macros: AtomicUsize::new(bob::MAX_LOAD_BYTES),
-                files: AtomicUsize::new(MAX_EMBEDDED_BYTES),
-            }),
+            budget,
+            #[cfg(not(target_arch = "wasm32"))]
+            wait,
         }
     }
 }
@@ -264,16 +388,67 @@ impl Node {
 
     /// Resolve a file named by this widget against the display it is in.
     pub fn resolve(&self, file: &str) -> Source {
-        match &self.base {
-            Some(base) => base.resolve(file),
-            None => Source::parse(file),
+        crate::fetch::resolve(self.base.as_ref(), file)
+    }
+
+    /// Show an embedded display once built from `source`, or why it was not.
+    fn place(&mut self, source: &Source, built: Result<Screen, bob::Error>) {
+        match built {
+            Ok(screen) => {
+                // Resize mode 2 sizes the widget to its content.
+                if self.w.i64("resize") == Some(2) {
+                    self.rect[2] = screen.width;
+                    self.rect[3] = screen.height;
+                }
+                self.error = None;
+                self.embedded = Some(Box::new(screen));
+            }
+            #[cfg(target_arch = "wasm32")]
+            Err(bob::Error::Fetch(_, why)) if why == crate::fetch::LOADING => {
+                self.loading = true;
+                self.error = Some(format!("Loading {source}"));
+            }
+            Err(e) => {
+                log::warn!("{e}");
+                self.error = Some(match e {
+                    bob::Error::Io(_, e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        format!("{source}: not found")
+                    }
+                    e => e.to_string(),
+                });
+            }
         }
+    }
+
+    /// Show the embedded display being built on a thread if it now is,
+    /// waiting up to `wait` for it; true while it is still being built.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn poll_building(&mut self, wait: Duration) -> bool {
+        let Some(b) = &self.building else {
+            return false;
+        };
+        let built = match b.rx.recv_timeout(wait) {
+            // Shown below, so it stops counting as in flight after this.
+            Ok((built, _in_flight)) => built,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return true,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                // The thread panicked building it.
+                Err(build_failed(&b.source))
+            }
+        };
+        let source = b.source.clone();
+        self.building = None;
+        self.place(&source, built);
+        false
     }
 }
 
-fn expand_for(w: &Widget, macros: &Macros, text: &str) -> String {
+pub(crate) fn expand_for(w: &Widget, macros: &Macros, text: &str) -> String {
     expand_props(w, macros, text, &Default::default())
 }
+
+/// Deepest chain of properties naming one another that is expanded.
+const MAX_PROP_DEPTH: usize = 16;
 
 /// The properties being expanded, and those already expanded.
 type Expanding = std::cell::RefCell<(
@@ -285,18 +460,22 @@ type Expanding = std::cell::RefCell<(
 /// far in `state`. A widget property may name others, as BOY's rule PV
 /// `$(pv_name)` does with `$(name):STA` and the name
 /// `$(prefix)$(cell)S-VA-PIRG-01`; one that names itself, directly or not,
-/// or anything unknown or too long is left as written. Each is expanded
-/// once, so properties that name others several times don't take
-/// exponential time.
+/// or anything unknown, too long or naming others too deeply is left as
+/// written. Each is expanded once, so properties that name others several
+/// times don't take exponential time.
 fn expand_props(w: &Widget, macros: &Macros, text: &str, state: &Expanding) -> String {
     bob::expand(text, &|name| {
         macros.get(name).map(str::to_string).or_else(|| {
             if let Some(value) = state.borrow().1.get(name) {
                 return value.clone();
             }
-            if state.borrow().0.iter().any(|a| a == name) {
+            // Each property named recurses, so a long chain of them must not
+            // exhaust the stack.
+            let expanding = state.borrow();
+            if expanding.0.len() >= MAX_PROP_DEPTH || expanding.0.iter().any(|a| a == name) {
                 return None;
             }
+            drop(expanding);
             let prop = w.text(name)?;
             state.borrow_mut().0.push(name.to_string());
             let value = expand_props(w, macros, prop, state);
@@ -311,7 +490,7 @@ fn expand_props(w: &Widget, macros: &Macros, text: &str, state: &Expanding) -> S
 
 /// The display's name with `macros` expanded; a display with no name is
 /// called after its file, as in BOY and Phoebus.
-fn title(display: &Display, macros: &Macros) -> String {
+pub(crate) fn title(display: &Display, macros: &Macros) -> String {
     let name = bob::expand(&display.name, &|n| macros.get(n).map(str::to_string));
     if !name.trim().is_empty() {
         return name;
@@ -358,6 +537,13 @@ pub fn group_inset(w: &Widget) -> (f64, f64) {
     }
 }
 
+/// A fresh `DID_<n>`, BOY's id for an opened display.
+fn display_id() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("DID_{n}")
+}
+
 impl Builder<'_> {
     /// [`expand_for`], taking the size of the text and result from the load's
     /// macro budget; once it is spent, text is left as written.
@@ -379,7 +565,13 @@ impl Builder<'_> {
         depth: u32,
     ) -> Screen {
         // Macros passed in override the display's own defaults.
-        let macros = Macros::over(&display.macros, macros, &self.budget.macros);
+        let mut macros = Macros::over(&display.macros, macros, &self.budget.macros);
+        // BOY gives each display it opens a `$(DID)`, which screens use to
+        // keep their `loc://$(DID)…` PVs apart. Widgets of an embedded
+        // display become the host's, so they share the host's id.
+        if display.legacy && (depth == 0 || macros.get("DID").is_none()) {
+            macros = macros.with(&Macros::from_pairs([("DID", display_id())]));
+        }
         let base = display.source.clone();
         let (widgets, width, height) = match group.filter(|g| !g.is_empty()) {
             Some(name) => match find_group(&display.widgets, name) {
@@ -418,35 +610,6 @@ impl Builder<'_> {
     }
 
     fn nodes(
-        &self,
-        widgets: &[Widget],
-        origin: (f64, f64),
-        macros: &Macros,
-        base: Option<&Source>,
-        depth: u32,
-    ) -> Vec<Node> {
-        if self.nest.get() >= MAX_NEST {
-            // Say so on the first widget, built without its children.
-            let Some(first) = widgets.first() else {
-                return Vec::new();
-            };
-            log::warn!("groups nested over {MAX_NEST} deep; the rest are left out");
-            let stub = Widget {
-                kind: first.kind.clone(),
-                props: first.props.clone(),
-                children: Vec::new(),
-            };
-            let mut node = self.node(&stub, origin, macros, base, depth);
-            node.error = Some("groups nested too deeply".into());
-            return vec![node];
-        }
-        self.nest.set(self.nest.get() + 1);
-        let nodes = self.nodes_in(widgets, origin, macros, base, depth);
-        self.nest.set(self.nest.get() - 1);
-        nodes
-    }
-
-    fn nodes_in(
         &self,
         widgets: &[Widget],
         origin: (f64, f64),
@@ -500,7 +663,7 @@ impl Builder<'_> {
             .collect();
 
         let link = crate::group_link::Link::new(w, &ex, self.pvs);
-        let action_pvs = all_actions
+        let mut action_pvs: Vec<Pv> = all_actions
             .iter()
             .take(MAX_PER_WIDGET)
             .filter_map(|a| match a {
@@ -508,6 +671,22 @@ impl Builder<'_> {
                 _ => None,
             })
             .collect();
+        // A menu mux's targets, which a pick writes, and the values of its
+        // initial item, which BOY writes as the display opens.
+        if let Some(mux) = w.menu_mux() {
+            let initial = mux.initial.map(|i| mux.writes(i)).unwrap_or_default();
+            for set in &mux.sets {
+                let target = self.pvs.subscribe(&ex(&set.target));
+                if let Some((_, value)) = initial.iter().find(|(t, _)| *t == set.target) {
+                    target.write(ex(value));
+                }
+                action_pvs.push(target);
+            }
+            if let (true, Some(i), Some(pv)) = (mux.index, mux.initial, &pv) {
+                pv.write(i.to_string());
+            }
+        }
+
         let mut node = Node {
             // Without the children, which the nodes hold, so that nested
             // groups don't each keep a copy of everything below them.
@@ -527,10 +706,13 @@ impl Builder<'_> {
             rules,
             orig_props: None,
             rule_outcomes: Vec::new(),
+            rule_versions: None,
             action_pvs,
             edit: None,
             error: None,
             loading: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            building: None,
             base: base.cloned(),
             image: None,
             symbol: Default::default(),
@@ -612,11 +794,19 @@ impl Builder<'_> {
         node
     }
 
-    /// Load `file` into `node.embedded`, or record why it failed.
+    /// Load `file` into `node.embedded`, or record why it failed. On the UI
+    /// thread ([`Builder::ui`]) the display is read and built on a thread,
+    /// and the node shows it as loading until [`Node::poll_building`] finds
+    /// it built.
     pub fn embed(&self, node: &mut Node, file: &str, macros: &Macros, group: &str, depth: u32) {
         node.embedded = None;
         node.error = None;
         node.loading = false;
+        // Dropping a build still under way discards it when it finishes.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            node.building = None;
+        }
         if file.is_empty() {
             return;
         }
@@ -624,44 +814,59 @@ impl Builder<'_> {
             node.error = Some("embedded displays nested too deeply".into());
             return;
         }
-        // The node's budget, not this builder's, which may be a fresh one.
-        let this = Builder {
-            pvs: self.pvs,
-            budget: node.budget.clone(),
-            nest: Cell::new(0),
-        };
+        // The node's budget, not this builder's, which may be a fresh one:
+        // the display is part of the load that made the node.
+        let this = Builder::sharing(self.pvs, node.budget.clone(), self.waits());
         if !Budget::take(&this.budget.screens) {
             node.error = Some("too many embedded displays".into());
             return;
         }
         let source = node.resolve(file);
-        match crate::fetch::load(&source) {
-            Ok(d) if this.budget.files.load(Ordering::Relaxed) < d.size => {
-                node.error = Some("embedded displays too large in total".into());
-            }
-            Ok(d) => {
-                bob::spend(&this.budget.files, d.size);
-                let screen = this.screen(d, macros, Some(group), depth + 1);
-                // Resize mode 2 sizes the widget to its content.
-                if node.w.i64("resize") == Some(2) {
-                    node.rect[2] = screen.width;
-                    node.rect[3] = screen.height;
-                }
-                node.embedded = Some(Box::new(screen));
-            }
-            #[cfg(target_arch = "wasm32")]
-            Err(bob::Error::Fetch(_, why)) if why == crate::fetch::LOADING => {
-                node.loading = true;
-                node.error = Some(format!("Loading {source}"));
-            }
-            Err(e) => {
-                log::warn!("{e}");
-                node.error = Some(match e {
-                    bob::Error::Io(..) => format!("{source}: not found"),
-                    e => e.to_string(),
-                });
-            }
+        #[cfg(not(target_arch = "wasm32"))]
+        if !this.wait {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (pvs, src, budget) = (self.pvs.clone(), source.clone(), this.budget.clone());
+            let (macros, group) = (macros.clone(), group.to_string());
+            let in_flight = InFlight::new();
+            std::thread::spawn(move || {
+                // Still the same load, so on the same budget: a display that
+                // embeds itself can't get a fresh one per thread.
+                let built =
+                    Builder::sharing(&pvs, budget, true).build(&src, &macros, &group, depth);
+                // Unsent (the node moved on), the result and its count drop here.
+                tx.send((built, in_flight)).ok();
+            });
+            node.error = Some(format!("Loading {source}"));
+            node.building = Some(Building { source, rx });
+            node.poll_building(QUICK);
+            return;
         }
+        let built = this.build(&source, macros, group, depth);
+        node.place(&source, built);
+    }
+
+    /// Read and build the display at `source`, embedded `depth` deep, if
+    /// the load has enough of its budget for embedded files left.
+    fn build(
+        &self,
+        source: &Source,
+        macros: &Macros,
+        group: &str,
+        depth: u32,
+    ) -> Result<Screen, bob::Error> {
+        let d = crate::fetch::load(source)?;
+        if !Budget::take_bytes(&self.budget.files, d.size) {
+            return Err(refused(source, "embedded displays too large in total"));
+        }
+        Ok(self.screen(d, macros, Some(group), depth + 1))
+    }
+
+    /// Whether this builder may wait on files and servers.
+    fn waits(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        return self.wait;
+        #[cfg(target_arch = "wasm32")]
+        true
     }
 
     /// Show tab `index` of a navigation tabs widget.
@@ -694,7 +899,7 @@ pub fn tab_elements(w: &Widget) -> Vec<bob::Element> {
         .unwrap_or_default()
 }
 
-fn find_group<'a>(widgets: &'a [Widget], name: &str) -> Option<&'a Widget> {
+pub(crate) fn find_group<'a>(widgets: &'a [Widget], name: &str) -> Option<&'a Widget> {
     widgets.iter().find_map(|w| {
         if w.kind == "group" && w.name() == name {
             Some(w)
@@ -852,6 +1057,49 @@ mod tests {
         assert!(start.elapsed().as_secs() < 10);
     }
 
+    /// Embedded displays under `nodes`, with how many show an error.
+    fn count_screens(nodes: &[Node], errors: &mut u32) -> u32 {
+        nodes
+            .iter()
+            .map(|n| {
+                *errors += n.error.is_some() as u32;
+                n.embedded
+                    .as_ref()
+                    .map_or(0, |e| 1 + count_screens(&e.nodes, errors))
+            })
+            .sum()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn displays_built_on_threads_share_the_load_budget() {
+        // Embeds and navigation tabs of itself, four ways, built from the UI
+        // thread: each is built on a thread of its own, which must draw on
+        // the budget of the load, not start a fresh one (4 x 256 screens).
+        let dir = std::env::temp_dir().join(format!("bobview-threads-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("bomb.bob");
+        let embed = "<widget type='embedded'><file>bomb.bob</file></widget>";
+        let tabs = "<widget type='navtabs'><tabs><tab><file>bomb.bob</file></tab></tabs></widget>";
+        let xml = format!("<display>{embed}{embed}{tabs}{tabs}</display>");
+        std::fs::write(&file, &xml).unwrap();
+        let mut d = Display::parse(&xml).unwrap();
+        d.source = Some(Source::File(file));
+        let pvs = PvManager::new();
+        let mut s = Builder::ui(&pvs).screen(d, &Macros::default(), None, 0);
+        let start = std::time::Instant::now();
+        while poll_built(&mut s.nodes) {
+            assert!(start.elapsed() < patience(), "still building");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::remove_dir_all(&dir).ok();
+        let mut errors = 0;
+        let screens = count_screens(&s.nodes, &mut errors);
+        assert!(screens <= MAX_SCREENS, "{screens} screens");
+        assert!(errors > 0);
+        assert!(s.nodes.iter().all(|n| n.building.is_none()));
+    }
+
     /// How long a hostile display may take; debug builds are far slower.
     fn patience() -> std::time::Duration {
         std::time::Duration::from_secs(if cfg!(debug_assertions) { 60 } else { 10 })
@@ -985,22 +1233,15 @@ mod tests {
     }
 
     #[test]
-    fn groups_nested_too_deeply_get_an_error_placeholder() {
+    fn groups_nested_too_deeply_are_refused_as_they_parse() {
+        // Bounded by the XML depth cap, before any widget is built, so a
+        // screen never nests more than that within one display.
         let mut inner = "<widget type='label'/>".to_string();
         for _ in 0..100 {
             inner = format!("<widget type='group'>{inner}</widget>");
         }
-        let d = Display::parse(&format!("<display>{inner}</display>")).unwrap();
-        let pvs = PvManager::new();
-        let s = Builder::new(&pvs).screen(d, &Macros::default(), None, 0);
-        let mut n = &s.nodes[0];
-        let mut levels = 1;
-        while let Some(c) = n.children.first() {
-            n = c;
-            levels += 1;
-        }
-        assert_eq!(levels, MAX_NEST as usize + 1);
-        assert!(n.error.is_some());
+        let d = Display::parse(&format!("<display>{inner}</display>"));
+        assert!(matches!(d, Err(bob::Error::TooDeep)));
     }
 
     #[test]
@@ -1020,6 +1261,35 @@ mod tests {
         assert_eq!(n.w.kind, "label");
         // Each group adds its position and its 18 pixel inset.
         assert_eq!((n.rect[0], n.rect[1]), (285.0, 387.0));
+    }
+
+    #[test]
+    fn long_chains_of_property_macros_do_not_overflow() {
+        // p0 names p1, which names p2 … : one level of recursion each.
+        let n = 100_000;
+        let props: String = (0..n)
+            .map(|i| format!("<p{i}>$(p{})</p{i}>", i + 1))
+            .collect();
+        let d = Display::parse(&format!(
+            "<display><widget type='label'>{props}<p{n}>x</p{n}></widget></display>"
+        ))
+        .unwrap();
+        let pvs = PvManager::new();
+        let s = Builder::new(&pvs).screen(d, &Macros::default(), None, 0);
+        let w = s.nodes[0].w.clone();
+        let expanded = std::thread::Builder::new()
+            .stack_size(1024 * 1024)
+            .spawn(move || {
+                let m = Macros::default();
+                (
+                    expand_for(&w, &m, "$(p0)"),
+                    expand_for(&w, &m, &format!("$(p{})", n - 3)),
+                )
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(expanded, ("$(p0)".to_string(), "x".to_string()));
     }
 
     #[test]
@@ -1071,6 +1341,268 @@ mod tests {
         let pvs = PvManager::new();
         let s = Builder::new(&pvs).screen(d, &Macros::from_pairs([("P", "B")]), None, 0);
         assert_eq!(s.nodes[0].pv_name, "loc://Bq");
+    }
+
+    #[test]
+    fn opi_displays_get_their_own_did() {
+        let opi = r#"<display typeId="org.csstudio.opibuilder.Display" version="1.0.0">
+            <widget typeId="org.csstudio.opibuilder.widgets.TextUpdate" version="1.0.0">
+            <pv_name>loc://$(DID)ll</pv_name></widget></display>"#;
+        let pvs = PvManager::new();
+        let b = Builder::new(&pvs);
+        let open = |macros: &Macros, depth| {
+            let d = Display::parse(opi).unwrap();
+            b.screen(d, macros, None, depth).nodes[0].pv_name.clone()
+        };
+        let (one, two) = (open(&Macros::default(), 0), open(&Macros::default(), 0));
+        assert!(
+            one.starts_with("loc://DID_") && one.ends_with("ll"),
+            "{one}"
+        );
+        assert_ne!(one, two);
+        // An embedded display shares its host's id; a new one does not.
+        let host = Macros::from_pairs([("DID", "DID_host")]);
+        assert_eq!(open(&host, 1), "loc://DID_hostll");
+        assert_ne!(open(&host, 0), "loc://DID_hostll");
+        // DID is a BOY built-in, so a .bob has none.
+        let bob = "<display><widget type='led'><pv_name>loc://$(DID)x</pv_name></widget></display>";
+        let s = b.screen(Display::parse(bob).unwrap(), &Macros::default(), None, 0);
+        assert_eq!(s.nodes[0].pv_name, "loc://$(DID)x");
+    }
+
+    /// Serve a display at every path but /missing.bob (a 404), holding each
+    /// reply until `release` is sent to; returns the base URL.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn held_server() -> (String, std::sync::mpsc::Sender<()>) {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut first = String::new();
+                reader.read_line(&mut first).unwrap();
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap() > 2 {
+                    line.clear();
+                }
+                if held.recv().is_err() {
+                    return;
+                }
+                let body = r#"<display version="2.0.0"><name>Tab</name></display>"#;
+                let (status, body) = if first.starts_with("GET /missing.bob ") {
+                    ("404 Not Found", "")
+                } else {
+                    ("200 OK", body)
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        (base, release)
+    }
+
+    /// Held by tests that check whether anything is still being built.
+    #[cfg(not(target_arch = "wasm32"))]
+    static BUILDS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Poll `node` until its embedded display is built, or panic.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn built(node: &mut Node) {
+        let until = std::time::Instant::now() + Duration::from_secs(20);
+        while node.poll_building(Duration::from_millis(10)) {
+            assert!(std::time::Instant::now() < until, "never built");
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn navtabs_are_fetched_off_the_ui_thread() {
+        let _builds = BUILDS.lock().unwrap_or_else(|e| e.into_inner());
+        let _cache = crate::fetch::tests::CACHE_USERS.lock();
+        let (base, release) = held_server();
+        let dir = std::env::temp_dir().join(format!("bobview-navtabs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("local.bob"),
+            r#"<display version="2.0.0"><name>Local</name></display>"#,
+        )
+        .unwrap();
+        let main = dir.join("main.bob");
+        std::fs::write(
+            &main,
+            format!(
+                r#"<display version="2.0.0">
+                  <widget type="navtabs" version="2.0.0"><name>Nav</name>
+                    <tabs>
+                      <tab><name>Local</name><file>local.bob</file></tab>
+                      <tab><name>Remote</name><file>{base}/tab.bob</file></tab>
+                      <tab><name>Missing</name><file>{base}/missing.bob</file></tab>
+                    </tabs>
+                  </widget>
+                </display>"#
+            ),
+        )
+        .unwrap();
+        let pvs = PvManager::new();
+        let mut s = Screen::load(&Source::File(main), &Macros::default(), &pvs).unwrap();
+        let ui = Builder::ui(&pvs);
+        let nav = &mut s.nodes[0];
+        assert_eq!(nav.embedded.as_ref().unwrap().display.name, "Local");
+
+        // The server holds its reply, yet selecting the tab returns, showing
+        // it as loading.
+        ui.select_navtab(nav, 1, 0);
+        assert!(nav.embedded.is_none() && nav.building.is_some());
+        let loading = format!("Loading {base}/tab.bob");
+        assert_eq!(nav.error.as_deref(), Some(loading.as_str()));
+        assert!(nav.poll_building(Duration::ZERO), "still fetching");
+        // A snapshot waits for it.
+        assert!(building());
+        let ctx = eframe::egui::Context::default();
+        let app = crate::app::BobApp::new(&ctx, None, Some(1.0), crate::chrome::UiScale::Auto);
+        assert!(app.is_loading());
+        release.send(()).unwrap();
+        built(nav);
+        assert!(!building() && !app.is_loading());
+        assert_eq!(nav.embedded.as_ref().unwrap().display.name, "Tab");
+        assert_eq!(nav.error, None);
+
+        // A failed fetch shows its error, as other fetched displays do.
+        ui.select_navtab(nav, 2, 0);
+        release.send(()).unwrap();
+        built(nav);
+        assert!(nav.embedded.is_none());
+        let failed = format!("cannot fetch {base}/missing.bob: HTTP 404");
+        assert_eq!(nav.error.as_deref(), Some(failed.as_str()));
+
+        // A tab already fetched comes from the cache, with no request (the
+        // server would hold one, never released, so it would never build).
+        ui.select_navtab(nav, 1, 0);
+        built(nav);
+        assert_eq!(nav.embedded.as_ref().unwrap().display.name, "Tab");
+
+        // A local tab still shows at once.
+        ui.select_navtab(nav, 0, 0);
+        built(nav);
+        assert_eq!(nav.embedded.as_ref().unwrap().display.name, "Local");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_tab_switched_away_from_is_dropped_when_built() {
+        let _builds = BUILDS.lock().unwrap_or_else(|e| e.into_inner());
+        let (base, release) = held_server();
+        let d = Display::parse(&format!(
+            r#"<display version="2.0.0">
+              <widget type="navtabs" version="2.0.0"><name>Nav</name>
+                <tabs>
+                  <tab><name>Empty</name><file></file></tab>
+                  <tab><name>Slow</name><file>{base}/slow.bob</file></tab>
+                </tabs>
+              </widget>
+            </display>"#
+        ))
+        .unwrap();
+        let pvs = PvManager::new();
+        let mut s = Builder::new(&pvs).screen(d, &Macros::default(), None, 0);
+        let ui = Builder::ui(&pvs);
+        let nav = &mut s.nodes[0];
+        ui.select_navtab(nav, 1, 0);
+        assert!(nav.building.is_some());
+        ui.select_navtab(nav, 0, 0);
+        assert!(nav.building.is_none() && nav.error.is_none());
+        release.send(()).unwrap();
+        assert!(!nav.poll_building(Duration::from_millis(100)));
+        assert!(nav.embedded.is_none() && nav.error.is_none());
+        // Thrown away, it stops counting once its thread ends.
+        let until = std::time::Instant::now() + Duration::from_secs(20);
+        while building() {
+            assert!(std::time::Instant::now() < until, "still counted");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(nav.active_tab, 0);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_tab_built_while_hidden_is_still_collected() {
+        let _builds = BUILDS.lock().unwrap_or_else(|e| e.into_inner());
+        let (base, release) = held_server();
+        let d = Display::parse(&format!(
+            r#"<display version="2.0.0">
+              <widget type="navtabs" version="2.0.0"><name>Nav</name>
+                <tabs>
+                  <tab><name>Empty</name><file></file></tab>
+                  <tab><name>Slow</name><file>{base}/slow.bob</file></tab>
+                </tabs>
+              </widget>
+            </display>"#
+        ))
+        .unwrap();
+        let pvs = PvManager::new();
+        let mut screen = Builder::new(&pvs).screen(d, &Macros::default(), None, 0);
+        Builder::ui(&pvs).select_navtab(&mut screen.nodes[0], 1, 0);
+        let mut view = crate::view::View::new(&pvs, Some(1.0));
+        view.screen = Some(screen);
+        release.send(()).unwrap();
+        // Never drawn (as when hidden), the view still collects it, so a
+        // snapshot does not wait for it.
+        let ctx = eframe::egui::Context::default();
+        let until = std::time::Instant::now() + Duration::from_secs(20);
+        while building() {
+            assert!(std::time::Instant::now() < until, "never collected");
+            std::thread::sleep(Duration::from_millis(10));
+            view.poll_loading(&ctx);
+        }
+        let nav = &view.screen.as_ref().unwrap().nodes[0];
+        assert_eq!(nav.embedded.as_ref().unwrap().display.name, "Tab");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_local_display_embedding_a_url_loads_off_the_ui_thread() {
+        let (base, release) = held_server();
+        let dir = std::env::temp_dir().join(format!("bobview-embedurl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let main = dir.join("main.bob");
+        std::fs::write(
+            &main,
+            format!(
+                r#"<display version="2.0.0"><name>Main</name>
+                  <widget type="embedded" version="2.0.0"><name>E</name>
+                    <file>{base}/remote.bob</file>
+                  </widget>
+                </display>"#
+            ),
+        )
+        .unwrap();
+        let ctx = eframe::egui::Context::default();
+        let mut view = crate::view::View::new(&PvManager::new(), Some(1.0));
+        // The server holds its reply, yet showing the display returns.
+        view.show(crate::app::Location {
+            source: Source::File(main),
+            macros: Macros::default(),
+        });
+        assert!(view.is_loading() && view.screen.is_none());
+        release.send(()).unwrap();
+        let until = std::time::Instant::now() + Duration::from_secs(20);
+        while view.is_loading() {
+            assert!(std::time::Instant::now() < until, "never loaded");
+            std::thread::sleep(Duration::from_millis(10));
+            view.poll_loading(&ctx);
+        }
+        let screen = view.screen.as_ref().unwrap();
+        assert_eq!(screen.title, "Main");
+        let embedded = screen.nodes[0].embedded.as_ref().unwrap();
+        assert_eq!(embedded.display.name, "Tab");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
 

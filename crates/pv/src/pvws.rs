@@ -9,17 +9,18 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 
-use base64::Engine;
 use futures_util::future::{AbortHandle, abortable};
-use serde_json::{Map, Value as Json, json};
+use parking_lot::Mutex;
+use serde_json::{Value as Json, json};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use web_sys::{MessageEvent, WebSocket};
-use web_time::{Duration, SystemTime};
+use web_time::Duration;
 
-use crate::{PvName, PvState, Scheme, Severity, Shared, Value, Writer};
+use crate::pvws_msg::apply;
+use crate::{PvName, PvState, Scheme, Shared, Value, Writer};
 
 /// The socket's URL, if set before the first PV subscribes.
 static URL: Mutex<Option<String>> = Mutex::new(None);
@@ -34,19 +35,34 @@ pub fn set_pvws(url: &str) {
     } else {
         host_url(url)
     };
-    *URL.lock().unwrap() = Some(url);
+    *URL.lock() = Some(url);
 }
 
 /// The token a server started with `--write` wants in every write.
 static TOKEN: Mutex<Option<String>> = Mutex::new(None);
 
 /// Send `token` with every write, for a server that needs one (`--write`).
+/// It goes only to a socket on the page's own server: another, named by
+/// a link's `&pvws=`, could keep it.
 pub fn set_write_token(token: &str) {
-    *TOKEN.lock().unwrap() = Some(token.to_string());
+    *TOKEN.lock() = Some(token.to_string());
+}
+
+/// The write token, if there is one and the socket is the page's server's.
+fn token() -> Option<String> {
+    let token = TOKEN.lock().clone()?;
+    let page = web_sys::window()?.location().href().ok()?;
+    let socket = url();
+    if crate::same_origin(&page, &socket) {
+        Some(token)
+    } else {
+        log::warn!("not sending the write token to {socket}, another server than the page's");
+        None
+    }
 }
 
 fn url() -> String {
-    if let Some(url) = URL.lock().unwrap().clone() {
+    if let Some(url) = URL.lock().clone() {
         return url;
     }
     let host = web_sys::window()
@@ -102,14 +118,23 @@ pub(crate) fn subscribe(name: &PvName, shared: Arc<Shared>) -> Task {
 
 /// Write `text` to `name`: as a number when it reads as one, as the server
 /// converts only text to an enum's or string's value.
-pub(crate) fn write(name: &str, state: &PvState, text: String) {
+///
+/// A long string (see [`crate::Pv::write_long_string`]) to an array of
+/// numbers goes as text, marked `long_string` for bobview-server. A PVWS
+/// server ignores the mark and writes the text, which Phoebus's CA layer
+/// writes into a char array as a long string.
+pub(crate) fn write(name: &str, state: &PvState, text: String, long_string: bool) {
+    let long_string = long_string && state.value.is_numeric_array();
     let numeric = !matches!(state.value, Value::Str(_) | Value::StrArray(_));
     let value = match text.trim().parse::<f64>() {
-        Ok(x) if numeric && x.is_finite() => json!(x),
+        Ok(x) if numeric && !long_string && x.is_finite() => json!(x),
         _ => json!(text),
     };
     let mut msg = json!({"type": "write", "pv": name, "value": value});
-    if let Some(token) = TOKEN.lock().unwrap().as_ref() {
+    if long_string {
+        msg["long_string"] = json!(true);
+    }
+    if let Some(token) = token() {
         msg["token"] = json!(token);
     }
     SOCKET.with_borrow_mut(|s| {
@@ -287,107 +312,26 @@ impl Socket {
                     shared.update(|s| apply(s, &sub.vtype, &msg));
                 }
             }
-            Some("error") => log::warn!("PVWS: {}", msg.get("message").unwrap_or(&Json::Null)),
+            Some("error") => {
+                let message = msg
+                    .get("message")
+                    .and_then(Json::as_str)
+                    .unwrap_or_default();
+                // A refused write names its PV: tell the user, as for a
+                // write refused here.
+                let shared = msg
+                    .get("pv")
+                    .and_then(Json::as_str)
+                    .and_then(|name| self.subs.get(name))
+                    .and_then(|sub| sub.shared.upgrade());
+                match shared {
+                    Some(shared) if msg.contains_key("write_error") => {
+                        shared.ctl.notify(message.to_string())
+                    }
+                    _ => log::warn!("PVWS: {message}"),
+                }
+            }
             _ => {}
         }
-    }
-}
-
-/// Apply one update, which holds only what changed, to a PV's state.
-fn apply(s: &mut PvState, vtype: &str, msg: &Map<String, Json>) {
-    let f64_of = |key: &str| msg.get(key).and_then(Json::as_f64);
-    if let Some(sevr) = msg.get("severity").and_then(Json::as_str) {
-        s.severity = match sevr {
-            "NONE" => Severity::NoAlarm,
-            "MINOR" => Severity::Minor,
-            "MAJOR" => Severity::Major,
-            _ => Severity::Invalid,
-        };
-        // A lost connection is an UNDEFINED alarm with no value.
-        if sevr == "UNDEFINED" && !msg.contains_key("value") && !msg.contains_key("text") {
-            s.connected = false;
-        }
-    }
-    if let Some(readonly) = msg.get("readonly").and_then(Json::as_bool) {
-        s.writable = !readonly;
-        s.writable_known = true;
-    }
-    if let Some(units) = msg.get("units").and_then(Json::as_str) {
-        s.units = units.to_string();
-    }
-    if let Some(p) = msg.get("precision").and_then(Json::as_i64) {
-        s.precision = Some(p as i32);
-    }
-    if let (Some(lo), Some(hi)) = (f64_of("min"), f64_of("max")) {
-        s.display_range = Some((lo, hi));
-    }
-    if let Some(labels) = msg.get("labels").and_then(Json::as_array) {
-        s.labels = labels
-            .iter()
-            .filter_map(|l| l.as_str().map(String::from))
-            .collect();
-    }
-    if let Some(secs) = f64_of("seconds") {
-        let nanos = f64_of("nanos").unwrap_or(0.0);
-        if let Ok(t) = Duration::try_from_secs_f64(secs + nanos * 1e-9) {
-            s.timestamp = Some(SystemTime::UNIX_EPOCH + t);
-        }
-    }
-    if let Some(value) = value(vtype, msg) {
-        s.value = value;
-        s.error = None;
-        // PVWS sends a PV it cannot reach as a bare readonly/timestamp
-        // update, so only a value means connected.
-        s.connected = true;
-    }
-}
-
-fn value(vtype: &str, msg: &Map<String, Json>) -> Option<Value> {
-    for (key, size) in [
-        ("b64dbl", 8),
-        ("b64flt", 4),
-        ("b64int", 4),
-        ("b64srt", 2),
-        ("b64byt", 1),
-    ] {
-        let Some(b64) = msg.get(key).and_then(Json::as_str) else {
-            continue;
-        };
-        let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
-        let items = bytes.chunks_exact(size);
-        return Some(match key {
-            "b64dbl" => Value::DoubleArray(
-                items
-                    .map(|b| f64::from_le_bytes(b.try_into().unwrap()))
-                    .collect(),
-            ),
-            "b64flt" => Value::DoubleArray(
-                items
-                    .map(|b| f32::from_le_bytes(b.try_into().unwrap()) as f64)
-                    .collect(),
-            ),
-            "b64int" => Value::LongArray(
-                items
-                    .map(|b| i32::from_le_bytes(b.try_into().unwrap()) as i64)
-                    .collect(),
-            ),
-            "b64srt" => Value::LongArray(
-                items
-                    .map(|b| i16::from_le_bytes(b.try_into().unwrap()) as i64)
-                    .collect(),
-            ),
-            _ => Value::LongArray(items.map(|b| b[0] as i8 as i64).collect()),
-        });
-    }
-    let text = msg.get("text").and_then(Json::as_str);
-    match msg.get("value") {
-        Some(v) if vtype == "VEnum" => Some(Value::Enum(v.as_f64()? as u16)),
-        // Non-finite doubles come as text.
-        Some(Json::String(_)) => Some(Value::Double(f64::NAN)),
-        Some(v) if matches!(vtype, "VDouble" | "VFloat") || v.is_f64() => {
-            Some(Value::Double(v.as_f64()?))
-        }
-        Some(v) => Some(Value::Long(v.as_i64()?)),
-        None => text.map(|t| Value::Str(t.to_string())),
     }
 }

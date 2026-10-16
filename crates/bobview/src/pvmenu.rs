@@ -178,9 +178,10 @@ fn details_rows(details: &Details, s: &PvState) -> Vec<(&'static str, String)> {
             rows.push(("States", s.labels.join(", ")));
         }
         rows.push(("Writable", writable_text(s).into()));
-        if let Some(e) = &s.write_error {
-            rows.push(("Last write failed", e.clone()));
-        }
+    }
+    // Kept while disconnected: a write may have failed for that very reason.
+    if let Some(e) = &s.write_error {
+        rows.push(("Last write failed", e.clone()));
     }
     rows.push(("Widget", details.widget.clone()));
     if let Some(file) = &details.file {
@@ -218,7 +219,7 @@ fn cli_command(name: &PvName) -> Option<String> {
     match name.scheme {
         Scheme::Ca => Some(format!("caget {}", shell_quote(&name.pv))),
         Scheme::Pva => Some(format!("pvget {}", shell_quote(&name.pv))),
-        Scheme::Loc | Scheme::Sim => None,
+        Scheme::Loc | Scheme::Sim | Scheme::Formula => None,
     }
 }
 
@@ -246,6 +247,7 @@ fn protocol(scheme: Scheme) -> &'static str {
         Scheme::Pva => "PV Access",
         Scheme::Loc => "local",
         Scheme::Sim => "simulated",
+        Scheme::Formula => "formula",
     }
 }
 
@@ -355,6 +357,26 @@ mod tests {
         assert_eq!(
             full_line("BL01T:M1", &s),
             "BL01T:M1 = 2.50 mm MINOR 1970-01-01T00:00:00.000Z"
+        );
+    }
+
+    #[test]
+    fn a_failed_write_is_shown_while_disconnected() {
+        let pvs = pv::PvManager::new();
+        let details = Details {
+            pv: pvs.subscribe("loc://details_test(1)"),
+            widget: "Text Update".into(),
+            file: None,
+        };
+        let s = PvState {
+            connected: false,
+            write_error: Some("not connected".into()),
+            ..Default::default()
+        };
+        let rows = details_rows(&details, &s);
+        assert!(
+            rows.contains(&("Last write failed", "not connected".into())),
+            "{rows:?}"
         );
     }
 }

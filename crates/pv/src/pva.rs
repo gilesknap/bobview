@@ -5,51 +5,116 @@
 //! [`Image`]. Other structures show their `value` field if they have one.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use epics_pva_rs::PvaError;
 use epics_pva_rs::client::PvaClient;
-use epics_pva_rs::client_native::ops_v2::{MonitorEvent, MonitorEventMask};
+use epics_pva_rs::client_native::ops_v2::{MonitorConnEvent, MonitorTermination};
 use epics_pva_rs::pvdata::{PvField, PvStructure, ScalarValue, TypedScalarArray};
-use tokio::sync::mpsc;
 
 use crate::{Image, ImageData, PvState, Severity, Shared, Value, Writer};
 
 pub(crate) async fn run(client: &PvaClient, pv: &str, shared: Arc<Shared>) {
-    let (tx, mut writes) = mpsc::unbounded_channel::<String>();
+    let (tx, mut writes) = crate::write_queue();
     shared.set_writer(Writer::Channel(tx));
 
-    // Writes run beside the monitor, each as its own put.
+    // Writes run beside the monitor, each as its own put. Weak: the state
+    // holds the sender this task waits on, so a strong reference would
+    // keep both, and the PV's last value, alive after the PV is dropped.
     let put_client = client.clone();
     let put_pv = pv.to_string();
-    let put_shared = shared.clone();
+    let put_shared = Arc::downgrade(&shared);
     tokio::spawn(async move {
-        while let Some(text) = writes.recv().await {
-            let result = put_client.pvput(&put_pv, &text).await;
-            put_shared.write_result(&text, result.err().map(|e| e.to_string()));
+        while let Some(put) = writes.recv().await {
+            // One that disconnected since the write was queued.
+            if !put_shared.upgrade().is_some_and(|s| s.can_write(&put.text)) {
+                continue;
+            }
+            let long_string = put.long_string
+                && put_shared
+                    .upgrade()
+                    .is_some_and(|s| s.snapshot().value.is_numeric_array());
+            let result = if long_string {
+                // PVA arrays have no fixed element count to cut the text to.
+                let bytes = crate::long_string_bytes(&put.text, None);
+                put_client
+                    .pvput_build(&put_pv, |v| with_bytes(v, &bytes))
+                    .await
+            } else {
+                put_client.pvput(&put_pv, &put.text).await
+            };
+            if let Some(shared) = put_shared.upgrade() {
+                shared.write_result(&put.text, result.err().map(|e| e.to_string()));
+            }
         }
     });
 
     let mut retry = Duration::from_millis(500);
     loop {
-        let result = client
-            .pvmonitor_events(pv, None, MonitorEventMask::default(), |event| match event {
-                MonitorEvent::Connected { .. } => shared.update(|s| s.error = None),
-                MonitorEvent::Data { value, .. } => {
-                    shared.update(|s| apply(s, &value));
-                }
-                MonitorEvent::Disconnected => shared.update(|s| s.connected = false),
-                MonitorEvent::Finished => {}
-            })
+        // Wait for the channel here, not in the monitor: dropping this wait,
+        // as aborting the task does, cancels the search, while a monitor
+        // dropped before it connects keeps searching. A search that times
+        // out waits before the next, as the client's own searches slow down.
+        if let Err(e) = client.pvconnect(pv).await {
+            if !matches!(e, PvaError::Timeout) {
+                log::debug!("{pv}: {e}; retrying in {retry:?}");
+                shared.update(|s| s.error = Some(e.to_string()));
+            }
+            tokio::time::sleep(retry).await;
+            retry = (retry * 2).min(Duration::from_secs(30));
+            continue;
+        }
+        // A handle monitor, not `pvmonitor_events`: dropping the handle
+        // sends the server DESTROY and ends the subscription, where
+        // aborting a `pvmonitor_events` future left it registered and the
+        // IOC still sending. Weak: the monitor's task can outlive the
+        // handle while it reconnects, and must not keep the state alive.
+        let data = Arc::downgrade(&shared);
+        let conn = Arc::downgrade(&shared);
+        // Whether the monitor got going, which resets the backoff.
+        let started = Arc::new(AtomicBool::new(false));
+        let started_by = started.clone();
+        let monitor = client
+            .pvmonitor_handle(
+                pv,
+                move |_, value| {
+                    if let Some(shared) = data.upgrade() {
+                        shared.update(|s| apply(s, value));
+                    }
+                },
+                move |event| {
+                    if matches!(event, MonitorConnEvent::Connected { .. }) {
+                        started_by.store(true, Ordering::Relaxed);
+                    }
+                    let Some(shared) = conn.upgrade() else { return };
+                    match event {
+                        MonitorConnEvent::Connected { .. } => shared.update(|s| s.error = None),
+                        MonitorConnEvent::Disconnected => shared.update(|s| s.connected = false),
+                        MonitorConnEvent::Finished => {}
+                    }
+                },
+            )
             .await;
-        // The monitor reconnects by itself; it only returns when the channel
-        // cannot be found or the subscription ends, so try again later.
+        // The monitor reconnects by itself; it only ends when the channel
+        // closes, the subscription finishes or fails, so try again later.
+        let error = match monitor {
+            Ok(handle) => match handle.wait_terminal().await {
+                MonitorTermination::Ended => None,
+                MonitorTermination::Failed(e) => Some(e),
+            },
+            Err(e) => Some(e),
+        };
+        if started.load(Ordering::Relaxed) {
+            retry = Duration::from_millis(500);
+        }
         shared.update(|s| {
             s.connected = false;
-            if let Err(e) = &result {
+            if let Some(e) = &error {
                 s.error = Some(e.to_string());
             }
         });
-        if let Err(e) = result {
+        if let Some(e) = error {
             log::debug!("{pv}: {e}; retrying in {retry:?}");
         }
         tokio::time::sleep(retry).await;
@@ -149,8 +214,30 @@ fn float(f: Option<&PvField>) -> Option<f64> {
     }
 }
 
+/// An integer exactly, not through an `f64`, which keeps only 53 bits; a
+/// float is truncated and an unsigned one above `i64::MAX` saturates.
+fn scalar_i64(v: &ScalarValue) -> Option<i64> {
+    Some(match v {
+        ScalarValue::Boolean(b) => *b as i64,
+        ScalarValue::Byte(x) => *x as i64,
+        ScalarValue::Short(x) => *x as i64,
+        ScalarValue::Int(x) => *x as i64,
+        ScalarValue::Long(x) => *x,
+        ScalarValue::UByte(x) => *x as i64,
+        ScalarValue::UShort(x) => *x as i64,
+        ScalarValue::UInt(x) => *x as i64,
+        ScalarValue::ULong(x) => i64::try_from(*x).unwrap_or(i64::MAX),
+        ScalarValue::Float(x) => *x as i64,
+        ScalarValue::Double(x) => *x as i64,
+        ScalarValue::String(_) => return None,
+    })
+}
+
 fn int(f: Option<&PvField>) -> Option<i64> {
-    float(f).map(|v| v as i64)
+    match f? {
+        PvField::Scalar(v) => scalar_i64(v),
+        _ => None,
+    }
 }
 
 fn strings(f: Option<&PvField>) -> Vec<String> {
@@ -175,11 +262,13 @@ fn convert(f: &PvField) -> Value {
         PvField::Scalar(v @ (ScalarValue::Float(_) | ScalarValue::Double(_))) => {
             Value::Double(scalar_f64(v).unwrap_or(0.0))
         }
-        PvField::Scalar(v) => Value::Long(scalar_f64(v).unwrap_or(0.0) as i64),
+        PvField::Scalar(ScalarValue::ULong(x)) => Value::from_u64(*x),
+        PvField::Scalar(v) => Value::Long(scalar_i64(v).unwrap_or(0)),
         PvField::ScalarArrayTyped(a) => match a {
             TypedScalarArray::String(_) => Value::StrArray(strings(Some(f)).into()),
             TypedScalarArray::Float(x) => Value::DoubleArray(x.iter().map(|v| *v as f64).collect()),
             TypedScalarArray::Double(x) => Value::DoubleArray(x.iter().copied().collect()),
+            TypedScalarArray::ULong(x) => Value::from_u64s(x.as_slice()),
             other => Value::LongArray(typed_longs(other)),
         },
         PvField::ScalarArray(a) => {
@@ -195,6 +284,39 @@ fn convert(f: &PvField) -> Value {
     }
 }
 
+/// Set the `value` of `v`, a structure read back from the PV, to `bytes`
+/// in the type of the array it holds, to write a long string.
+fn with_bytes(v: &mut PvField, bytes: &[u8]) -> Result<(), String> {
+    use TypedScalarArray as T;
+    let field = match v {
+        PvField::Structure(s) => s.get_field_mut("value"),
+        _ => None,
+    };
+    let Some(field) = field else {
+        return Err("no value field to write the text to".into());
+    };
+    let b = || bytes.iter().copied();
+    *field = match field {
+        PvField::ScalarArrayTyped(a) => PvField::ScalarArrayTyped(match a {
+            // A char waveform is signed over PVA: bytes past 127 wrap.
+            T::Byte(_) => T::Byte(b().map(|x| x as i8).collect()),
+            T::UByte(_) => T::UByte(b().collect()),
+            T::Short(_) => T::Short(b().map(i16::from).collect()),
+            T::UShort(_) => T::UShort(b().map(u16::from).collect()),
+            T::Int(_) => T::Int(b().map(i32::from).collect()),
+            T::UInt(_) => T::UInt(b().map(u32::from).collect()),
+            T::Long(_) => T::Long(b().map(i64::from).collect()),
+            T::ULong(_) => T::ULong(b().map(u64::from).collect()),
+            T::Float(_) => T::Float(b().map(f32::from).collect()),
+            T::Double(_) => T::Double(b().map(f64::from).collect()),
+            T::Boolean(_) | T::String(_) => return Err("not an array of numbers".into()),
+        }),
+        PvField::ScalarArray(_) => PvField::ScalarArray(b().map(ScalarValue::UByte).collect()),
+        _ => return Err("not an array of numbers".into()),
+    };
+    Ok(())
+}
+
 fn typed_longs(a: &TypedScalarArray) -> Arc<[i64]> {
     match a {
         TypedScalarArray::Boolean(x) => x.iter().map(|v| *v as i64).collect(),
@@ -205,7 +327,7 @@ fn typed_longs(a: &TypedScalarArray) -> Arc<[i64]> {
         TypedScalarArray::Int(x) => x.iter().map(|v| *v as i64).collect(),
         TypedScalarArray::UInt(x) => x.iter().map(|v| *v as i64).collect(),
         TypedScalarArray::Long(x) => x.iter().copied().collect(),
-        TypedScalarArray::ULong(x) => x.iter().map(|v| *v as i64).collect(),
+        TypedScalarArray::ULong(x) => x.iter().map(|v| (*v).min(i64::MAX as u64) as i64).collect(),
         TypedScalarArray::Float(x) => x.iter().map(|v| *v as i64).collect(),
         TypedScalarArray::Double(x) => x.iter().map(|v| *v as i64).collect(),
         TypedScalarArray::String(_) => Arc::from(Vec::new()),
@@ -324,6 +446,56 @@ mod tests {
         );
         assert_eq!(img.data.get(1, true), 255.0);
         assert_eq!(img.data.get(1, false), -1.0);
+    }
+
+    #[test]
+    fn writes_long_strings_in_the_arrays_own_type() {
+        let mut nt = PvStructure::new("epics:nt/NTScalarArray:1.0");
+        nt.set(
+            "value",
+            PvField::ScalarArrayTyped(TypedScalarArray::Byte(vec![0i8; 3].into())),
+        );
+        let mut v = PvField::Structure(nt);
+        with_bytes(&mut v, &crate::long_string_bytes("h\u{e9}", None)).unwrap();
+        let mut s = PvState::default();
+        apply(&mut s, &v);
+        assert_eq!(s.value, Value::LongArray(Arc::from(vec![104, -61, -87, 0])));
+        assert_eq!(s.value.as_long_string().as_deref(), Some("h\u{e9}"));
+
+        let mut nt = PvStructure::new("epics:nt/NTScalar:1.0");
+        nt.set("value", PvField::Scalar(ScalarValue::String("x".into())));
+        assert!(with_bytes(&mut PvField::Structure(nt), b"y\0").is_err());
+    }
+
+    #[test]
+    fn keeps_every_bit_of_64_bit_integers() {
+        let big = (1i64 << 53) + 1;
+        let scalar = |v| {
+            let mut nt = PvStructure::new("epics:nt/NTScalar:1.0");
+            nt.set("value", PvField::Scalar(v));
+            let mut s = PvState::default();
+            apply(&mut s, &PvField::Structure(nt));
+            s.value
+        };
+        assert_eq!(scalar(ScalarValue::Long(big)), Value::Long(big));
+        assert_eq!(scalar(ScalarValue::Long(-big)), Value::Long(-big));
+        assert_eq!(scalar(ScalarValue::ULong(big as u64)), Value::Long(big));
+        assert_eq!(
+            scalar(ScalarValue::ULong(u64::MAX)),
+            Value::Double(u64::MAX as f64)
+        );
+        let array = convert(&PvField::ScalarArrayTyped(TypedScalarArray::ULong(
+            vec![1u64, u64::MAX].into(),
+        )));
+        assert_eq!(array, Value::DoubleArray(Arc::from([1.0, u64::MAX as f64])));
+        let array = convert(&PvField::ScalarArrayTyped(TypedScalarArray::Long(
+            vec![big].into(),
+        )));
+        assert_eq!(array, Value::LongArray(Arc::from([big])));
+        assert_eq!(
+            int(Some(&PvField::Scalar(ScalarValue::Long(big)))),
+            Some(big)
+        );
     }
 
     #[test]

@@ -96,3 +96,9 @@ record(stringin, "$(P)$(R)StatusMessage_RBV") {
 }
 record(longin, "$(P)$(R)UniqueId_RBV") {
 }
+
+# NDFile's long strings: char waveforms that displays show with format 6.
+record(waveform, "$(P)$(R)FilePath") {
+    field(FTVL, "CHAR")
+    field(NELM, "256")
+}
