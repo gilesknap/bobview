@@ -28,6 +28,10 @@ None are needed on macOS.
 curl -sSfL https://raw.githubusercontent.com/gilesknap/bobview/main/install.sh | bash
 ```
 
+The installer checks the tarball against the release's `SHA256SUMS`. Releases
+also carry a build provenance attestation; to check one yourself, run
+`gh attestation verify bobview-<arch>-<os>.tar.gz --repo gilesknap/bobview`.
+
 This installs into `~/.local`:
 
 | file | what |

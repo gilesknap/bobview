@@ -40,10 +40,11 @@ else
     if command -v gh >/dev/null; then
         gh release download --repo "${repo}" -p "${name}.tar.gz" -p SHA256SUMS -D "${tmp}"
     else
-        for f in "${name}.tar.gz" SHA256SUMS; do
-            curl -sSfL -o "${tmp}/${f}" \
-                "https://github.com/${repo}/releases/latest/download/${f}"
-        done
+        curl -sSfL -o "${tmp}/${name}.tar.gz" \
+            "https://github.com/${repo}/releases/latest/download/${name}.tar.gz"
+        # a release without checksums is refused below, with a message
+        curl -sSfL -o "${tmp}/SHA256SUMS" \
+            "https://github.com/${repo}/releases/latest/download/SHA256SUMS" || true
     fi
     # the release publishes SHA256SUMS; refuse a tarball that does not match
     if [[ ! -f ${tmp}/SHA256SUMS ]]; then

@@ -51,8 +51,11 @@ No command is ever run for a display fetched over http(s), nor in a
 macros, `..` and project links) to a local file beside or under the
 display, or in a linked folder of its Eclipse project, is run. Anything
 else, such as an absolute path elsewhere or a `../..` escape, is refused and
-logged, as is a script that any user may change (world-writable, or in a
-world-writable folder). Each script run is logged.
+logged, as is a script that every user may change (world-writable, or in a
+world-writable folder that is not sticky); group-writable shared installs
+are fine. For testing, `--allow-writable-launchers` lifts that last refusal
+for one run; it is not saved and has no menu entry. Each script run is
+logged.
 
 ## In the browser
 

@@ -18,6 +18,7 @@ been saved, else opens `index.bob` from the bundled displays
 | `-z`, `--zoom FACTOR` | fixed zoom, 0.2 to 5, instead of fitting the window |
 | `-f`, `--fullscreen` | start full screen |
 | `--read-only` | refuse every write to a PV except `loc://` ones; see [Writes and safety](../explanations/writes.md) |
+| `--allow-writable-launchers` | run launcher scripts even if every user may change them (a world-writable script, or one in a world-writable folder that is not sticky), which is refused by default; for testing, this run only; see [Writes and safety](../explanations/writes.md) |
 | `--layout NAME` | restore the saved layout `NAME` |
 | `--no-layout` | don't restore the default layout |
 | `--ui-scale F` or `auto` | size of the toolbar and menus relative to the desktop's scale, 1 being the desktop's own (default auto: smaller on a small high-DPI screen) |

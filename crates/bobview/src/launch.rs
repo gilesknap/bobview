@@ -75,8 +75,10 @@ fn target(
         return None;
     }
     let real = bob::project::locate(&script);
-    if others_may_write(&real) {
-        log::warn!("not running '{command}': other users may change it");
+    if refused(&real) {
+        log::warn!(
+            "not running '{command}': everyone may change it (see --allow-writable-launchers)"
+        );
         return None;
     }
     let text = std::fs::read(&real).ok()?;
@@ -105,18 +107,30 @@ fn allowed(display_dir: &Path, path: &Path) -> bool {
     roots(display_dir).iter().any(|root| real.starts_with(root))
 }
 
-/// Whether anyone but this user (or root) may have written `file`, or may
-/// replace it: it, or any folder above it, is owned by someone else or can
-/// be written by its group or by everyone. A sticky folder (as `/tmp`) only
-/// lets people change their own files, so its write bits do not count.
-fn others_may_write(file: &Path) -> bool {
+/// Whether launchers that anyone can change may be run (`--allow-writable-launchers`).
+/// Set once at start-up from the command line only: never saved, and no UI.
+static ALLOW_WRITABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Run launchers even if anyone can change them (for testing).
+pub fn allow_writable_launchers(allow: bool) {
+    ALLOW_WRITABLE.store(allow, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether `file` is to be refused: unless allowed by
+/// [`allow_writable_launchers`], when it or a folder above it is
+/// world-writable.
+fn refused(file: &Path) -> bool {
+    !ALLOW_WRITABLE.load(std::sync::atomic::Ordering::Relaxed) && everyone_may_write(file)
+}
+
+/// Whether every user may write `file`, or may replace it by writing a
+/// folder above it. A sticky folder (as `/tmp`) only lets people change
+/// their own files, so its write bit does not count.
+fn everyone_may_write(file: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
-    // SAFETY: geteuid(2) has no preconditions.
-    let me = unsafe { libc::geteuid() };
     let unsafe_entry = |p: &Path, is_file: bool| {
         std::fs::metadata(p).map_or(true, |m| {
-            let sticky = !is_file && m.mode() & 0o1000 != 0;
-            (m.uid() != me && m.uid() != 0) || (m.mode() & 0o022 != 0 && !sticky)
+            m.mode() & 0o002 != 0 && (is_file || m.mode() & 0o1000 == 0)
         })
     };
     let Ok(real) = std::fs::canonicalize(file) else {
@@ -513,12 +527,11 @@ exec "${SRC}/runcss.sh" $OPI -m $MACROS "$@"
         assert!(!marker.exists());
         mode(&dir, 0o755).unwrap();
         assert!(command_target(Some(&display), None, "./launch").is_some());
-        // Group-writable counts too, for the script and for its folder.
+        // Group-writable is fine: shared installs are.
         mode(&dir.join("launch"), 0o770).unwrap();
-        assert!(command_target(Some(&display), None, "./launch").is_none());
-        mode(&dir.join("launch"), 0o700).unwrap();
         mode(&dir, 0o775).unwrap();
-        assert!(command_target(Some(&display), None, "./launch").is_none());
+        assert!(command_target(Some(&display), None, "./launch").is_some());
+        mode(&dir.join("launch"), 0o700).unwrap();
         mode(&dir, 0o755).unwrap();
         // And a folder further up that others can write to.
         let inner = dir.join("inner");
@@ -528,6 +541,12 @@ exec "${SRC}/runcss.sh" $OPI -m $MACROS "$@"
         assert!(command_target(Some(&display), None, "./launch").is_some());
         mode(&dir, 0o757).unwrap();
         assert!(command_target(Some(&display), None, "./launch").is_none());
+        // Unless the flag allows it.
+        assert!(everyone_may_write(&inner.join("launch")));
+        allow_writable_launchers(true);
+        assert!(!refused(&inner.join("launch")));
+        allow_writable_launchers(false);
+        assert!(refused(&inner.join("launch")));
         mode(&dir, 0o755).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
     }
