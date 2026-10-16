@@ -1844,6 +1844,118 @@ fn slide_layout(rect: Rect, z: f32, has_label: bool) -> (Rect, Option<Rect>) {
     (track, label)
 }
 
+/// Phoebus Spinner: the value, dragged or typed, kept within the range and
+/// stepped by `increment`.
+fn spinner(ui: &mut Ui, node: &mut Node, s: Option<&PvState>, rect: Rect, cx: &mut Cx) -> Response {
+    let w = node.w.clone();
+    let (min, max) = crate::meter::limits(&w, s);
+    let (min, max) = (min.min(max), max.max(min));
+    let mut v = s.and_then(|s| s.value.as_f64()).unwrap_or(min);
+    let step = w.f64("increment").unwrap_or(1.0);
+    let drag = egui::DragValue::new(&mut v).range(min..=max).speed(step);
+    let resp = put_clipped(ui, rect, cx.clip.intersect(rect), drag);
+    if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+        write(node, v.to_string());
+    }
+    resp
+}
+
+/// Where a slider's parts go, along its length and across it.
+#[derive(Debug)]
+struct SliderLayout {
+    /// The band the thumb slides along.
+    band: Rect,
+    /// The thumb's length along the slider.
+    thumb: f32,
+    /// The thumb's centre at the minimum and at the maximum.
+    from: f32,
+    to: f32,
+    /// The band on the far side of the thumb's for the scale's ticks, and
+    /// whether its labels fit in it too.
+    scale: Option<Rect>,
+    labels: bool,
+    /// The band on the near side for the alarm level markers.
+    markers: Option<Rect>,
+}
+
+/// Lay out a slider in `rect`: the thumb's band, the scale on its far side
+/// (below a horizontal slider, right of a vertical one) and the level
+/// markers on its near side, all centred across it, as a JavaFX Slider
+/// centres its track and tick marks. `scale` is the room the scale's
+/// labels take across the slider and half of their length along it, and
+/// `markers` the room the markers' labels take across it; `None` leaves
+/// either out. What the box has no room for is left out, the markers
+/// first, then the scale's labels and then its ticks, before the thumb
+/// gets thin.
+fn slider_layout(
+    rect: Rect,
+    horizontal: bool,
+    z: f32,
+    scale: Option<(f32, f32)>,
+    markers: Option<f32>,
+) -> SliderLayout {
+    let (along, across) = if horizontal {
+        (rect.x_range(), rect.y_range())
+    } else {
+        (rect.y_range(), rect.x_range())
+    };
+    let pad = 2.0 * z;
+    let tick = 5.0 * z;
+    let room = (across.span() - 2.0 * pad).max(1.0);
+    let (full, thin) = (16.0 * z, 8.0 * z);
+    let ticks = scale.is_some();
+    let label = scale.map_or(0.0, |(l, _)| l);
+    let (mark, depth, labels) = [
+        (markers.map(|m| m + tick), ticks, ticks),
+        (None, ticks, ticks),
+        (None, ticks, false),
+        (None, false, false),
+    ]
+    .into_iter()
+    .map(|(m, t, l)| {
+        let depth = if t { tick } else { 0.0 } + if l { label } else { 0.0 };
+        (m.unwrap_or(0.0), depth, l)
+    })
+    .find(|(m, depth, _)| room - m - depth >= thin)
+    .unwrap_or((0.0, 0.0, false));
+    let thick = (room - mark - depth).clamp(1.0, full);
+    let start = across.center() - (mark + thick + depth) / 2.0;
+    let thumb = (thick * 0.6).max(1.0);
+    let half_label = scale.filter(|_| labels).map_or(0.0, |(_, half)| half);
+    let end = (thumb / 2.0).max(half_label) + pad;
+    let (lo, hi) = if along.span() > 2.0 * end {
+        (along.min + end, along.max - end)
+    } else {
+        (along.center(), along.center())
+    };
+    let band = (start + mark, start + mark + thick);
+    let part = |(a, b): (f32, f32)| {
+        if horizontal {
+            Rect::from_x_y_ranges(along, a..=b)
+        } else {
+            Rect::from_x_y_ranges(a..=b, along)
+        }
+    };
+    // A vertical slider has its minimum at the bottom.
+    let (from, to) = if horizontal { (lo, hi) } else { (hi, lo) };
+    SliderLayout {
+        band: part(band),
+        thumb,
+        from,
+        to,
+        scale: (depth > 0.0).then(|| part((band.1, band.1 + depth))),
+        labels,
+        markers: (mark > 0.0).then(|| part((start, band.0))),
+    }
+}
+
+/// Phoebus ScaledSlider and ScrollBar: a groove along the widget with a
+/// thumb at the value, and for a scaled slider with `show_scale` labelled
+/// ticks on one side and with `show_markers` its alarm levels on the
+/// other, as Phoebus' JavaFX Slider; no value box. A click or
+/// drag moves the thumb, and its value is written when the button is let
+/// go. An empty range (`maximum` equal to `minimum`) leaves the thumb at
+/// the start and writes nothing.
 fn slider(
     ui: &mut Ui,
     node: &mut Node,
@@ -1852,36 +1964,176 @@ fn slider(
     cx: &mut Cx,
     id: Id,
 ) -> Response {
+    if node.w.kind == "spinner" {
+        return spinner(ui, node, s, rect, cx);
+    }
     let w = node.w.clone();
-    let (min, max) = s
-        .filter(|_| w.bool("limits_from_pv").unwrap_or(true))
-        .and_then(|s| s.range())
-        .unwrap_or((
-            w.f64("minimum").unwrap_or(0.0),
-            w.f64("maximum").unwrap_or(100.0),
-        ));
-    let mut v = s.and_then(|s| s.value.as_f64()).unwrap_or(min);
-    let resp = ui
-        .scope(|ui| {
-            ui.set_clip_rect(cx.clip.intersect(ui.clip_rect()));
-            ui.scope_builder(egui::UiBuilder::new().max_rect(rect).id_salt(id), |ui| {
-                ui.spacing_mut().slider_width = (rect.width() - 60.0 * cx.view.zoom).max(20.0);
-                if w.kind == "spinner" {
-                    let step = w.f64("increment").unwrap_or(1.0);
-                    ui.add_sized(
-                        rect.size(),
-                        egui::DragValue::new(&mut v).range(min..=max).speed(step),
-                    )
-                } else {
-                    ui.add(egui::Slider::new(&mut v, min..=max))
-                }
-            })
-            .inner
-        })
-        .inner;
-    if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+    let z = cx.view.zoom;
+    let (min, max) = crate::meter::limits(&w, s);
+    let live = min != max;
+    let horizontal = w.bool("horizontal").unwrap_or(true);
+    let show_scale = w.kind == "scaledslider" && w.bool("show_scale").unwrap_or(true) && live;
+    let painter = ui.painter().with_clip_rect(cx.clip.intersect(rect));
+    if w.kind == "scaledslider" && w.bool("transparent") == Some(false) {
+        fill(&painter, rect, bg(&w, "Background"));
+    }
+    let fnt = font(&w, z);
+    let text = fg(&w);
+    let size_of = |s: &str| {
+        painter
+            .layout_no_wrap(s.to_string(), fnt.clone(), text)
+            .size()
+    };
+    let guess = (max - min).abs() / 10.0;
+    let size = |v: f64| size_of(&crate::axis::label(v, guess));
+    let (lo_size, hi_size) = (size(min), size(max));
+    let widest = lo_size.x.max(hi_size.x);
+    let line_h = lo_size.y;
+    let room = if horizontal {
+        (line_h, widest / 2.0)
+    } else {
+        (widest + 2.0 * z, line_h / 2.0)
+    };
+    // Phoebus' markers: the alarm levels inside the range, named.
+    let markers: Vec<(f64, &str)> = crate::meter::levels(&w, s)
+        .into_iter()
+        .zip(["LOLO", "LOW", "HIGH", "HIHI"])
+        .filter_map(|(level, name)| Some((level?, name)))
+        .filter(|(level, _)| (min.min(max)..=max.max(min)).contains(level))
+        .collect();
+    let mark_room = (w.kind == "scaledslider" && w.bool("show_markers") == Some(true) && live)
+        .then(|| {
+            if horizontal {
+                line_h
+            } else {
+                size_of("HIHI").x + 2.0 * z
+            }
+        });
+    let lay = slider_layout(rect, horizontal, z, show_scale.then_some(room), mark_room);
+    let scale = crate::axis::Scale {
+        lo: min,
+        hi: max,
+        log: false,
+        from: lay.from,
+        to: lay.to,
+    };
+
+    // Follow the pointer while it is down on an enabled slider, and write
+    // where it was let go.
+    let resp = ui.interact(rect.intersect(cx.clip), id, Sense::click_and_drag());
+    let mut v = s
+        .and_then(|s| s.value.as_f64())
+        .filter(|v| v.is_finite())
+        .unwrap_or(min);
+    let enabled = live && !is_disabled(&w, s);
+    if enabled && let Some(p) = resp.interact_pointer_pos() {
+        let at = if horizontal { p.x } else { p.y };
+        let t = if lay.to != lay.from {
+            ((at - lay.from) / (lay.to - lay.from)).clamp(0.0, 1.0) as f64
+        } else {
+            0.0
+        };
+        v = min + (max - min) * t;
+        ui.data_mut(|d| d.insert_temp(id, v));
+    }
+    if (resp.drag_stopped() || resp.clicked())
+        && let Some(v) = ui.data_mut(|d| d.remove_temp::<f64>(id))
+    {
         write(node, v.to_string());
     }
+
+    // The groove, then the scale, then the thumb over both.
+    let band = lay.band;
+    let groove_w = (band.height().min(band.width()) / 4.0).max(2.0 * z);
+    let groove = if horizontal {
+        Rect::from_center_size(
+            Pos2::new((lay.from + lay.to) / 2.0, band.center().y),
+            Vec2::new((lay.to - lay.from).abs() + lay.thumb, groove_w),
+        )
+    } else {
+        Rect::from_center_size(
+            Pos2::new(band.center().x, (lay.from + lay.to) / 2.0),
+            Vec2::new(groove_w, (lay.to - lay.from).abs() + lay.thumb),
+        )
+    };
+    painter.rect(
+        groove,
+        CornerRadius::same((groove_w / 2.0).min(255.0) as u8),
+        Color32::from_gray(225),
+        Stroke::new(1.0, Color32::from_gray(150)),
+        StrokeKind::Inside,
+    );
+    // A tick at `p` along the slider, out from `edge` across it (`out` is
+    // 1 to the far side, -1 to the near one), with its label beyond.
+    let stroke = Stroke::new(1.0, text);
+    let tick_at = |edge: f32, p: f32, out: f32, label: Option<String>| {
+        let len = 5.0 * z * out;
+        let (a, b) = if horizontal {
+            (Pos2::new(p, edge), Pos2::new(p, edge + len))
+        } else {
+            (Pos2::new(edge, p), Pos2::new(edge + len, p))
+        };
+        painter.line_segment([a, b], stroke);
+        if let Some(label) = label {
+            let (align, gap) = match (horizontal, out > 0.0) {
+                (true, true) => (Align2::CENTER_TOP, 0.0),
+                (true, false) => (Align2::CENTER_BOTTOM, 0.0),
+                (false, true) => (Align2::LEFT_CENTER, 2.0 * z),
+                (false, false) => (Align2::RIGHT_CENTER, -2.0 * z),
+            };
+            painter.text(b + Vec2::new(gap, 0.0), align, label, fnt.clone(), text);
+        }
+    };
+    if let Some(area) = lay.scale {
+        // Major ticks at least `major_tick_step_hint` apart, and far
+        // enough apart for their labels.
+        let hint = w.f64("major_tick_step_hint").unwrap_or(20.0) as f32 * z;
+        let label_len = if horizontal {
+            widest + 8.0 * z
+        } else {
+            line_h * 1.5
+        };
+        let gaps = ((lay.to - lay.from).abs() / hint.max(label_len)).floor();
+        let (ticks, step) = crate::axis::ticks(min, max, gaps as usize + 1);
+        let edge = if horizontal { area.top() } else { area.left() };
+        for t in ticks {
+            let label = lay.labels.then(|| crate::axis::label(t, step));
+            tick_at(edge, scale.pos(t), 1.0, label);
+        }
+    }
+    if let Some(area) = lay.markers {
+        let edge = if horizontal {
+            area.bottom()
+        } else {
+            area.right()
+        };
+        for (level, name) in &markers {
+            tick_at(edge, scale.pos(*level), -1.0, Some(name.to_string()));
+        }
+    }
+    let at = if live {
+        scale.pos(v.clamp(min.min(max), max.max(min)))
+    } else {
+        lay.from
+    };
+    let thumb = if horizontal {
+        Rect::from_center_size(
+            Pos2::new(at, band.center().y),
+            Vec2::new(lay.thumb, band.height()),
+        )
+    } else {
+        Rect::from_center_size(
+            Pos2::new(band.center().x, at),
+            Vec2::new(band.width(), lay.thumb),
+        )
+    };
+    button_box(
+        &painter,
+        thumb,
+        named("Button_Background"),
+        enabled && resp.is_pointer_button_down_on(),
+        z,
+    );
     resp
 }
 
@@ -2895,5 +3147,75 @@ pv.setValue(pv_value);
         assert!(track.right() < label.left());
         assert_eq!(label.right(), rect.right());
         assert_eq!(track.height(), 16.0);
+    }
+
+    #[test]
+    fn slider_is_centred_in_its_box() {
+        // sr/pinger.opi: a tall slider with no scale sits in the middle of
+        // its box, not at the top.
+        let rect = Rect::from_min_size(Pos2::new(64.0, 3.0), Vec2::new(384.0, 76.0));
+        let lay = slider_layout(rect, true, 1.0, None, None);
+        assert_eq!(lay.band.center().y, rect.center().y);
+        assert!(lay.scale.is_none());
+        assert!(rect.contains_rect(lay.band));
+        assert!(lay.from - lay.thumb / 2.0 >= rect.left());
+        assert!(lay.to + lay.thumb / 2.0 <= rect.right());
+    }
+
+    #[test]
+    fn slider_scale_sits_beside_the_thumb() {
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(384.0, 76.0));
+        let lay = slider_layout(rect, true, 1.0, Some((14.0, 20.0)), None);
+        let scale = lay.scale.unwrap();
+        assert!(lay.labels);
+        assert_eq!(scale.top(), lay.band.bottom());
+        assert!(rect.contains_rect(scale) && rect.contains_rect(lay.band));
+        // Room at the ends for the first and last labels.
+        assert!(lay.from >= 20.0 && lay.to <= 364.0);
+        // The two together are centred.
+        assert_eq!((lay.band.top() + scale.bottom()) / 2.0, rect.center().y);
+        // Vertical: the minimum at the bottom, the scale to the right.
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(76.0, 384.0));
+        let lay = slider_layout(rect, false, 1.0, Some((30.0, 7.0)), None);
+        assert!(lay.from > lay.to);
+        assert_eq!(lay.scale.unwrap().left(), lay.band.right());
+    }
+
+    #[test]
+    fn small_slider_drops_labels_before_its_thumb() {
+        // cameraControl-gige.opi: 168x24, no room for labels under the thumb.
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(168.0, 24.0));
+        let lay = slider_layout(rect, true, 1.0, Some((14.0, 20.0)), None);
+        assert!(!lay.labels);
+        assert!(lay.scale.is_some());
+        assert!(lay.band.height() >= 8.0);
+        assert!(rect.contains_rect(lay.band) && rect.contains_rect(lay.scale.unwrap()));
+        // Too narrow for any travel: the thumb stays in the middle.
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(6.0, 24.0));
+        let lay = slider_layout(rect, true, 1.0, None, None);
+        assert_eq!((lay.from, lay.to), (3.0, 3.0));
+        // Markers go before the scale's labels.
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(168.0, 40.0));
+        let lay = slider_layout(rect, true, 1.0, Some((14.0, 20.0)), Some(14.0));
+        assert!(lay.markers.is_none() && lay.labels);
+    }
+
+    #[test]
+    fn slider_markers_sit_on_the_near_side() {
+        // sr/pinger.opi: markers above the thumb and the scale below it,
+        // the three centred, so the thumb is clear of the title label that
+        // covers the top 29px of the box.
+        let rect = Rect::from_min_size(Pos2::new(64.0, 3.0), Vec2::new(384.0, 76.0));
+        let lay = slider_layout(rect, true, 1.0, Some((14.0, 20.0)), Some(14.0));
+        let (markers, scale) = (lay.markers.unwrap(), lay.scale.unwrap());
+        assert_eq!(markers.bottom(), lay.band.top());
+        assert_eq!(scale.top(), lay.band.bottom());
+        assert!(rect.contains_rect(markers) && rect.contains_rect(scale));
+        assert_eq!(lay.band.center().y, rect.center().y);
+        assert!(lay.band.top() > rect.top() + 29.0);
+        // Vertical: markers to the left.
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(120.0, 300.0));
+        let lay = slider_layout(rect, false, 1.0, Some((40.0, 7.0)), Some(36.0));
+        assert_eq!(lay.markers.unwrap().right(), lay.band.left());
     }
 }

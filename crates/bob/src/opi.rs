@@ -518,6 +518,9 @@ fn widget(mut el: Element) -> Vec<Element> {
             }
         }
         (_, "polyline" | "polygon") => points(&mut el),
+        // BOY's slider fills its box with its background colour; Phoebus'
+        // is transparent unless told otherwise.
+        ("scaledslider", _) => default(&mut el, "transparent", "false"),
         ("arc", _) => {
             if let Some(fill) = flag(&el, "fill") {
                 set(&mut el, "transparent", !fill);
@@ -2620,5 +2623,12 @@ widget.setPropertyValue("opi_file", pv0 + ".opi");"#,
         // Those ignored scripts are still counted; a group link's are not.
         assert!(none.has_scripts());
         assert!(!sym.has_scripts() && !label.has_scripts());
+    }
+
+    #[test]
+    fn scaled_slider_fills_its_background() {
+        let w = one("scaledslider", "<horizontal>true</horizontal>");
+        assert_eq!(w.bool("transparent"), Some(false));
+        assert_eq!(w.bool("horizontal"), Some(true));
     }
 }
