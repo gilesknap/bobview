@@ -127,8 +127,9 @@ as they live inside bobview and cannot reach a control system. PV Access
 does not report access rights, so such a PV is assumed writable (the PV
 details say "unknown") and a put the server refuses is shown as a write
 error in the status line and the PV details. A write to a CA or PVA PV that
-is not connected is refused at once, as is one while 16 earlier writes to it
-still wait, rather than applied late; the status line says so. A `write_pv` action (or the
+was connected and has dropped is refused at once, as is one while 16 earlier
+writes to it still wait, rather than applied late; the status line says so. A
+write to a PV that has yet to connect waits in that queue. A `write_pv` action (or the
 toggle script) of a display loaded from an `http://` or `https://` URL asks
 for confirmation before it writes; displays from local files write at once.
 
@@ -463,8 +464,8 @@ prints to stderr at startup; open the page with `&token=TOKEN`. An empty
 the token from its address after reading it, so a reload needs it again. A page
 with a token loads displays only from its own server, and sends the token only
 to a PVWS on its own server, so a link naming someone else's display or
-`&pvws=` cannot write with it. Writes to a PV that is not connected fail at
-once, and at most 16 may wait for one PV. Browsers let any page open a websocket, so the
+`&pvws=` cannot write with it. Writes to a PV that was connected and has
+dropped fail at once, and at most 16 may wait for one PV. Browsers let any page open a websocket, so the
 server always accepts only pages from itself (by `Origin`), plus
 any named with `--allow-origin https://host.example.com` (repeatable). Those
 pages must also call the server by an IP address, `localhost`, this machine's

@@ -40,7 +40,10 @@ pub use name::{PvName, Scheme};
 pub use origin::{same_origin, url_origin};
 #[cfg(target_arch = "wasm32")]
 pub use pvws::{set_pvws, set_write_token};
-pub use value::{Image, ImageData, PvState, Severity, Value, split_array, split_strings};
+pub use value::{
+    Image, ImageData, PvState, Severity, Value, long_string, long_string_bytes, split_array,
+    split_strings,
+};
 
 /// Called whenever any PV changes, so a UI can schedule a repaint.
 pub type Notifier = Arc<dyn Fn() + Send + Sync>;
@@ -50,11 +53,21 @@ pub type Notifier = Arc<dyn Fn() + Send + Sync>;
 pub type Listener = Arc<ListenFn>;
 pub type ListenFn = dyn Fn(&PvState) + Send + Sync;
 
+/// A write of text to a PV.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Put {
+    pub text: String,
+    /// Write the text into an array of numbers as a long string (see
+    /// [`Pv::write_long_string`]).
+    pub long_string: bool,
+}
+
 /// Where writes to a PV go.
 pub(crate) enum Writer {
     /// To the backend task, which converts and sends them.
     #[cfg(not(target_arch = "wasm32"))]
-    Channel(mpsc::Sender<String>),
+    Channel(mpsc::Sender<Put>),
     /// Straight into the local value.
     Local,
     /// Over the PV Web Socket, which converts them.
@@ -87,7 +100,7 @@ pub(crate) const WRITE_QUEUE: usize = 16;
 
 /// The queue of a backend's writes, for [`Writer::Channel`].
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn write_queue() -> (mpsc::Sender<String>, mpsc::Receiver<String>) {
+pub(crate) fn write_queue() -> (mpsc::Sender<Put>, mpsc::Receiver<Put>) {
     mpsc::channel(WRITE_QUEUE)
 }
 
@@ -99,6 +112,8 @@ pub(crate) struct Shared {
     writer: Mutex<Option<Writer>>,
     notify: Arc<RwLock<Option<Notifier>>>,
     listeners: Mutex<Vec<Weak<ListenFn>>>,
+    /// Set (under the state lock) once the PV has first connected.
+    was_connected: AtomicBool,
 }
 
 impl Shared {
@@ -110,6 +125,7 @@ impl Shared {
             writer: Mutex::new(None),
             notify,
             listeners: Mutex::new(Vec::new()),
+            was_connected: AtomicBool::new(false),
         })
     }
 
@@ -118,6 +134,9 @@ impl Shared {
         {
             let mut state = self.state.lock();
             f(&mut state);
+            if state.connected {
+                self.was_connected.store(true, Ordering::Relaxed);
+            }
             // Under the state lock, so listeners see changes in order.
             // A listener that panics is dropped, so it cannot stop the PV's
             // task (or the UI thread writing a local PV) for good. Release
@@ -140,6 +159,13 @@ impl Shared {
         }
     }
 
+    /// Whether the PV connected once and has since lost its connection;
+    /// not one that has yet to connect.
+    pub(crate) fn dropped(&self) -> bool {
+        let state = self.state.lock();
+        !state.connected && self.was_connected.load(Ordering::Relaxed)
+    }
+
     pub(crate) fn snapshot(&self) -> PvState {
         self.state.lock().clone()
     }
@@ -155,13 +181,15 @@ impl Shared {
     }
 
     /// Whether a write taken from the queue can go now; if not, say why.
+    /// One to a PV that has yet to connect goes, for the backend to wait
+    /// for or fail.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn can_write(&self, text: &str) -> bool {
-        let connected = self.state.lock().connected;
-        if !connected {
+        let dropped = self.dropped();
+        if dropped {
             self.write_result(text, Some("not connected".into()));
         }
-        connected
+        !dropped
     }
 
     pub(crate) fn set_writer(&self, writer: Writer) {
@@ -200,6 +228,20 @@ impl Pv {
     }
 
     /// The latest value, alarm and metadata.
+    /// Whether the PV connected once and has since lost its connection. A
+    /// write to it is refused at once; one to a PV that has yet to connect
+    /// is queued.
+    pub fn dropped(&self) -> bool {
+        self.0.shared.dropped()
+    }
+
+    /// Mark the PV connected or not, as its backend would; for tests of
+    /// code that uses PVs.
+    #[doc(hidden)]
+    pub fn set_connected_for_test(&self, connected: bool) {
+        self.0.shared.update(|s| s.connected = connected);
+    }
+
     pub fn state(&self) -> PvState {
         let mut state = self.0.shared.snapshot();
         if self.refuses_writes() {
@@ -232,7 +274,24 @@ impl Pv {
 
     /// Write a value given as text; the backend converts it to the PV's type.
     pub fn write(&self, value: impl Into<String>) {
-        let value = value.into();
+        self.put(value.into(), false);
+    }
+
+    /// Write text as Phoebus does for a widget whose `format` is string: into
+    /// a char array as a long string (see [`long_string_bytes`]). Any other
+    /// PV is written as by [`Pv::write`].
+    ///
+    /// Over CA, as in Phoebus, a char array is a `DBF_CHAR` channel of more
+    /// than one element, and the text is cut to that element count with its
+    /// NUL kept. Over PVA and `loc://` it is any array of numbers. A PVA
+    /// array has no fixed element count to cut to, so an IOC that stores
+    /// only its first NELM elements may lose the NUL (and part of a
+    /// multi-byte character), as it does with Phoebus.
+    pub fn write_long_string(&self, value: impl Into<String>) {
+        self.put(value.into(), true);
+    }
+
+    fn put(&self, value: String, long_string: bool) {
         let shared = &self.0.shared;
         if self.refuses_writes() {
             shared.ctl.notify(format!(
@@ -243,15 +302,17 @@ impl Pv {
         }
         // Read first: the state and writer locks never nest.
         #[cfg(not(target_arch = "wasm32"))]
-        let connected = shared.state.lock().connected;
+        let dropped = shared.dropped();
         // Released before the state changes, so the two locks never nest.
         let writer = shared.writer.lock();
         match writer.as_ref() {
             #[cfg(not(target_arch = "wasm32"))]
             Some(Writer::Channel(tx)) => {
-                // A write to a PV that is not there would wait for it, and
-                // land late, perhaps long after the user moved on.
-                if !connected {
+                // A write to a PV that has gone would wait for it to come
+                // back, and land late, perhaps long after the user moved on.
+                // One that has not connected yet is queued: it was most
+                // likely just subscribed.
+                if dropped {
                     drop(writer);
                     shared.ctl.notify(format!(
                         "{}: not writing '{value}', not connected",
@@ -260,25 +321,38 @@ impl Pv {
                     return;
                 }
                 // The task serving the PV holds the receiver until it stops.
-                let sent = tx.try_send(value);
+                let sent = tx.try_send(Put {
+                    text: value,
+                    long_string,
+                });
                 drop(writer);
                 match sent {
                     Ok(()) => {}
-                    Err(mpsc::error::TrySendError::Full(value)) => shared.ctl.notify(format!(
-                        "{}: not writing '{value}', {WRITE_QUEUE} writes still waiting",
-                        shared.name
+                    Err(mpsc::error::TrySendError::Full(put)) => shared.ctl.notify(format!(
+                        "{}: not writing '{}', {WRITE_QUEUE} writes still waiting",
+                        shared.name, put.text
                     )),
-                    Err(mpsc::error::TrySendError::Closed(value)) => {
-                        shared.write_result(&value, Some("the PV's connection has stopped".into()))
-                    }
+                    Err(mpsc::error::TrySendError::Closed(put)) => shared
+                        .write_result(&put.text, Some("the PV's connection has stopped".into())),
                 }
             }
             Some(Writer::Local) => {
                 drop(writer);
-                shared.update(|s| s.value = local::apply(&s.value, &s.labels, &value));
+                shared.update(|s| {
+                    s.value = if long_string && s.value.is_numeric_array() {
+                        Value::LongArray(
+                            long_string_bytes(&value, None)
+                                .iter()
+                                .map(|b| *b as i64)
+                                .collect(),
+                        )
+                    } else {
+                        local::apply(&s.value, &s.labels, &value)
+                    }
+                })
             }
             #[cfg(target_arch = "wasm32")]
-            Some(Writer::Pvws(name)) => pvws::write(name, &shared.snapshot(), value),
+            Some(Writer::Pvws(name)) => pvws::write(name, &shared.snapshot(), value, long_string),
             None => shared
                 .ctl
                 .notify(format!("{} cannot be written", shared.name)),
@@ -538,7 +612,7 @@ mod tests {
     }
 
     /// A PV whose writes go to a queue no backend reads.
-    fn queued(pvs: &PvManager, connected: bool) -> (Pv, mpsc::Receiver<String>) {
+    fn queued(pvs: &PvManager, connected: bool) -> (Pv, mpsc::Receiver<Put>) {
         let name = PvName::parse("ca://QUEUED");
         let shared = Shared::new(&name, pvs.inner.notify.clone(), pvs.inner.ctl.clone());
         let (tx, rx) = write_queue();
@@ -553,9 +627,11 @@ mod tests {
     }
 
     #[test]
-    fn writes_to_a_disconnected_pv_fail_at_once() {
+    fn writes_to_a_dropped_pv_fail_at_once() {
         let pvs = PvManager::new();
-        let (pv, mut rx) = queued(&pvs, false);
+        let (pv, mut rx) = queued(&pvs, true);
+        pv.0.shared.update(|s| s.connected = false);
+        assert!(pv.dropped());
         pv.write("1");
         assert!(rx.try_recv().is_err());
         let (n, text) = pvs.notice();
@@ -564,6 +640,28 @@ mod tests {
         // And one that disconnects while a write waits reports it.
         assert!(!pv.0.shared.can_write("1"));
         assert_eq!(pv.state().write_error.as_deref(), Some("not connected"));
+    }
+
+    #[test]
+    fn writes_to_a_pv_yet_to_connect_are_queued() {
+        let pvs = PvManager::new();
+        let (pv, mut rx) = queued(&pvs, false);
+        assert!(!pv.dropped());
+        pv.write("1");
+        pv.write_long_string("a");
+        assert_eq!(pvs.notice().0, 0);
+        let put = rx.try_recv().unwrap();
+        assert_eq!((put.text.as_str(), put.long_string), ("1", false));
+        let put = rx.try_recv().unwrap();
+        assert_eq!((put.text.as_str(), put.long_string), ("a", true));
+        // The backend goes ahead with them, to wait for the PV or fail.
+        assert!(pv.0.shared.can_write("1"));
+        assert_eq!(pv.state().write_error, None);
+        // Still bounded.
+        for i in 0..WRITE_QUEUE + 1 {
+            pv.write(i.to_string());
+        }
+        assert_eq!(pvs.notice().0, 1);
     }
 
     #[test]
@@ -578,13 +676,32 @@ mod tests {
         assert!(text.contains("writes still waiting"), "{text}");
         let mut got = Vec::new();
         while let Ok(v) = rx.try_recv() {
-            got.push(v);
+            got.push(v.text);
         }
         assert_eq!(got.len(), WRITE_QUEUE);
         assert_eq!(got[0], "0");
         drop(rx);
         pv.write("x");
         assert!(pvs.notice().1.contains("stopped"));
+    }
+
+    #[test]
+    fn long_strings_are_written_into_number_arrays_only() {
+        let pvs = PvManager::new();
+        let pv = pvs.subscribe("loc://long_string_test<VLongArray>(0, 0)");
+        pv.write_long_string("/tmp/a");
+        let state = pv.state();
+        assert_eq!(state.value.as_long_string().as_deref(), Some("/tmp/a"));
+        let Value::LongArray(a) = &state.value else {
+            panic!("{:?}", state.value)
+        };
+        assert_eq!(a.last(), Some(&0));
+        // Other writes are unchanged.
+        pv.write("[1, 2]");
+        assert_eq!(pv.state().value, Value::LongArray(Arc::from(vec![1, 2])));
+        let s = pvs.subscribe("loc://long_string_str(\"x\")");
+        s.write_long_string("y");
+        assert_eq!(s.state().value, Value::Str("y".into()));
     }
 
     #[test]

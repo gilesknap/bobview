@@ -604,17 +604,33 @@ pub(crate) fn placeholder(painter: &egui::Painter, rect: Rect, what: &str, z: f3
     );
 }
 
+/// The `format` that shows (and writes) an array of numbers as a long
+/// string, as areaDetector's `FilePath` and other char waveforms are.
+const STRING_FORMAT: i64 = 6;
+
+/// Whether a control writes its text as a long string, as Phoebus does
+/// when its `format` is string: see [`pv::Pv::write_long_string`].
+fn writes_long_string(w: &Widget) -> bool {
+    w.i64("format") == Some(STRING_FORMAT)
+}
+
 /// Value text as Phoebus formats it for the widget's `format` and `precision`.
 pub(crate) fn format_value(w: &Widget, s: &PvState) -> String {
     let precision = w.i64("precision").filter(|p| *p >= 0).map(|p| p as i32);
     let units = w.bool("show_units").unwrap_or(true);
     let format = w.i64("format").unwrap_or(0);
     match (format, &s.value) {
-        (6, Value::LongArray(a)) => a
-            .iter()
-            .take_while(|c| **c != 0)
-            .map(|c| (*c as u8) as char)
-            .collect(),
+        (STRING_FORMAT, v) if v.is_numeric_array() => v.as_long_string().unwrap_or_default(),
+        // A number as the character of its low byte, as Phoebus shows it.
+        (STRING_FORMAT, Value::Long(_) | Value::Double(_)) => {
+            let byte = s.value.as_i64().unwrap_or(0) as u8;
+            let text = pv::long_string([byte]);
+            if units && !s.units.is_empty() {
+                format!("{text} {}", s.units)
+            } else {
+                text
+            }
+        }
         (4, v) if v.as_i64().is_some() => format!("0x{:X}", v.as_i64().unwrap_or(0)),
         (10, v) if v.as_i64().is_some() => format!("0b{:b}", v.as_i64().unwrap_or(0)),
         (2, Value::Double(v)) => {
@@ -686,9 +702,14 @@ fn write_needs_confirmation(base: Option<&Source>) -> bool {
 }
 
 fn write(node: &Node, value: impl Into<String>) {
+    write_with(node, |pv| pv.write(value));
+}
+
+/// Write to the widget's PV with `put`, if the control may write it.
+fn write_with(node: &Node, put: impl FnOnce(&pv::Pv)) {
     if let Some(pv) = &node.pv {
         if can_write(&node.w, Some(&pv.state())) {
-            pv.write(value);
+            put(pv);
         } else {
             log::debug!("{}: not writing, the control is disabled", node.pv_name);
         }
@@ -1111,7 +1132,12 @@ fn text_entry(
         node.edit = Some(buf);
     } else if resp.lost_focus() {
         if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            write(node, buf.trim().to_string());
+            // Phoebus keeps the spaces of text written as a string.
+            if writes_long_string(&node.w) {
+                write_with(node, |pv| pv.write_long_string(buf));
+            } else {
+                write(node, buf.trim().to_string());
+            }
         }
         node.edit = None;
     }
@@ -1928,8 +1954,14 @@ fn fetched(ui: &Ui, node: &Node) -> bool {
     node.loading && !crate::fetch::pending()
 }
 
+/// Show the display `node` embeds once its thread has built it, keeping
+/// the window repainting until then. It is never embedded again, so false.
 #[cfg(not(target_arch = "wasm32"))]
-fn fetched(_ui: &Ui, _node: &Node) -> bool {
+fn fetched(ui: &Ui, node: &mut Node) -> bool {
+    if node.poll_building(std::time::Duration::ZERO) {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(50));
+    }
     false
 }
 
@@ -1950,7 +1982,7 @@ fn embedded(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut Cx, id: Id) {
         let file = node.prop("file");
         let group = node.prop("group_name");
         let macros = node.macros.clone();
-        Builder { pvs: cx.pvs }.embed(node, &file, &macros, &group, cx.depth);
+        Builder::ui(cx.pvs).embed(node, &file, &macros, &group, cx.depth);
     }
     let w = node.w.clone();
     match node.embedded.as_mut() {
@@ -2011,10 +2043,10 @@ fn navtabs(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut Cx, id: Id) {
         }
     }
     if let Some(i) = clicked {
-        Builder { pvs: cx.pvs }.select_navtab(node, i, cx.depth);
+        Builder::ui(cx.pvs).select_navtab(node, i, cx.depth);
     }
     if fetched(ui, node) {
-        Builder { pvs: cx.pvs }.select_navtab(node, node.active_tab, cx.depth);
+        Builder::ui(cx.pvs).select_navtab(node, node.active_tab, cx.depth);
     }
     let body = if vertical {
         Rect::from_min_max(rect.min + Vec2::new(tw + gap, 0.0), rect.max)
@@ -2085,8 +2117,7 @@ mod tests {
         )
         .unwrap();
         let pvs = PvManager::new();
-        let screen =
-            crate::screen::Builder { pvs: &pvs }.screen(d, &bob::Macros::default(), None, 0);
+        let screen = crate::screen::Builder::new(&pvs).screen(d, &bob::Macros::default(), None, 0);
         let widget = |resize: i64| {
             bob::Display::parse(&format!(
                 "<display><widget type='embedded'><resize>{resize}</resize></widget></display>"
@@ -2113,8 +2144,7 @@ mod tests {
         for dir in ["", "/tmp", "file:///tmp"] {
             let mut d = bob::Display::parse(&actions(dir)).unwrap();
             d.source = Some(Source::Url("https://example.com/x.bob".into()));
-            let screen =
-                crate::screen::Builder { pvs: &pvs }.screen(d, &Macros::default(), None, 0);
+            let screen = crate::screen::Builder::new(&pvs).screen(d, &Macros::default(), None, 0);
             let node = &screen.nodes[0];
             let mut requests = Vec::new();
             let mut cx = Cx {
@@ -2372,6 +2402,45 @@ mod tests {
     }
 
     #[test]
+    fn string_format_shows_char_arrays_as_text() {
+        let chars = |codes: &[i64]| PvState {
+            connected: true,
+            value: Value::LongArray(Arc::from(codes)),
+            ..Default::default()
+        };
+        let path = chars(&[47, 116, 109, 112, 0, 120, 121]);
+        let string = widget("<format>6</format>");
+        assert!(writes_long_string(&string));
+        assert_eq!(format_value(&string, &path), "/tmp");
+        assert_eq!(format_value(&string, &chars(&[104, 105])), "hi");
+        // Other formats, and values that are not arrays of numbers, are as before.
+        let default = widget("");
+        assert!(!writes_long_string(&default));
+        assert_eq!(
+            format_value(&default, &path),
+            "[47, 116, 109, 112, 0, 120, 121]"
+        );
+        let text = PvState {
+            connected: true,
+            value: Value::Str("a b".into()),
+            ..Default::default()
+        };
+        assert_eq!(format_value(&string, &text), "a b");
+        // A number shows as the character of its low byte, as in Phoebus,
+        // and NUL as nothing.
+        assert_eq!(format_value(&string, &state(65, true)), "A");
+        assert_eq!(format_value(&string, &state(0x141, true)), "A");
+        assert_eq!(format_value(&string, &state(0, true)), "");
+        let double = PvState {
+            connected: true,
+            value: Value::Double(104.7),
+            units: "mm".into(),
+            ..Default::default()
+        };
+        assert_eq!(format_value(&string, &double), "h mm");
+    }
+
+    #[test]
     fn label_defaults_to_label_only_when_absent() {
         assert_eq!(raw_label(&widget("")), "Label");
         assert_eq!(raw_label(&widget("<label></label>")), "");
@@ -2448,7 +2517,7 @@ mod tests {
             </action></actions></widget></display>"#;
         let pvs = PvManager::new();
         let display = bob::Display::parse(xml).unwrap();
-        let screen = Builder { pvs: &pvs }.screen(display, &Macros::default(), None, 0);
+        let screen = Builder::new(&pvs).screen(display, &Macros::default(), None, 0);
         let node = &screen.nodes[0];
         let mut requests = Vec::new();
         let mut cx = Cx {
@@ -2482,7 +2551,7 @@ mod tests {
             </actions></widget></display>"#;
         let pvs = PvManager::new();
         let display = bob::Display::parse(xml).unwrap();
-        let screen = Builder { pvs: &pvs }.screen(display, &Macros::default(), None, 0);
+        let screen = Builder::new(&pvs).screen(display, &Macros::default(), None, 0);
         let node = &screen.nodes[0];
         let mut requests = Vec::new();
         let mut cx = Cx {
@@ -2532,7 +2601,7 @@ pv.setValue(pv_value);
             let pvs = PvManager::new();
             let mut display = bob::Display::parse(xml).unwrap();
             display.source = Some(Source::parse(source));
-            let screen = Builder { pvs: &pvs }.screen(display, &Macros::default(), None, 0);
+            let screen = Builder::new(&pvs).screen(display, &Macros::default(), None, 0);
             let node = &screen.nodes[0];
             let pv = node.pv.clone().unwrap();
             let mut requests = Vec::new();

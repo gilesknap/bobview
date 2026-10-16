@@ -603,11 +603,18 @@ fn handle(hub: &Hub, subs: &mut Subs, text: &str, peer: SocketAddr) -> Vec<Strin
                 return vec![write_error(name, "no value")];
             };
             // Said to the client, not the log, which would fill with them.
-            if !sub.pv.state().connected {
+            // A PV that has yet to connect takes the write into its queue.
+            if sub.pv.dropped() {
                 return vec![write_error(name, "not connected")];
             }
             log::info!("write {name} = {value} from {peer}");
-            sub.pv.write(value);
+            // bobview's own mark for a string-format write (see
+            // `pv::Pv::write_long_string`).
+            if msg.get("long_string").and_then(Json::as_bool) == Some(true) {
+                sub.pv.write_long_string(value);
+            } else {
+                sub.pv.write(value);
+            }
             vec![]
         }
         Some("echo") => vec![text.to_string()],
@@ -1323,7 +1330,13 @@ mod tests {
         };
         assert!(write(&mut subs, None)[0].contains("token"));
         assert!(write(&mut subs, Some("wrong"))[0].contains("token"));
-        // The right token: TEST:WRITE is not there, and the client hears so.
+        // The right token: TEST:WRITE has yet to connect, so the write is
+        // queued for it.
+        assert!(write(&mut subs, Some("secret")).is_empty());
+        // Once it has connected and dropped, the client hears so at once.
+        let pv = &subs.map["TEST:WRITE"].pv;
+        pv.set_connected_for_test(true);
+        pv.set_connected_for_test(false);
         let refused = write(&mut subs, Some("secret"));
         let m: Map<String, Json> = serde_json::from_str(&refused[0]).unwrap();
         assert_eq!(m["pv"], "TEST:WRITE");
@@ -1333,6 +1346,34 @@ mod tests {
         assert_eq!(subs.map.len(), 1);
         subs.map.clear();
         assert_eq!(hub.subscriptions.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn long_string_writes_are_marked() {
+        let hub = Hub::new(PvManager::new(), config(&[], &[]));
+        let peer: SocketAddr = "192.0.2.1:5000".parse().unwrap();
+        let mut subs = Subs::default();
+        // Clients may not subscribe to a local PV, but one shows the value
+        // written.
+        let name = "loc://srv_long_string<VLongArray>(0,0)";
+        let slot = SubSlot::take(&hub.subscriptions).unwrap();
+        subs.add(name, hub.manager.subscribe(name), slot);
+        let write = |subs: &mut Subs, value: &str, long_string: bool| {
+            let mut msg = json!({"type": "write", "pv": name, "value": value, "token": "secret"});
+            if long_string {
+                msg["long_string"] = json!(true);
+            }
+            assert!(handle(&hub, subs, &msg.to_string(), peer).is_empty());
+            subs.map[name].pv.state().value
+        };
+        assert_eq!(
+            write(&mut subs, "ab", true),
+            Value::LongArray(Arc::from(vec![97, 98, 0]))
+        );
+        assert_eq!(
+            write(&mut subs, "[1, 2]", false),
+            Value::LongArray(Arc::from(vec![1, 2]))
+        );
     }
 
     #[test]

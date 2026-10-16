@@ -106,7 +106,7 @@ $(pv_value)</tooltip><sub_image_width>34</sub_image_width>
         )
         .unwrap();
         let pvs = PvManager::new();
-        let mut s = Builder { pvs: &pvs }.screen(d, &Macros::default(), None, 0);
+        let mut s = Builder::new(&pvs).screen(d, &Macros::default(), None, 0);
         let link = s.nodes[0].link.as_ref().unwrap().pv.clone();
 
         // An empty link leaves both as they were loaded.
