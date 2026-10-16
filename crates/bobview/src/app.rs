@@ -1,6 +1,8 @@
 //! The application window: navigation bar, display area and status line.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bob::{Macros, Source};
@@ -34,6 +36,9 @@ impl Location {
 
 pub struct BobApp {
     pvs: PvManager,
+    /// Set by a PV update that has asked for a repaint, cleared by the
+    /// frame that shows it.
+    repaint_asked: Arc<AtomicBool>,
     /// The main window's display.
     main: View,
     /// Where the main window is, for saving a layout.
@@ -184,10 +189,16 @@ impl BobApp {
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
 
         let pvs = PvManager::new();
-        // Coalesce PV updates into at most ~10 repaints a second.
+        // Coalesce PV updates into at most ~10 repaints a second, asking
+        // once per frame: egui keeps a record of every request until its
+        // next frame, and frames stop while the desktop is locked.
+        let repaint_asked = Arc::new(AtomicBool::new(false));
+        let asked = repaint_asked.clone();
         let ctx = ctx.clone();
-        pvs.set_notifier(std::sync::Arc::new(move || {
-            ctx.request_repaint_after(Duration::from_millis(100))
+        pvs.set_notifier(Arc::new(move || {
+            if !asked.swap(true, Ordering::Relaxed) {
+                ctx.request_repaint_after_for(Duration::from_millis(100), egui::ViewportId::ROOT);
+            }
         }));
 
         let mut main = View::new(&pvs, zoom);
@@ -197,6 +208,7 @@ impl BobApp {
             .unwrap_or_default();
         let mut app = Self {
             pvs,
+            repaint_asked,
             main,
             geometry: Geometry::default(),
             windows: Vec::new(),
@@ -949,6 +961,8 @@ fn list_dir(dir: &Path) -> Vec<(PathBuf, bool)> {
 
 impl eframe::App for BobApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // Before the PVs are read, so a later update asks again.
+        self.repaint_asked.store(false, Ordering::Relaxed);
         // A layout's positions are checked against the monitors as they are
         // when it is loaded.
         #[cfg(not(target_arch = "wasm32"))]
