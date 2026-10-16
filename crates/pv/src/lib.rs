@@ -187,7 +187,7 @@ impl Shared {
         // Sent before the lock is released, so later writes follow them.
         let after: Vec<_> = pending
             .into_iter()
-            .filter_map(|value| self.send(slot.as_ref(), value))
+            .filter_map(|value| self.send(slot.as_ref(), value, false))
             .collect();
         drop(slot);
         after.into_iter().for_each(|a| self.finish(a));
@@ -196,13 +196,19 @@ impl Shared {
     /// Send a write through `writer`; with none yet, a `ca://` or `pva://`
     /// PV (whose task is still starting) keeps it until there is one. What
     /// is left to do once the writer lock is released, so that it and the
-    /// state lock never nest.
-    fn send(&self, writer: Option<&Writer>, value: String) -> Option<After> {
+    /// state lock never nest. `new` counts the write as in flight: a
+    /// pending one already is.
+    #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+    fn send(&self, writer: Option<&Writer>, value: String, new: bool) -> Option<After> {
         match writer {
             #[cfg(not(target_arch = "wasm32"))]
             Some(Writer::Channel(tx)) => {
+                // Counted before the task can answer it; a failed send is
+                // answered (and uncounted) by `finish`.
+                if new {
+                    self.in_flight.fetch_add(1, Ordering::AcqRel);
+                }
                 // The task serving the PV holds the receiver until it stops.
-                self.in_flight.fetch_add(1, Ordering::AcqRel);
                 tx.send(value).err().map(|e| After::Stopped(e.0))
             }
             Some(Writer::Local) => Some(After::Local(value)),
@@ -333,7 +339,7 @@ impl Pv {
             return;
         }
         let writer = shared.writer.lock();
-        let after = shared.send(writer.as_ref(), value);
+        let after = shared.send(writer.as_ref(), value, true);
         drop(writer);
         if let Some(after) = after {
             shared.finish(after);
@@ -643,6 +649,23 @@ mod tests {
             pv.listen(&listener);
         }
         assert_eq!(pv.0.shared.listeners.lock().len(), 1);
+    }
+
+    #[test]
+    fn a_write_made_before_the_writer_is_sent_and_counted_once() {
+        let shared = Shared::new(
+            &PvName::parse("ca://early"),
+            Arc::new(RwLock::new(None)),
+            Arc::default(),
+        );
+        assert!(shared.send(None, "1".into(), true).is_none());
+        assert_eq!(shared.in_flight.load(Ordering::Acquire), 1);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        shared.set_writer(Writer::Channel(tx));
+        assert_eq!(rx.try_recv().ok().as_deref(), Some("1"));
+        assert_eq!(shared.in_flight.load(Ordering::Acquire), 1);
+        shared.write_result("1", None);
+        assert_eq!(shared.in_flight.load(Ordering::Acquire), 0);
     }
 
     #[test]

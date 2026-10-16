@@ -39,9 +39,7 @@ impl PvName {
     /// [`Scheme::Unsupported`].
     pub fn parse(name: &str) -> Self {
         let name = name.trim();
-        let prefixed = name
-            .split_once("://")
-            .is_some_and(|(p, _)| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric()));
+        let prefixed = name.split_once("://").is_some_and(|(p, _)| is_scheme(p));
         if name.starts_with('=') || prefixed {
             let known = ["ca", "pva", "loc", "sim"]
                 .iter()
@@ -108,6 +106,13 @@ impl fmt::Display for PvName {
     }
 }
 
+/// An RFC 3986 scheme: a letter, then letters, digits, `+`, `-` or `.`.
+fn is_scheme(p: &str) -> bool {
+    p.starts_with(|c: char| c.is_ascii_alphabetic())
+        && p.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+}
+
 /// Split an argument list on commas that are outside double quotes.
 pub(crate) fn split_args(args: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -160,7 +165,13 @@ mod tests {
 
     #[test]
     fn formulas_and_unknown_schemes_are_unsupported() {
-        for name in ["=pv0 + 1", "eq://`a`+1", "sys://time", "mqtt://x/y"] {
+        for name in [
+            "=pv0 + 1",
+            "eq://`a`+1",
+            "sys://time",
+            "mqtt://x/y",
+            "mqtt+ssl://x",
+        ] {
             let n = PvName::parse(name);
             assert_eq!(n.scheme, Scheme::Unsupported, "{name}");
             assert_eq!(n.to_string(), name);

@@ -279,9 +279,10 @@ fn radix_prefixed(t: &str) -> Option<String> {
     } else {
         (t.strip_prefix("0b").or(t.strip_prefix("0B"))?, 2)
     };
-    i64::from_str_radix(digits, radix)
+    // Unsigned, as in the HEX and BINARY formats.
+    u64::from_str_radix(digits, radix)
         .ok()
-        .map(|n| n.to_string())
+        .map(|n| (n as i64).to_string())
 }
 
 #[cfg(test)]

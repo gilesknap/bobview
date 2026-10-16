@@ -58,8 +58,14 @@ pub(crate) async fn run(client: &CaClient, pv: &str, shared: Arc<Shared>) {
                 // A write made as the PV was subscribed, as a `write_pv`
                 // action to a PV not connected in advance makes, waits for
                 // the channel to connect.
+                // Once that times out, the writes queued behind it fail too
+                // rather than each waiting in turn.
                 if let Err(e) = channel.wait_connected(WRITE_CONNECT).await {
-                    shared.write_result(&text, Some(format!("not connected: {e}")));
+                    let why = format!("not connected: {e}");
+                    shared.write_result(&text, Some(why.clone()));
+                    while let Ok(text) = writes.try_recv() {
+                        shared.write_result(&text, Some(why.clone()));
+                    }
                     continue;
                 }
                 // Arrays are typed as they are shown, `[1, 2]` or `["a", "b"]`;
