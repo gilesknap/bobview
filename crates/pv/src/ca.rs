@@ -139,7 +139,8 @@ pub(crate) async fn run(client: &CaClient, pv: &str, shared: Arc<Shared>) {
                         channel.put_string_nowait(text).await
                     }
                 };
-                shared.write_result(text, result.err().map(|e| e.to_string()));
+                // No reply comes to a plain write: `Ok` only says it was sent.
+                shared.write_sent(text, result.err().map(|e| e.to_string()));
             }
         }
     }

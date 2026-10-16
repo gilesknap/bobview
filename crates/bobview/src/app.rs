@@ -1,5 +1,6 @@
 //! The application window: navigation bar, display area and status line.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -96,8 +97,9 @@ pub struct BobApp {
     touch: bool,
     /// The PV details dialog, and the window it was asked for in.
     details: Option<(WindowKey, pvmenu::Details)>,
-    /// A write from a display from the web, waiting for the user's say-so.
-    confirm: Option<Confirm>,
+    /// Writes from a display from the web, waiting for the user's say-so,
+    /// asked about one at a time (see [`MAX_CONFIRMS`]).
+    confirm: VecDeque<Confirm>,
     /// The saved layouts, for the toolbar's menus.
     layouts: LayoutList,
     /// Open trend windows, and the id the next one gets.
@@ -124,7 +126,15 @@ struct Confirm {
     window: WindowKey,
     pv: pv::Pv,
     value: String,
+    /// Whether Cancel has been given the focus, which happens once, as the
+    /// dialog first shows this write.
+    focused: bool,
 }
+
+/// Writes that may wait for confirmation at once. One click can ask for
+/// several (an action list run together), but a display must not be able
+/// to pile up writes behind the dialog; more are refused.
+const MAX_CONFIRMS: usize = 16;
 
 /// The saved layouts' names, read when a menu listing them opens and after
 /// a save or delete, not on every frame it is open.
@@ -397,7 +407,7 @@ impl BobApp {
             tree_toggled: false,
             touch: false,
             details: None,
-            confirm: None,
+            confirm: VecDeque::new(),
             layouts: LayoutList::default(),
             trends: Vec::new(),
             next_trend: 0,
@@ -1526,9 +1536,7 @@ impl BobApp {
         if self.details.as_ref().is_some_and(|(w, _)| closed(*w)) {
             self.details = None;
         }
-        if self.confirm.as_ref().is_some_and(|c| closed(c.window)) {
-            self.confirm = None;
-        }
+        self.confirm.retain(|c| !closed(c.window));
         dialogs(
             ui.ctx(),
             WindowKey::Main,
@@ -1612,11 +1620,21 @@ impl BobApp {
                 target,
             } => self.follow(ctx, origin, Location { source, macros }, &target),
             // Shown in the window asked from, which may have been drawn
-            // already this frame.
-            // A second one replaces a pending one: the dialog is modal in
-            // spirit, and a display cannot make writes pile up behind it.
+            // already this frame, after any asked for before it.
             Request::ConfirmWrite { pv, value } => {
-                self.confirm = Some(Confirm { window, pv, value });
+                if self.confirm.len() < MAX_CONFIRMS {
+                    self.confirm.push_back(Confirm {
+                        window,
+                        pv,
+                        value,
+                        focused: false,
+                    });
+                } else {
+                    log::warn!(
+                        "not writing '{value}' to {}: {MAX_CONFIRMS} writes already wait to be confirmed",
+                        pv.name()
+                    );
+                }
                 ctx.request_repaint();
             }
             Request::Details(details) => {
@@ -1780,9 +1798,9 @@ fn dialogs(
     ctx: &egui::Context,
     window: WindowKey,
     details: &mut Option<(WindowKey, pvmenu::Details)>,
-    confirm: &mut Option<Confirm>,
+    confirm: &mut VecDeque<Confirm>,
 ) {
-    if confirm.as_ref().is_some_and(|c| c.window == window) {
+    if confirm.front().is_some_and(|c| c.window == window) {
         confirm_window(ctx, confirm);
     }
     if details.as_ref().is_some_and(|(w, _)| *w == window) {
@@ -1790,9 +1808,10 @@ fn dialogs(
     }
 }
 
-/// Ask whether to write the value a display from the web asked for.
-fn confirm_window(ctx: &egui::Context, confirm: &mut Option<Confirm>) {
-    let Some(c) = confirm.as_ref() else {
+/// Ask whether to write the first value a display from the web asked for.
+fn confirm_window(ctx: &egui::Context, confirm: &mut VecDeque<Confirm>) {
+    let waiting = confirm.len().saturating_sub(1);
+    let Some(c) = confirm.front_mut() else {
         return;
     };
     let mut answer = None;
@@ -1803,12 +1822,18 @@ fn confirm_window(ctx: &egui::Context, confirm: &mut Option<Confirm>) {
         .show(ctx, |ui| {
             ui.label("A display loaded from the web asks to write");
             ui.monospace(format!("{} = {}", plain_name(c.pv.name()), c.value));
+            if waiting > 0 {
+                ui.label(format!("{waiting} more to ask about after this one"));
+            }
             ui.horizontal(|ui| {
                 let write = ui.button("Write").clicked();
                 let cancel = ui.button("Cancel");
-                // Cancel has the focus, so Enter cancels; only a click writes.
-                if !ui.memory(|m| m.focused().is_some()) {
+                // Cancel takes the focus from whatever had it (the button
+                // that asked for the write, perhaps), so Enter cancels; only
+                // a click writes. Once: the user may then tab to Write.
+                if !c.focused {
                     cancel.request_focus();
+                    c.focused = true;
                 }
                 answer = if write {
                     Some(true)
@@ -1826,7 +1851,9 @@ fn confirm_window(ctx: &egui::Context, confirm: &mut Option<Confirm>) {
         if yes {
             c.pv.write(c.value.clone());
         }
-        *confirm = None;
+        confirm.pop_front();
+        // The next one, if any, is shown next frame.
+        ctx.request_repaint();
     }
 }
 
@@ -2204,8 +2231,62 @@ pub(crate) fn plain_name(name: &pv::PvName) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::plain_name;
+    use super::{Confirm, WindowKey, confirm_window, plain_name};
+    use eframe::egui;
     use pv::PvName;
+    use std::collections::VecDeque;
+
+    #[test]
+    fn writes_are_confirmed_one_at_a_time_and_enter_cancels() {
+        let pvs = pv::PvManager::new();
+        let pv = pvs.subscribe("loc://confirm_test(0)");
+        let ctx = egui::Context::default();
+        let mut confirm: VecDeque<Confirm> = ["1", "2"]
+            .map(|value| Confirm {
+                window: WindowKey::Main,
+                pv: pv.clone(),
+                value: value.into(),
+                focused: false,
+            })
+            .into();
+        // One frame; the display's button, which asked for the writes, has
+        // the focus to begin with, as one pressed with the keyboard keeps it.
+        let frame = |enter: bool, first: bool, confirm: &mut VecDeque<Confirm>| {
+            let mut input = egui::RawInput::default();
+            if enter {
+                input.events.push(egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            let out = ctx.run_ui(input, |ui| {
+                let asked = ui.button("Ask");
+                if first {
+                    asked.request_focus();
+                }
+                confirm_window(ui.ctx(), confirm);
+            });
+            out.drop_without_applying_deltas();
+        };
+        frame(false, true, &mut confirm);
+        frame(false, false, &mut confirm);
+        assert_eq!(confirm.len(), 2);
+        assert!(confirm[0].focused);
+        // Enter cancels the first write, not presses the display's button.
+        frame(true, false, &mut confirm);
+        assert_eq!(confirm.len(), 1);
+        assert_eq!(confirm[0].value, "2");
+        // The second gets Cancel focused in its turn.
+        frame(false, false, &mut confirm);
+        frame(false, false, &mut confirm);
+        assert!(confirm[0].focused);
+        frame(true, false, &mut confirm);
+        assert!(confirm.is_empty());
+        assert_eq!(pv.state().value.as_f64(), Some(0.0));
+    }
 
     #[test]
     fn lists_displays_and_project_links() {
