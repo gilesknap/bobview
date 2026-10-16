@@ -182,6 +182,80 @@ enum Expr {
     Not(Box<Expr>),
     Neg(Box<Expr>),
     Bin(Box<Expr>, String, Box<Expr>),
+    Call(Func, Vec<Expr>),
+}
+
+/// The math functions rule scripts call, from JavaScript's `Math` (BOY,
+/// Phoebus) and Python's built-ins and `math` module (Phoebus).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Func {
+    Min,
+    Max,
+    Abs,
+    /// JavaScript's `Math.round`: halves round up.
+    Round,
+    /// Python's `round`: halves round to even.
+    RoundEven,
+    Floor,
+    Ceil,
+    Sqrt,
+    Pow,
+    Log,
+    Exp,
+}
+
+impl Func {
+    fn named(name: &str) -> Option<Func> {
+        let (module, f) = match name.split_once('.') {
+            Some((m, f)) => (Some(m), f),
+            None => (None, name),
+        };
+        Some(match (module, f) {
+            (Some("Math" | "math") | None, "min") => Func::Min,
+            (Some("Math" | "math") | None, "max") => Func::Max,
+            (Some("Math" | "math") | None, "abs") => Func::Abs,
+            (Some("math"), "fabs") => Func::Abs,
+            (Some("Math"), "round") => Func::Round,
+            (None, "round") => Func::RoundEven,
+            (Some("Math" | "math"), "floor") => Func::Floor,
+            (Some("Math" | "math"), "ceil") => Func::Ceil,
+            (Some("Math" | "math"), "sqrt") => Func::Sqrt,
+            (Some("Math" | "math"), "pow") | (None, "pow") => Func::Pow,
+            (Some("Math" | "math"), "log") => Func::Log,
+            (Some("Math" | "math"), "exp") => Func::Exp,
+            _ => return None,
+        })
+    }
+
+    fn call(self, args: &[f64]) -> f64 {
+        let arg = |i: usize| args.get(i).copied().unwrap_or(f64::NAN);
+        match self {
+            // A NaN argument makes the result NaN, as in JavaScript.
+            Func::Min => args.iter().fold(f64::INFINITY, |m, &x| {
+                if m.is_nan() || x.is_nan() {
+                    f64::NAN
+                } else {
+                    m.min(x)
+                }
+            }),
+            Func::Max => args.iter().fold(f64::NEG_INFINITY, |m, &x| {
+                if m.is_nan() || x.is_nan() {
+                    f64::NAN
+                } else {
+                    m.max(x)
+                }
+            }),
+            Func::Abs => arg(0).abs(),
+            Func::Round => (arg(0) + 0.5).floor(),
+            Func::RoundEven => arg(0).round_ties_even(),
+            Func::Floor => arg(0).floor(),
+            Func::Ceil => arg(0).ceil(),
+            Func::Sqrt => arg(0).sqrt(),
+            Func::Pow => arg(0).powf(arg(1)),
+            Func::Log => arg(0).ln(),
+            Func::Exp => arg(0).exp(),
+        }
+    }
 }
 
 struct Env<'a> {
@@ -227,6 +301,10 @@ fn eval(e: &Expr, env: &Env) -> Val {
         Expr::Var(n) => env.var(n),
         Expr::Not(x) => Val::Bool(!eval(x, env).truthy()),
         Expr::Neg(x) => Val::Num(-eval(x, env).num()),
+        Expr::Call(f, args) => {
+            let args: Vec<f64> = args.iter().map(|a| eval(a, env).num()).collect();
+            Val::Num(f.call(&args))
+        }
         Expr::Bin(a, op, b) => {
             let a = eval(a, env);
             // Short-circuit the logical operators.
@@ -270,6 +348,7 @@ enum Tok {
     Op(String),
     Open,
     Close,
+    Comma,
 }
 
 fn tokenize(s: &str) -> Option<Vec<Tok>> {
@@ -300,7 +379,12 @@ fn tokenize(s: &str) -> Option<Vec<Tok>> {
             i = end + 1;
         } else if c.is_alphabetic() || c == '_' {
             let start = i;
-            while i < cs.len() && (cs[i].is_alphanumeric() || cs[i] == '_') {
+            // Dotted names, as in Math.min.
+            while i < cs.len()
+                && (cs[i].is_alphanumeric()
+                    || cs[i] == '_'
+                    || (cs[i] == '.' && cs.get(i + 1).is_some_and(|d| d.is_alphabetic())))
+            {
                 i += 1;
             }
             let word: String = cs[start..i].iter().collect();
@@ -315,6 +399,9 @@ fn tokenize(s: &str) -> Option<Vec<Tok>> {
             i += 1;
         } else if c == ')' {
             out.push(Tok::Close);
+            i += 1;
+        } else if c == ',' {
+            out.push(Tok::Comma);
             i += 1;
         } else {
             let two: String = cs[i..(i + 2).min(cs.len())].iter().collect();
@@ -385,6 +472,14 @@ impl Parser {
             Tok::Ident(w) => match w.as_str() {
                 "true" | "True" => Expr::Lit(Val::Bool(true)),
                 "false" | "False" => Expr::Lit(Val::Bool(false)),
+                "Math.PI" | "math.pi" => Expr::Lit(Val::Num(std::f64::consts::PI)),
+                "Math.E" | "math.e" => Expr::Lit(Val::Num(std::f64::consts::E)),
+                _ if self.toks.get(self.pos) == Some(&Tok::Open) => {
+                    let f = Func::named(&w)?;
+                    self.pos += 1;
+                    Expr::Call(f, self.args()?)
+                }
+                _ if w.contains('.') => return None,
                 _ => Expr::Var(w),
             },
             Tok::Open => {
@@ -395,6 +490,25 @@ impl Parser {
             }
             _ => return None,
         })
+    }
+
+    /// A call's arguments, after its opening bracket, through the closing one.
+    fn args(&mut self) -> Option<Vec<Expr>> {
+        let mut args = Vec::new();
+        if self.toks.get(self.pos) == Some(&Tok::Close) {
+            self.pos += 1;
+            return Some(args);
+        }
+        loop {
+            args.push(self.binary(0)?);
+            let tok = self.toks.get(self.pos)?.clone();
+            self.pos += 1;
+            match tok {
+                Tok::Comma => {}
+                Tok::Close => return Some(args),
+                _ => return None,
+            }
+        }
     }
 }
 
@@ -514,6 +628,30 @@ mod tests {
                 ..Default::default()
             })
         );
+    }
+
+    #[test]
+    fn calls_math_functions() {
+        use pv::Value::*;
+        let both = [Double(300.0), Double(400.0)];
+        assert_eq!(
+            run("Math.min((pv0 / pv1) * 500, 500)", &both),
+            Val::Num(375.0)
+        );
+        assert_eq!(run("Math.max(pv0, pv1, 1)", &both), Val::Num(400.0));
+        assert_eq!(run("Math.abs(-pv0)", &both), Val::Num(300.0));
+        assert_eq!(
+            run("Math.round(2.5) + Math.round(-2.5)", &[]),
+            Val::Num(1.0)
+        );
+        assert_eq!(run("round(2.5)", &[]), Val::Num(2.0));
+        assert_eq!(run("Math.floor(1.7) + Math.ceil(1.2)", &[]), Val::Num(3.0));
+        assert_eq!(run("Math.sqrt(Math.pow(3, 2) + 16)", &[]), Val::Num(5.0));
+        assert_eq!(run("Math.log(Math.exp(2))", &[]), Val::Num(2.0));
+        assert!(run("Math.min(pv0, 1) == 1 && max(1, 2) > 1", &both).truthy());
+        assert!(parse("Math.nope(1)").is_none());
+        assert!(parse("Math.min(1,").is_none());
+        assert!(parse("Math.min(1 2)").is_none());
     }
 
     #[test]
