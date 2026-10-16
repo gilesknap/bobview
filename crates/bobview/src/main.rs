@@ -33,38 +33,7 @@ use bob::{Macros, Source};
 use eframe::egui;
 
 #[cfg(not(target_arch = "wasm32"))]
-const USAGE: &str = "\
-usage: bobview [options] [display.bob | display.opi | http(s)://host/display.bob]
-
-options:
-  -m, --macros P=X,R=Y   macros for the display
-  -p, --project DIR      open a display file through the linked folders of the
-                         Eclipse project in DIR (its .project, or for a BOY
-                         .opi screen the links of a DLS runcss.sh in DIR), so
-                         that links between the project's modules work
-  -z, --zoom FACTOR      fixed zoom instead of fit-to-window
-  -f, --fullscreen       start full screen
-  --read-only            refuse every write to a PV (except loc:// ones, which
-                         stay in bobview): controls are disabled and a write
-                         action says why it did nothing
-  --layout NAME          restore the saved window layout NAME
-  --no-layout            don't restore the default layout
-  --ui-scale F|auto      size of the toolbar and menus relative to the desktop's
-                         scale (default auto: smaller on a small high-DPI screen;
-                         also set by BOBVIEW_UI_SCALE)
-  --snapshot OUT.png     render to a PNG without a window and exit
-  --size WxH             snapshot size in pixels (default 1280x800); 'auto' starts at
-                         the window's default size and resizes it as a window
-                         manager would, on a monitor of 1920x1080 points
-  --scale-factor F       snapshot as on a screen with this desktop scale (default 1),
-                         e.g. 2.75 for a phone; --click positions are in pixels
-  --wait SECONDS         time for PVs to connect before a snapshot (default 2)
-  --click X,Y            click here before the snapshot (repeatable)
-  --right-click X,Y      right-click here before the snapshot (repeatable)
-  --settle SECONDS       time after the last click before the snapshot (default 1)
-  -h, --help             show this help
-  -V, --version          show the version
-
+const AFTER_HELP: &str = "\
 With no display, bobview restores the default window layout when one has
 been saved (in $XDG_CONFIG_HOME/bobview/layouts, by default
 ~/.config/bobview/layouts), else opens index.bob from the bundled displays
@@ -78,129 +47,246 @@ CS-Studio, with no .project or -p needed.
 PVs without a prefix use Channel Access; EPICS_CA_ADDR_LIST and
 EPICS_CA_NAME_SERVERS select the IOCs. Set BOBVIEW_LOG=debug for more output.";
 
+/// A lean viewer for Phoebus .bob displays (and CS-Studio BOY .opi).
 #[cfg(not(target_arch = "wasm32"))]
-fn main() -> eframe::Result {
-    init_logging();
-    let mut file = None;
-    let mut macros = Macros::default();
-    let mut zoom = None;
-    let mut fullscreen = false;
-    let mut snapshot = None;
-    let mut size = Some([1280, 800]);
-    let mut scale_factor = 1.0;
-    let mut ui_scale = None;
-    let mut wait = 2.0;
-    let mut settle = 1.0;
-    let mut clicks = Vec::new();
-    let mut project = None;
-    let mut read_only = false;
-    let mut layout_name = None;
-    let mut no_layout = false;
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "-m" | "--macros" => macros = parse_macros(&args.next().unwrap_or_default()),
-            "-p" | "--project" => project = args.next().map(PathBuf::from),
-            "-z" | "--zoom" => zoom = args.next().and_then(|z| z.parse().ok()),
-            "-f" | "--fullscreen" => fullscreen = true,
-            // The on-screen keypad is gone: text entries take the keyboard.
-            "-k" | "--keypad" => eprintln!("--keypad is no longer supported: ignored"),
-            // Pin mode replaced multi-window mode: shift+click follows a
-            // link as it did.
-            "--multi-window" => eprintln!(
-                "--multi-window is no longer needed: links from the pinned main \
-                 window open in another window, shift+click in a new one"
-            ),
-            "--read-only" => read_only = true,
-            "--layout" => match args.next() {
-                Some(name) => layout_name = Some(name),
-                None => {
-                    eprintln!("--layout needs a layout name");
-                    std::process::exit(2);
-                }
-            },
-            "--no-layout" => no_layout = true,
-            "--ui-scale" => {
-                let text = args.next().unwrap_or_default();
-                ui_scale = chrome::UiScale::parse(&text);
-                if ui_scale.is_none() {
-                    eprintln!("--ui-scale: expected a number or auto, not {text:?}");
-                    std::process::exit(2);
-                }
-            }
-            "--scale-factor" => {
-                scale_factor = args
-                    .next()
-                    .and_then(|s| s.parse::<f32>().ok())
-                    .filter(|s| *s > 0.0)
-                    .unwrap_or(scale_factor)
-            }
-            "--click" | "--right-click" => {
-                let button = if arg == "--click" {
-                    egui::PointerButton::Primary
-                } else {
-                    egui::PointerButton::Secondary
-                };
-                if let Some((x, y)) = args.next().as_deref().and_then(|s| s.split_once(','))
-                    && let (Ok(x), Ok(y)) = (x.trim().parse(), y.trim().parse())
-                {
-                    clicks.push((egui::pos2(x, y), button));
-                }
-            }
-            "--snapshot" => snapshot = args.next().map(PathBuf::from),
-            "--size" => match args.next().as_deref() {
-                Some("auto") => size = None,
-                Some(s) => {
-                    if let Some((w, h)) = s.split_once('x')
-                        && let (Ok(w), Ok(h)) = (w.parse(), h.parse())
-                    {
-                        size = Some([w, h]);
-                    }
-                }
-                None => {}
-            },
-            "--wait" => wait = seconds(args.next()).unwrap_or(wait),
-            "--settle" => settle = seconds(args.next()).unwrap_or(settle),
-            "-h" | "--help" => {
-                println!("{USAGE}");
-                return Ok(());
-            }
-            "-V" | "--version" => {
-                println!("bobview {}", env!("CARGO_PKG_VERSION"));
-                return Ok(());
-            }
-            _ => file = Some(Source::parse(&arg)),
+#[derive(clap::Parser, Debug)]
+#[command(
+    name = "bobview",
+    version,
+    after_help = AFTER_HELP,
+    args_override_self = true,
+    max_term_width = 100
+)]
+struct Cli {
+    /// display.bob, display.opi or http(s)://host/display.bob
+    #[arg(value_name = "DISPLAY")]
+    display: Option<String>,
+    /// Macros for the display
+    #[arg(short, long, value_name = "P=X,R=Y")]
+    macros: Option<String>,
+    /// Open a display file through the linked folders of the Eclipse project
+    /// in DIR (its .project, or for a BOY .opi screen the links of a DLS
+    /// runcss.sh in DIR), so that links between the project's modules work
+    #[arg(short, long, value_name = "DIR")]
+    project: Option<PathBuf>,
+    /// Fixed zoom (0.2 to 5) instead of fit-to-window
+    #[arg(short, long, value_name = "FACTOR", value_parser = parse_zoom)]
+    zoom: Option<f32>,
+    /// Start full screen
+    #[arg(short, long)]
+    fullscreen: bool,
+    /// No longer supported: text entries take the keyboard
+    #[arg(short, long, hide = true)]
+    keypad: bool,
+    /// No longer needed: pin mode replaced it
+    #[arg(long, hide = true)]
+    multi_window: bool,
+    /// Refuse every write to a PV (except loc:// ones, which stay in
+    /// bobview): controls are disabled and a write action says why it did
+    /// nothing
+    #[arg(long)]
+    read_only: bool,
+    /// Restore the saved window layout NAME
+    #[arg(long, value_name = "NAME")]
+    layout: Option<String>,
+    /// Don't restore the default layout
+    #[arg(long)]
+    no_layout: bool,
+    /// Size of the toolbar and menus relative to the desktop's scale
+    /// (default auto: smaller on a small high-DPI screen; also set by
+    /// BOBVIEW_UI_SCALE)
+    #[arg(long, value_name = "F|auto", value_parser = parse_ui_scale)]
+    ui_scale: Option<chrome::UiScale>,
+    /// Render to a PNG without a window and exit
+    #[arg(long, value_name = "OUT.png")]
+    snapshot: Option<PathBuf>,
+    /// Snapshot size in pixels; 'auto' starts at the window's default size
+    /// and resizes it as a window manager would, on a monitor of 1920x1080
+    /// points
+    #[arg(long, value_name = "WxH", default_value = "1280x800", value_parser = parse_size)]
+    size: Size,
+    /// Snapshot as on a screen with this desktop scale, e.g. 2.75 for a
+    /// phone; --click positions are in pixels
+    #[arg(long, value_name = "F", default_value_t = 1.0, value_parser = parse_scale_factor)]
+    scale_factor: f32,
+    /// Time for PVs to connect before a snapshot
+    #[arg(long, value_name = "SECONDS", default_value_t = 2.0, value_parser = parse_seconds)]
+    wait: f64,
+    /// Click here before the snapshot (repeatable)
+    #[arg(long, value_name = "X,Y", value_parser = parse_point)]
+    click: Vec<egui::Pos2>,
+    /// Right-click here before the snapshot (repeatable)
+    #[arg(long, value_name = "X,Y", value_parser = parse_point)]
+    right_click: Vec<egui::Pos2>,
+    /// Time after the last click before the snapshot
+    #[arg(long, value_name = "SECONDS", default_value_t = 1.0, value_parser = parse_seconds)]
+    settle: f64,
+}
+
+/// A snapshot's size in pixels, or `None` for `auto`.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Size(Option<[u32; 2]>);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Cli {
+    /// Parse the command line, exiting with a message if it is wrong.
+    fn from_env() -> (Self, Vec<(egui::Pos2, egui::PointerButton)>) {
+        use clap::{CommandFactory, FromArgMatches};
+        let matches = Self::command().get_matches();
+        let cli = Self::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+        let clicks = cli.clicks(&matches);
+        (cli, clicks)
+    }
+
+    /// Both kinds of click, in the order given.
+    fn clicks(&self, matches: &clap::ArgMatches) -> Vec<(egui::Pos2, egui::PointerButton)> {
+        let at = |id| matches.indices_of(id).into_iter().flatten();
+        let mut clicks: Vec<_> = (at("click").zip(&self.click))
+            .map(|(i, p)| (i, *p, egui::PointerButton::Primary))
+            .chain(
+                at("right_click")
+                    .zip(&self.right_click)
+                    .map(|(i, p)| (i, *p, egui::PointerButton::Secondary)),
+            )
+            .collect();
+        clicks.sort_by_key(|(i, ..)| *i);
+        clicks.into_iter().map(|(_, p, b)| (p, b)).collect()
+    }
+}
+
+/// A zoom factor in the range the view allows.
+fn parse_zoom(text: &str) -> Result<f32, String> {
+    text.trim()
+        .parse::<f32>()
+        .ok()
+        .filter(|z| (0.2..=5.0).contains(z))
+        .ok_or_else(|| format!("expected a factor from 0.2 to 5, not {text:?}"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_ui_scale(text: &str) -> Result<chrome::UiScale, String> {
+    chrome::UiScale::parse(text).ok_or_else(|| format!("expected a number or auto, not {text:?}"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_size(text: &str) -> Result<Size, String> {
+    if text.trim() == "auto" {
+        return Ok(Size(None));
+    }
+    text.split_once('x')
+        .and_then(|(w, h)| Some([w.trim().parse().ok()?, h.trim().parse().ok()?]))
+        .filter(|[w, h]: &[u32; 2]| *w > 0 && *h > 0)
+        .map(|wh| Size(Some(wh)))
+        .ok_or_else(|| format!("expected WIDTHxHEIGHT in pixels or auto, not {text:?}"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_scale_factor(text: &str) -> Result<f32, String> {
+    text.trim()
+        .parse::<f32>()
+        .ok()
+        .filter(|s| s.is_finite() && *s > 0.0)
+        .ok_or_else(|| format!("expected a scale above 0, not {text:?}"))
+}
+
+/// A time in seconds: a number, not negative (nor too big for a Duration).
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_seconds(text: &str) -> Result<f64, String> {
+    text.trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|s| (0.0..1e9).contains(s))
+        .ok_or_else(|| format!("expected a number of seconds, not {text:?}"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_point(text: &str) -> Result<egui::Pos2, String> {
+    text.split_once(',')
+        .and_then(|(x, y)| Some(egui::pos2(x.trim().parse().ok()?, y.trim().parse().ok()?)))
+        .filter(|p| p.x.is_finite() && p.y.is_finite())
+        .ok_or_else(|| format!("expected X,Y in pixels, not {text:?}"))
+}
+
+/// Why bobview stopped early, and the exit status to say so.
+#[cfg(not(target_arch = "wasm32"))]
+struct Failure {
+    code: u8,
+    message: String,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Failure {
+    /// The command line asks for something that cannot be done.
+    fn usage(message: impl Into<String>) -> Self {
+        Self {
+            code: 2,
+            message: message.into(),
         }
     }
-    let ui_scale = ui_scale.unwrap_or_else(chrome::UiScale::from_env);
+
+    fn failed(message: impl Into<String>) -> Self {
+        Self {
+            code: 1,
+            message: message.into(),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn main() -> std::process::ExitCode {
+    init_logging();
+    let (cli, clicks) = Cli::from_env();
+    match run(cli, clicks) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(f) => {
+            eprintln!("bobview: {}", f.message);
+            std::process::ExitCode::from(f.code)
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn run(cli: Cli, clicks: Vec<(egui::Pos2, egui::PointerButton)>) -> Result<(), Failure> {
+    if cli.keypad {
+        eprintln!("--keypad is no longer supported: ignored");
+    }
+    if cli.multi_window {
+        // Pin mode replaced multi-window mode: shift+click follows a link
+        // as it did.
+        eprintln!(
+            "--multi-window is no longer needed: links from the pinned main \
+             window open in another window, shift+click in a new one"
+        );
+    }
+    let mut file = cli.display.as_deref().map(Source::parse);
+    let mut macros = parse_macros(cli.macros.as_deref().unwrap_or_default());
+    let ui_scale = cli.ui_scale.unwrap_or_else(chrome::UiScale::from_env);
     let is_opi = |p: &std::path::Path| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("opi"));
-    if let (Some(dir), Some(Source::File(path))) = (&project, &file) {
+    if let (Some(dir), Some(Source::File(path))) = (&cli.project, &file) {
         let Some(project) = bob::project::project_dir(dir) else {
-            eprintln!(
+            return Err(Failure::usage(format!(
                 "{} has no .project, nor a {} with links",
                 dir.display(),
                 bob::project::LAUNCHER
-            );
-            std::process::exit(2);
+            )));
         };
         // A launcher's links are CS-Studio's, for BOY screens only.
         if bob::project::through_launcher(&project) && !is_opi(path) {
-            eprintln!(
+            return Err(Failure::usage(format!(
                 "{}: {} links apply only to BOY .opi screens",
                 path.display(),
                 bob::project::LAUNCHER
-            );
-            std::process::exit(2);
+            )));
         }
         match bob::project::virtual_path(&project, path) {
             Some(p) => file = Some(Source::File(p)),
             None => {
-                eprintln!(
+                return Err(Failure::usage(format!(
                     "{} is not in a linked folder of {}",
                     path.display(),
                     dir.display()
-                );
-                std::process::exit(2);
+                )));
             }
         }
     } else if let Some(Source::File(path)) = &file
@@ -221,17 +307,11 @@ fn main() -> eframe::Result {
         macros = defaults.with(&macros);
     }
     // The named layout, else the default one unless a display was named.
-    let layout = if snapshot.is_some() {
+    let layout = if cli.snapshot.is_some() {
         None
     } else {
-        let default = file.is_none() && !no_layout && layout::exists(layout::DEFAULT);
-        match layout::startup(layout_name, default, layout::load) {
-            Ok(layout) => layout,
-            Err(e) => {
-                eprintln!("{e}");
-                std::process::exit(2);
-            }
-        }
+        let default = file.is_none() && !cli.no_layout && layout::exists(layout::DEFAULT);
+        layout::startup(cli.layout, default, layout::load).map_err(Failure::usage)?
     };
     // A layout's main window has a display of its own.
     let layout_has_main = layout
@@ -246,26 +326,20 @@ fn main() -> eframe::Result {
         })
         .map(|source| app::Location { source, macros });
 
-    if let Some(out) = snapshot {
-        let Some(start) = start else {
-            eprintln!("--snapshot needs a display file");
-            std::process::exit(2);
-        };
+    if let Some(out) = cli.snapshot {
+        let start = start.ok_or_else(|| Failure::usage("--snapshot needs a display file"))?;
         let opts = snapshot::Options {
-            size,
-            scale_factor,
+            size: cli.size.0,
+            scale_factor: cli.scale_factor,
             ui_scale,
-            zoom,
-            wait: std::time::Duration::from_secs_f64(wait),
+            zoom: cli.zoom,
+            wait: std::time::Duration::from_secs_f64(cli.wait),
             clicks,
-            settle: std::time::Duration::from_secs_f64(settle),
-            read_only,
+            settle: std::time::Duration::from_secs_f64(cli.settle),
+            read_only: cli.read_only,
         };
-        if let Err(e) = snapshot::run(start, &opts, &out) {
-            eprintln!("snapshot failed: {e}");
-            std::process::exit(1);
-        }
-        return Ok(());
+        return snapshot::run(start, &opts, &out)
+            .map_err(|e| Failure::failed(format!("snapshot failed: {e}")));
     }
 
     let options = eframe::NativeOptions {
@@ -273,7 +347,7 @@ fn main() -> eframe::Result {
             .with_title("bobview")
             .with_app_id("bobview")
             .with_inner_size(chrome::DEFAULT_WINDOW)
-            .with_fullscreen(fullscreen),
+            .with_fullscreen(cli.fullscreen),
         // No vsync: each window's buffer swap would wait for a screen
         // refresh, and every window is drawn in the main one's frame, so a
         // frame took a refresh per window (~120 ms with 7 windows). We only
@@ -284,6 +358,7 @@ fn main() -> eframe::Result {
         },
         ..Default::default()
     };
+    let (zoom, read_only) = (cli.zoom, cli.read_only);
     eframe::run_native(
         "bobview",
         options,
@@ -296,12 +371,7 @@ fn main() -> eframe::Result {
             Ok(Box::new(app))
         }),
     )
-}
-
-/// A time in seconds: a number, not negative (nor too big for a Duration).
-#[cfg(not(target_arch = "wasm32"))]
-fn seconds(text: Option<String>) -> Option<f64> {
-    text?.parse::<f64>().ok().filter(|s| (0.0..1e9).contains(s))
+    .map_err(|e| Failure::failed(e.to_string()))
 }
 
 /// Parse `P=X,R=Y` into macros; `\,` and `\\` in a value stand for `,`
@@ -373,7 +443,11 @@ fn main() {
         pv::set_write_token(&token);
         fetch::same_origin_only();
     }
-    let zoom = query.get("zoom").and_then(|z| z.parse().ok());
+    let zoom = query.get("zoom").and_then(|z| {
+        parse_zoom(&z)
+            .inspect_err(|e| log::warn!("zoom: {e}; fitting to the window"))
+            .ok()
+    });
 
     let canvas = window
         .document()
@@ -476,11 +550,121 @@ mod tests {
     }
 
     #[test]
-    fn seconds_are_not_negative() {
-        let s = |t: &str| super::seconds(Some(t.into()));
-        assert_eq!(s("1.5"), Some(1.5));
-        for bad in ["-1", "NaN", "inf", "x"] {
-            assert_eq!(s(bad), None);
+    fn zoom_is_in_the_views_range() {
+        assert_eq!(super::parse_zoom("1.5"), Ok(1.5));
+        for bad in ["0", "-1", "6", "NaN", "x", ""] {
+            assert!(super::parse_zoom(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    mod cli {
+        use clap::{CommandFactory, FromArgMatches};
+        use eframe::egui::{PointerButton, pos2};
+
+        use super::super::{Cli, Size};
+
+        fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+            let args = std::iter::once("bobview").chain(args.iter().copied());
+            let matches = Cli::command().try_get_matches_from(args)?;
+            Cli::from_arg_matches(&matches)
+        }
+
+        #[test]
+        fn the_command_is_well_formed() {
+            Cli::command().debug_assert();
+        }
+
+        #[test]
+        fn defaults() {
+            let cli = parse(&["screen.bob"]).unwrap();
+            assert_eq!(cli.display.as_deref(), Some("screen.bob"));
+            assert_eq!(cli.size, Size(Some([1280, 800])));
+            assert_eq!((cli.scale_factor, cli.wait, cli.settle), (1.0, 2.0, 1.0));
+            assert_eq!(cli.zoom, None);
+        }
+
+        #[test]
+        fn reads_every_option() {
+            let cli = parse(&[
+                "-m",
+                "P=X",
+                "-z",
+                "1.5",
+                "-f",
+                "--read-only",
+                "--size",
+                "auto",
+                "--scale-factor",
+                "2.75",
+                "--wait",
+                "0",
+                "--settle",
+                "0.5",
+                "--ui-scale",
+                "auto",
+                "--snapshot",
+                "out.png",
+                "x.bob",
+            ])
+            .unwrap();
+            assert_eq!(cli.macros.as_deref(), Some("P=X"));
+            assert_eq!(cli.zoom, Some(1.5));
+            assert!(cli.fullscreen && cli.read_only);
+            assert_eq!(cli.size, Size(None));
+            assert_eq!((cli.scale_factor, cli.wait, cli.settle), (2.75, 0.0, 0.5));
+        }
+
+        #[test]
+        fn refuses_bad_values() {
+            for args in [
+                &["--zoom", "big"][..],
+                &["-z", "0"],
+                &["--size", "800"],
+                &["--size", "0x600"],
+                &["--size", "800x-1"],
+                &["--click", "10"],
+                &["--click", "a,b"],
+                &["--right-click", "1;2"],
+                &["--scale-factor", "0"],
+                &["--scale-factor", "x"],
+                &["--wait", "-1"],
+                &["--settle", "NaN"],
+                &["--ui-scale", "0"],
+                &["--no-such-option"],
+                &["a.bob", "b.bob"],
+            ] {
+                let e = parse(args).expect_err(&format!("{args:?}"));
+                assert_eq!(e.exit_code(), 2, "{args:?}");
+            }
+        }
+
+        #[test]
+        fn keeps_clicks_in_order() {
+            let args = ["--click", "1,2", "--right-click", "3, 4", "--click", "5,6"];
+            let argv = std::iter::once("bobview").chain(args);
+            let matches = Cli::command().try_get_matches_from(argv).unwrap();
+            let cli = Cli::from_arg_matches(&matches).unwrap();
+            assert_eq!(
+                cli.clicks(&matches),
+                [
+                    (pos2(1.0, 2.0), PointerButton::Primary),
+                    (pos2(3.0, 4.0), PointerButton::Secondary),
+                    (pos2(5.0, 6.0), PointerButton::Primary),
+                ]
+            );
+        }
+
+        #[test]
+        fn a_repeated_option_takes_the_last_value() {
+            let cli = parse(&["-z", "2", "-z", "3"]).unwrap();
+            assert_eq!(cli.zoom, Some(3.0));
+        }
+
+        #[test]
+        fn retired_options_are_still_accepted() {
+            let cli = parse(&["-k", "--multi-window"]).unwrap();
+            assert!(cli.keypad && cli.multi_window);
         }
     }
 }

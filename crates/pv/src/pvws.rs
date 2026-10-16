@@ -9,10 +9,11 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 
 use base64::Engine;
 use futures_util::future::{AbortHandle, abortable};
+use parking_lot::Mutex;
 use serde_json::{Map, Value as Json, json};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
@@ -34,7 +35,7 @@ pub fn set_pvws(url: &str) {
     } else {
         host_url(url)
     };
-    *URL.lock().unwrap() = Some(url);
+    *URL.lock() = Some(url);
 }
 
 /// The token a server started with `--write` wants in every write.
@@ -44,12 +45,12 @@ static TOKEN: Mutex<Option<String>> = Mutex::new(None);
 /// It goes only to a socket on the page's own server: another, named by
 /// a link's `&pvws=`, could keep it.
 pub fn set_write_token(token: &str) {
-    *TOKEN.lock().unwrap() = Some(token.to_string());
+    *TOKEN.lock() = Some(token.to_string());
 }
 
 /// The write token, if there is one and the socket is the page's server's.
 fn token() -> Option<String> {
-    let token = TOKEN.lock().unwrap().clone()?;
+    let token = TOKEN.lock().clone()?;
     let page = web_sys::window()?.location().href().ok()?;
     let socket = url();
     if crate::same_origin(&page, &socket) {
@@ -61,7 +62,7 @@ fn token() -> Option<String> {
 }
 
 fn url() -> String {
-    if let Some(url) = URL.lock().unwrap().clone() {
+    if let Some(url) = URL.lock().clone() {
         return url;
     }
     let host = web_sys::window()

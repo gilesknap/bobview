@@ -4,7 +4,9 @@
 //! there is no archived history.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 use web_time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{Local, TimeZone};
@@ -126,7 +128,7 @@ impl Series {
         let into = samples.clone();
         let listener: Listener = Arc::new(move |s: &PvState| {
             if let Some(v) = sample(s) {
-                into.lock().unwrap().push(now(), v);
+                into.lock().push(now(), v);
             }
         });
         pv.listen(&listener);
@@ -142,7 +144,7 @@ impl Series {
     fn points(&self, from: f64, to: f64) -> Vec<(f64, f64)> {
         // Copied out before the PV's state is read: an update holds that
         // lock while it adds a sample.
-        let mut pts: Vec<(f64, f64)> = self.samples.lock().unwrap().since(from).collect();
+        let mut pts: Vec<(f64, f64)> = self.samples.lock().since(from).collect();
         if let Some(&(t, v)) = pts.last()
             && v.is_finite()
             && t < to

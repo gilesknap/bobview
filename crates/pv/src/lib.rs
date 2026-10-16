@@ -29,7 +29,9 @@ mod value;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::sync::{Arc, Weak};
+
+use parking_lot::{Mutex, RwLock};
 
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::mpsc;
@@ -73,7 +75,7 @@ pub(crate) struct Control {
 impl Control {
     pub(crate) fn notify(&self, text: String) {
         log::warn!("{text}");
-        let mut n = self.notice.lock().unwrap();
+        let mut n = self.notice.lock();
         *n = (n.0 + 1, text);
     }
 }
@@ -114,25 +116,32 @@ impl Shared {
     /// Change the state and tell the UI about it.
     pub(crate) fn update(&self, f: impl FnOnce(&mut PvState)) {
         {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock();
             f(&mut state);
             // Under the state lock, so listeners see changes in order.
-            let mut listeners = self.listeners.lock().unwrap();
+            // A listener that panics is dropped, so it cannot stop the PV's
+            // task (or the UI thread writing a local PV) for good. Release
+            // builds abort on any panic instead (`panic = "abort"`).
+            let mut listeners = self.listeners.lock();
             listeners.retain(|l| match l.upgrade() {
                 Some(l) => {
-                    l(&state);
-                    true
+                    let call = std::panic::AssertUnwindSafe(|| l(&state));
+                    let ok = std::panic::catch_unwind(call).is_ok();
+                    if !ok {
+                        log::error!("{}: a listener panicked and was removed", self.name);
+                    }
+                    ok
                 }
                 None => false,
             });
         }
-        if let Some(n) = self.notify.read().unwrap().as_ref() {
+        if let Some(n) = self.notify.read().as_ref() {
             n();
         }
     }
 
     pub(crate) fn snapshot(&self) -> PvState {
-        self.state.lock().unwrap().clone()
+        self.state.lock().clone()
     }
 
     /// A put failed (or worked, with `None`): remember why, and tell the user.
@@ -148,7 +157,7 @@ impl Shared {
     /// Whether a write taken from the queue can go now; if not, say why.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn can_write(&self, text: &str) -> bool {
-        let connected = self.state.lock().unwrap().connected;
+        let connected = self.state.lock().connected;
         if !connected {
             self.write_result(text, Some("not connected".into()));
         }
@@ -156,7 +165,7 @@ impl Shared {
     }
 
     pub(crate) fn set_writer(&self, writer: Writer) {
-        *self.writer.lock().unwrap() = Some(writer);
+        *self.writer.lock() = Some(writer);
     }
 }
 
@@ -205,7 +214,7 @@ impl Pv {
     fn refuses_writes(&self) -> bool {
         let shared = &self.0.shared;
         shared.ctl.read_only.load(Ordering::Relaxed)
-            && !matches!(*shared.writer.lock().unwrap(), Some(Writer::Local))
+            && !matches!(*shared.writer.lock(), Some(Writer::Local))
     }
 
     /// Call `listener` with the current state now and with each change
@@ -213,9 +222,9 @@ impl Pv {
     /// frame, this sees every monitor update.
     pub fn listen(&self, listener: &Listener) {
         let shared = &self.0.shared;
-        let state = shared.state.lock().unwrap();
+        let state = shared.state.lock();
         listener(&state);
-        let mut listeners = shared.listeners.lock().unwrap();
+        let mut listeners = shared.listeners.lock();
         // Drop dead ones here too: a PV that never changes is never updated.
         listeners.retain(|l| l.strong_count() > 0);
         listeners.push(Arc::downgrade(listener));
@@ -232,31 +241,40 @@ impl Pv {
             ));
             return;
         }
-        match shared.writer.lock().unwrap().as_ref() {
+        // Read first: the state and writer locks never nest.
+        #[cfg(not(target_arch = "wasm32"))]
+        let connected = shared.state.lock().connected;
+        // Released before the state changes, so the two locks never nest.
+        let writer = shared.writer.lock();
+        match writer.as_ref() {
             #[cfg(not(target_arch = "wasm32"))]
             Some(Writer::Channel(tx)) => {
                 // A write to a PV that is not there would wait for it, and
                 // land late, perhaps long after the user moved on.
-                if !shared.state.lock().unwrap().connected {
+                if !connected {
+                    drop(writer);
                     shared.ctl.notify(format!(
                         "{}: not writing '{value}', not connected",
                         shared.name
                     ));
                     return;
                 }
-                match tx.try_send(value) {
+                // The task serving the PV holds the receiver until it stops.
+                let sent = tx.try_send(value);
+                drop(writer);
+                match sent {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(value)) => shared.ctl.notify(format!(
                         "{}: not writing '{value}', {WRITE_QUEUE} writes still waiting",
                         shared.name
                     )),
-                    Err(mpsc::error::TrySendError::Closed(value)) => shared.ctl.notify(format!(
-                        "{}: not writing '{value}', the PV is closed",
-                        shared.name
-                    )),
+                    Err(mpsc::error::TrySendError::Closed(value)) => {
+                        shared.write_result(&value, Some("the PV's connection has stopped".into()))
+                    }
                 }
             }
             Some(Writer::Local) => {
+                drop(writer);
                 shared.update(|s| s.value = local::apply(&s.value, &s.labels, &value));
             }
             #[cfg(target_arch = "wasm32")]
@@ -360,7 +378,7 @@ impl PvManager {
 
     /// Register a callback run after every PV change.
     pub fn set_notifier(&self, notifier: Notifier) {
-        *self.inner.notify.write().unwrap() = Some(notifier);
+        *self.inner.notify.write() = Some(notifier);
     }
 
     /// Refuse (or allow again) writes to every PV but `loc://` ones; PVs then
@@ -376,7 +394,7 @@ impl PvManager {
     /// The latest message for the user about a refused or failed write, and a
     /// number that changes with each new one (starting at 0 for none).
     pub fn notice(&self) -> (u64, String) {
-        self.inner.ctl.notice.lock().unwrap().clone()
+        self.inner.ctl.notice.lock().clone()
     }
 
     /// The tokio runtime the PV tasks run on.
@@ -389,7 +407,7 @@ impl PvManager {
     pub fn subscribe(&self, name: &str) -> Pv {
         let name = PvName::parse(name);
         let key = name.key();
-        let mut entries = self.inner.entries.lock().unwrap();
+        let mut entries = self.inner.entries.lock();
         if let Some(entry) = entries.map.get(&key).and_then(Weak::upgrade) {
             return Pv(entry);
         }
@@ -408,7 +426,7 @@ impl PvManager {
     }
 
     fn local(&self, name: &PvName) -> Arc<Shared> {
-        let mut locals = self.inner.locals.lock().unwrap();
+        let mut locals = self.inner.locals.lock();
         locals
             .entry(name.key())
             .or_insert_with(|| {
@@ -473,14 +491,14 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let s = seen.clone();
         let listener: Listener = Arc::new(move |st: &PvState| {
-            s.lock().unwrap().push(st.value.as_f64());
+            s.lock().push(st.value.as_f64());
         });
         pv.listen(&listener);
         pv.write("2");
         pv.write("3");
         drop(listener);
         pv.write("4");
-        assert_eq!(*seen.lock().unwrap(), [Some(1.0), Some(2.0), Some(3.0)]);
+        assert_eq!(*seen.lock(), [Some(1.0), Some(2.0), Some(3.0)]);
     }
 
     #[test]
@@ -566,7 +584,38 @@ mod tests {
         assert_eq!(got[0], "0");
         drop(rx);
         pv.write("x");
-        assert!(pvs.notice().1.contains("closed"));
+        assert!(pvs.notice().1.contains("stopped"));
+    }
+
+    #[test]
+    fn a_write_with_no_task_to_send_it_is_reported() {
+        let pvs = PvManager::new();
+        let pv = pvs.subscribe("sim://sine");
+        let (tx, rx) = write_queue();
+        drop(rx);
+        pv.0.shared.set_writer(Writer::Channel(tx));
+        pv.0.shared.update(|s| s.connected = true);
+        pv.write("7");
+        let (n, text) = pvs.notice();
+        assert_eq!(n, 1);
+        assert!(text.contains("write '7' failed"), "{text}");
+        assert!(pv.state().write_error.is_some());
+    }
+
+    #[test]
+    fn a_panicking_listener_is_dropped_and_the_pv_goes_on() {
+        let pvs = PvManager::new();
+        let pv = pvs.subscribe("loc://listen_panic(1)");
+        let listener: Listener = Arc::new(|st: &PvState| {
+            if st.value.as_f64() == Some(2.0) {
+                panic!("listener bug");
+            }
+        });
+        pv.listen(&listener);
+        pv.write("2");
+        pv.write("3");
+        assert_eq!(pv.state().value.as_f64(), Some(3.0));
+        assert!(pv.0.shared.listeners.lock().is_empty());
     }
 
     #[test]
@@ -577,6 +626,6 @@ mod tests {
             let listener: Listener = Arc::new(|_: &PvState| {});
             pv.listen(&listener);
         }
-        assert_eq!(pv.0.shared.listeners.lock().unwrap().len(), 1);
+        assert_eq!(pv.0.shared.listeners.lock().len(), 1);
     }
 }
