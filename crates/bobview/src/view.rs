@@ -250,6 +250,7 @@ impl View {
         if let Some(cur) = self.current.clone() {
             crate::fetch::forget();
             crate::symbol::forget();
+            bob::project::forget();
             self.reloading = true;
             self.show(cur);
         }

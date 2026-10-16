@@ -789,14 +789,21 @@ pub mod display_set {
     }
 
     /// Load every `.opi` in the linked folders of the Eclipse project in
-    /// `$OPI_SWEEP` and report what does not translate: run with
+    /// `$OPI_SWEEP` (a `.project`'s folder, or a DLS module's screens beside
+    /// their `runcss.sh`) and report what does not translate: run with
     /// `OPI_SWEEP=/path/to/project cargo test -- --ignored opi_sweep --nocapture`.
     #[test]
     #[ignore]
     fn opi_sweep() {
         use std::collections::BTreeMap;
-        let Some(project) = std::env::var_os("OPI_SWEEP").map(PathBuf::from) else {
+        let Some(dir) = std::env::var_os("OPI_SWEEP").map(PathBuf::from) else {
             panic!("set OPI_SWEEP to an Eclipse project directory");
+        };
+        let Some(project) = bob::project::project_dir(&dir) else {
+            panic!(
+                "{} has no .project, nor a runcss.sh with links",
+                dir.display()
+            );
         };
         fn walk(virt: &Path, out: &mut Vec<PathBuf>) {
             let Ok(rd) = std::fs::read_dir(bob::project::locate(virt)) else {
