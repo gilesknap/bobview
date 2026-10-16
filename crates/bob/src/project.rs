@@ -15,6 +15,7 @@
 //! See [`launcher_path`].
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
@@ -173,6 +174,22 @@ pub fn forget() {
     LAUNCHERS.lock().unwrap().clear();
 }
 
+/// The most of a `.project` file that is read.
+const MAX_PROJECT_SIZE: u64 = 1 << 20;
+
+/// The text file `path`, unless it is over [`MAX_PROJECT_SIZE`] bytes or not UTF-8.
+fn read_capped(path: &Path) -> std::io::Result<String> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(MAX_PROJECT_SIZE + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_PROJECT_SIZE {
+        log::warn!("{}: larger than 1 MiB, ignored", path.display());
+        return Err(std::io::Error::other("file too large"));
+    }
+    String::from_utf8(bytes).map_err(std::io::Error::other)
+}
+
 /// Linked folders of `dir`'s project, by name, when `dir` holds a `.project`
 /// or is a project of a launcher (`…/runcss.sh/PROJECT`).
 pub fn links(dir: &Path) -> Option<Links> {
@@ -187,7 +204,7 @@ pub fn links(dir: &Path) -> Option<Links> {
     if let Some(links) = projects.get(dir) {
         return Some(links.clone());
     }
-    let text = std::fs::read_to_string(dir.join(".project")).ok()?;
+    let text = read_capped(&dir.join(".project")).ok()?;
     let links = parse(&text, dir);
     projects.insert(dir.to_path_buf(), links.clone());
     Some(links)
@@ -207,7 +224,7 @@ fn launcher_projects(script: &Path) -> Projects {
     let Some(dir) = script.parent() else {
         return Vec::new();
     };
-    let projects = std::fs::read_to_string(script)
+    let projects = read_capped(script)
         .map(|text| parse_launcher(&text, dir))
         .unwrap_or_default();
     launchers.insert(script.to_path_buf(), projects.clone());
@@ -501,7 +518,13 @@ fn parse(text: &str, dir: &Path) -> Links {
     if crate::element::depth(text) > crate::element::MAX_DEPTH {
         return Vec::new();
     }
-    let Ok(doc) = roxmltree::Document::parse(text) else {
+    let Ok(doc) = roxmltree::Document::parse_with_options(
+        text,
+        roxmltree::ParsingOptions {
+            nodes_limit: 1 << 16,
+            ..Default::default()
+        },
+    ) else {
         return Vec::new();
     };
     doc.descendants()
@@ -1028,5 +1051,18 @@ $CSS_RUN_SCRIPT -o "${launch_opi}" -s -l "$links" "$@"
         assert_eq!(normalize(Path::new("../../x")), PathBuf::from("../../x"));
         assert_eq!(normalize(Path::new("a/../../x")), PathBuf::from("../x"));
         assert_eq!(normalize(Path::new("/../x")), PathBuf::from("/x"));
+    }
+
+    #[test]
+    fn oversized_project_files_are_ignored_not_cached_empty() {
+        let dir = std::env::temp_dir().join(format!("bobview-bigproj-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let link = "<link><name>a</name><location>/tmp</location></link>";
+        let pad = " ".repeat(MAX_PROJECT_SIZE as usize);
+        std::fs::write(dir.join(".project"), format!("<p>{pad}{link}</p>")).unwrap();
+        assert!(links(&dir).is_none());
+        std::fs::write(dir.join(".project"), format!("<p>{link}</p>")).unwrap();
+        assert_eq!(links(&dir).map(|l| l.len()), Some(1));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

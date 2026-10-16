@@ -161,11 +161,9 @@ impl View {
     fn start_loading(&self, loc: &Location) -> Loading {
         let (tx, rx) = std::sync::mpsc::channel();
         let (source, macros, pvs) = (loc.source.clone(), loc.macros.clone(), self.pvs.clone());
-        // An explicit stack: building a display recurses once per nesting
-        // level (capped by `bob`), and the default is platform dependent.
         let spawned = std::thread::Builder::new()
             .name("display-loader".into())
-            .stack_size(16 * 1024 * 1024)
+            .stack_size(crate::screen::BUILD_STACK)
             .spawn(move || {
                 tx.send(Screen::load(&source, &macros, &pvs)).ok();
             });
