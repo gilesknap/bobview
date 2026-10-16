@@ -562,7 +562,11 @@ fn widget(mut el: Element) -> Vec<Element> {
             }
             stretch(&mut el);
         }
-        (_, "action_button") if short == "MenuButton" => rename(&mut el, "label", "text"),
+        (_, "action_button") if short == "MenuButton" => {
+            rename(&mut el, "label", "text");
+            // BOY showed no label, not Phoebus' default `$(actions)`.
+            default(&mut el, "text", "");
+        }
         (_, "action_button") if short == "BoolButton" => {
             // Writes with its push action, labelled as the button was.
             let label = text(&el, "off_label").unwrap_or("").to_string();
@@ -573,6 +577,7 @@ fn widget(mut el: Element) -> Vec<Element> {
             }
         }
         (_, "action_button") => {
+            default(&mut el, "text", "");
             push_first(&mut el, "push_action_index");
             if let Some(t) = el.child_mut("tooltip") {
                 t.text = t.text.replace("$(pv_value)", "$(actions)");
@@ -2133,6 +2138,25 @@ ScriptUtil.executeEclipseCommand(command_id, ['pvnames', '$(dom)-VA-GAUGE-01:PLO
             ("action_button", Some("Spaces"))
         );
         assert_eq!(w.actions().len(), 2);
+    }
+
+    #[test]
+    fn unlabelled_buttons_stay_unlabelled() {
+        // Without the empty text, Phoebus' default `$(actions)` would name
+        // the first action.
+        let actions =
+            r#"<actions><action type="OPEN_DISPLAY"><path>a.opi</path></action></actions>"#;
+        for (type_id, props) in [
+            ("MenuButton", "<actions_from_pv>false</actions_from_pv>"),
+            ("ActionButton", ""),
+        ] {
+            let w = one(type_id, &format!("{props}{actions}"));
+            assert_eq!(
+                (w.kind.as_str(), w.text("text")),
+                ("action_button", Some("")),
+                "{type_id}"
+            );
+        }
     }
 
     #[test]

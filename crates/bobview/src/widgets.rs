@@ -1209,20 +1209,17 @@ fn action_button(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut Cx, id: Id) 
     let w = &node.w;
     let actions = w.actions();
     let resp = ui.interact(rect.intersect(cx.clip), id, Sense::click());
-    button_box(
-        ui.painter(),
-        rect,
-        bg(w, "Button_Background"),
-        resp.is_pointer_button_down_on(),
-        cx.view.zoom,
-    );
-    let mut text = node.prop("text");
-    if text.is_empty() || text.contains("$(actions)") {
-        text = actions
-            .first()
-            .map(|a| node.expand(a.description()))
-            .unwrap_or_default();
+    // A transparent button draws only its text, over what lies beneath.
+    if w.bool("transparent") != Some(true) {
+        button_box(
+            ui.painter(),
+            rect,
+            bg(w, "Button_Background"),
+            resp.is_pointer_button_down_on(),
+            cx.view.zoom,
+        );
     }
+    let text = button_text(node, &actions);
     let painter = ui.painter().with_clip_rect(cx.clip);
     text_in(
         &painter,
@@ -1248,6 +1245,21 @@ fn action_button(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut Cx, id: Id) 
         });
     }
     resp
+}
+
+/// An action button's label. As in Phoebus, only text naming `$(actions)`
+/// (the default when there is none) is replaced by the first action's
+/// description; empty text stays empty.
+fn button_text(node: &Node, actions: &[Action]) -> String {
+    if let Some(text) = node.w.text("text")
+        && !text.contains("$(actions)")
+    {
+        return node.prop("text");
+    }
+    actions
+        .first()
+        .map(|a| node.expand(a.description()))
+        .unwrap_or_default()
 }
 
 pub(crate) fn run_action(node: &Node, action: &Action, cx: &mut Cx) {
@@ -2252,6 +2264,65 @@ mod tests {
     }
 
     use std::sync::Arc;
+
+    /// An action button with properties `props` and one action, "Go".
+    fn button_screen(pvs: &PvManager, props: &str) -> crate::screen::Screen {
+        let d = bob::Display::parse(&format!(
+            "<display><widget type='action_button'>{props}<actions>
+            <action type='open_display'><file>a.bob</file><description>Go</description>
+            </action></actions></widget></display>"
+        ))
+        .unwrap();
+        crate::screen::Builder::new(pvs).screen(d, &Macros::default(), None, 0)
+    }
+
+    #[test]
+    fn only_action_button_text_naming_actions_shows_them() {
+        let pvs = PvManager::new();
+        for (props, shown) in [
+            ("", "Go"),
+            ("<text>$(actions)</text>", "Go"),
+            ("<text></text>", ""),
+            ("<text>Open</text>", "Open"),
+        ] {
+            let screen = button_screen(&pvs, props);
+            let node = &screen.nodes[0];
+            assert_eq!(button_text(node, &node.w.actions()), shown, "{props}");
+        }
+    }
+
+    #[test]
+    fn transparent_action_buttons_have_no_face() {
+        let pvs = PvManager::new();
+        let filled = |props: &str| {
+            let mut screen = button_screen(&pvs, props);
+            let ctx = egui::Context::default();
+            let mut requests = Vec::new();
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let mut cx = Cx {
+                    view: View {
+                        origin: Pos2::ZERO,
+                        zoom: 1.0,
+                    },
+                    clip: Rect::EVERYTHING,
+                    pvs: &pvs,
+                    requests: &mut requests,
+                    depth: 0,
+                    touch: false,
+                    trends: &[],
+                    window: WindowKey::Main,
+                };
+                let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 30.0));
+                action_button(ui, &mut screen.nodes[0], rect, &mut cx, Id::new("b"));
+            });
+            out.textures_delta.clear();
+            out.shapes
+                .iter()
+                .any(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.fill.a() > 0))
+        };
+        assert!(filled("<text></text>"));
+        assert!(!filled("<text></text><transparent>true</transparent>"));
+    }
 
     #[test]
     fn arcs_go_anticlockwise_from_three_o_clock() {
