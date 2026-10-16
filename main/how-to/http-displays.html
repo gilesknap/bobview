@@ -194,8 +194,7 @@ bobview http://localhost:8000/index.bob
 </code></pre>
 <p>Fetched screens are kept in memory for <strong>Back</strong> and <strong>Forward</strong>; <strong>Reload</strong>
 fetches them again.</p>
-<p>A display loaded over http(s) is treated with more caution than a local
-file: a <code>write_pv</code> action asks for confirmation before it writes, and no
+<p>A display loaded over http(s) writes PVs as a local file does, but no
 command is ever run for it. See <a href="../explanations/writes.html">Writes and safety</a>.</p>
 
                     </main>

@@ -203,11 +203,10 @@ on the display makes) waits for it, up to 5 s over CA, without holding up
 the PV's other events. The writes behind it wait in that queue (so while it
 waits, a 17th is refused), and fail with it if it gives up.</p>
 <h2 id="displays-from-the-web"><a class="header" href="#displays-from-the-web">Displays from the web</a></h2>
-<p>A <code>write_pv</code> action (or the toggle script) of a display loaded from an
-<code>http://</code> or <code>https://</code> URL asks for confirmation before it writes; displays
-from local files write at once. Anyone who can put a file on a web server
-can make a display, so a click on one should not change the machine
-unasked.</p>
+<p>A <code>write_pv</code> action and the toggle script write at once, as in Phoebus,
+whether the display came from a local file or an <code>http://</code> or <code>https://</code>
+URL. To open displays without letting them write, use <code>--read-only</code>, which
+refuses every write.</p>
 <h2 id="commands"><a class="header" href="#commands">Commands</a></h2>
 <p>No command is ever run for a display fetched over http(s), nor in a
 <code>command_directory</code> on the web. Only a launcher script that resolves (after
