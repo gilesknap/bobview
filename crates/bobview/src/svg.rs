@@ -142,11 +142,20 @@ const INHERITED: &[&str] = &[
     "marker-end",
 ];
 
+/// Elements that a reference uses, but whose content is never drawn, so
+/// inherits nothing: a gradient names its stops and a filter its
+/// primitives (and a filter image what it draws by its own reference).
+const PAINT_SERVERS: &[&str] = &["linearGradient", "radialGradient", "filter"];
+
+/// Properties holding references that are not inherited, but that an
+/// element may take from its parent by `inherit`.
+const NOT_INHERITED: [&str; 3] = ["clip-path", "mask", "filter"];
+
 /// The deepest element nesting in `doc` with the references usvg follows
 /// (`url(#id)` in an attribute, a `style` or a style sheet, and an `href` to
 /// `#id`) counted as `REF_LEVELS` levels each: how deep usvg recurses to
 /// parse it. `usize::MAX` if references form a loop. Found without
-/// recursion.
+/// recursion, in time linear in the size of `doc` and its style sheets.
 ///
 /// An element's references count from the deepest element below it, as
 /// that may be where an inherited `fill` or marker is resolved, or where
@@ -155,15 +164,21 @@ const INHERITED: &[&str] = &[
 /// inherits from its own ancestors, as usvg converts patterns, markers,
 /// masks, clip paths and the elements a filter image names where they are.
 pub fn svg_depth(doc: &roxmltree::Document) -> usize {
-    let mut ids: HashMap<&str, Vec<roxmltree::NodeId>> = HashMap::new();
-    for node in doc.descendants().filter(|n| n.is_element()) {
+    let count = doc.descendants().count();
+    let index = |id: roxmltree::NodeId| id.get_usize();
+    let elements = || doc.descendants().filter(|n| n.is_element());
+    // Each id, and the elements that have it.
+    let mut ids: HashMap<&str, usize> = HashMap::new();
+    let mut having: Vec<Vec<usize>> = Vec::new();
+    for node in elements() {
         if let Some(id) = node.attribute("id") {
-            ids.entry(id).or_default().push(node.id());
+            let i = *ids.entry(id).or_insert_with(|| {
+                having.push(Vec::new());
+                having.len() - 1
+            });
+            having[i].push(index(node.id()));
         }
     }
-    let id_names: Vec<&str> = ids.keys().copied().collect();
-    let id_index: HashMap<&str, usize> =
-        id_names.iter().enumerate().map(|(i, n)| (*n, i)).collect();
     // Style sheets, as usvg reads them, keeping only the rules that refer to
     // something or inherit.
     let mut sheet = simplecss::StyleSheet::new();
@@ -174,47 +189,94 @@ pub fn svg_depth(doc: &roxmltree::Document) -> usize {
             sheet.parse_more(text);
         }
     }
-    let relevant = |value: &str| value.contains("url(") || value.trim() == "inherit";
+    let inherit = |value: &str| value.trim() == "inherit";
+    let relevant = |value: &str| value.contains("url(") || inherit(value);
     sheet
         .rules
         .retain(|rule| rule.declarations.iter().any(|d| relevant(d.value)));
 
-    // Each element's properties that refer to something or inherit: its
-    // attributes, its `style` and the style sheet rules it matches.
-    let count = doc.descendants().count();
-    let index = |id: roxmltree::NodeId| id.get_usize();
-    let mut props: Vec<Vec<(&str, &str)>> = vec![Vec::new(); count];
-    for node in doc.descendants().filter(|n| n.is_element()) {
-        let p = &mut props[index(node.id())];
+    // The ids each element names: by `href`, in the properties its
+    // descendants inherit, in all its properties, and in each of
+    // `NOT_INHERITED`; and which of those it takes from its parent.
+    #[derive(Clone, Default)]
+    struct Refs {
+        href: Vec<usize>,
+        inherited: Vec<usize>,
+        all: Vec<usize>,
+        not_inherited: [Vec<usize>; 3],
+        inherits: [bool; 3],
+    }
+    let mut refs = vec![Refs::default(); count];
+    for node in elements() {
+        let r = &mut refs[index(node.id())];
+        let mut props: Vec<(&str, &str)> = Vec::new();
         for attr in node.attributes() {
             if attr.name() == "style" {
                 for d in simplecss::DeclarationTokenizer::from(attr.value()) {
-                    p.push((d.name, d.value));
+                    props.push((d.name, d.value));
                 }
             } else {
-                p.push((attr.name(), attr.value()));
+                props.push((attr.name(), attr.value()));
             }
         }
         for rule in &sheet.rules {
             if rule.selector.matches(&CssNode(node)) {
-                p.extend(rule.declarations.iter().map(|d| (d.name, d.value)));
+                props.extend(rule.declarations.iter().map(|d| (d.name, d.value)));
             }
         }
-        p.retain(|(_, value)| relevant(value));
+        let named = |value: &str, to: &mut Vec<usize>| {
+            let mut names = Vec::new();
+            url_ids(value, &mut names);
+            to.extend(names.iter().filter_map(|n| ids.get(n)));
+        };
+        for (name, value) in props.into_iter().filter(|(_, v)| relevant(v)) {
+            let k = NOT_INHERITED.iter().position(|n| *n == name);
+            if inherit(value) {
+                if let Some(k) = k {
+                    r.inherits[k] = true;
+                }
+                continue;
+            }
+            named(value, &mut r.all);
+            if INHERITED.contains(&name) {
+                named(value, &mut r.inherited);
+            }
+            if let Some(k) = k {
+                named(value, &mut r.not_inherited[k]);
+            }
+        }
+        if HREF_ELEMENTS.contains(&node.tag_name().name()) {
+            for a in node.attributes().filter(|a| a.name() == "href") {
+                if let Some((_, id)) = a.value().split_once('#') {
+                    r.href.extend(ids.get(id.trim()));
+                }
+            }
+        }
+        for list in [&mut r.href, &mut r.inherited, &mut r.all] {
+            list.sort_unstable();
+            list.dedup();
+        }
     }
-    let url_refs = |id: roxmltree::NodeId, inherited: bool| {
-        let mut names = Vec::new();
-        for (name, value) in &props[index(id)] {
-            if !inherited || INHERITED.contains(name) {
-                url_ids(value, &mut names);
+    // The element whose `NOT_INHERITED` property each element has, taking
+    // its parent's by `inherit` (parents come first).
+    let mut owner: Vec<[Option<usize>; 3]> = vec![[None; 3]; count];
+    for node in elements() {
+        let (e, parent) = (index(node.id()), node.parent().map(|p| index(p.id())));
+        owner[e] = std::array::from_fn(|k| {
+            if refs[e].inherits[k] {
+                parent.and_then(|p| owner[p][k])
+            } else if refs[e].not_inherited[k].is_empty() {
+                None
+            } else {
+                Some(e)
             }
-        }
-        names
-    };
+        });
+    }
 
     // The walk's nodes: each element; each element as followed to by a
-    // reference (`count +`); and each id (`2 * count +`), which leads to
-    // every element with that id.
+    // reference (`count +`); the references each node inherits from itself
+    // and its ancestors (`2 * count +`); and each id (`3 * count +`), which
+    // leads to every element with that id.
     #[derive(Clone, Copy, PartialEq)]
     enum Step {
         /// Deeper by so many levels.
@@ -223,46 +285,42 @@ pub fn svg_depth(doc: &roxmltree::Document) -> usize {
         Across(usize),
     }
     type Steps = Vec<(usize, Step)>;
-    let named = |names: Vec<&str>, step: Step, steps: &mut Steps| {
-        steps.extend(
-            names
-                .iter()
-                .filter_map(|n| id_index.get(n))
-                .map(|i| (2 * count + i, step)),
-        );
+    let to_ids = |list: &[usize], step: Step, steps: &mut Steps| {
+        steps.extend(list.iter().map(|i| (3 * count + i, step)));
     };
     // What a walk node leads to, and how many levels it is itself.
     let next = |v: usize| -> (usize, Steps) {
         let mut steps = Steps::new();
-        if v >= 2 * count {
-            for id in &ids[id_names[v - 2 * count]] {
-                steps.push((count + index(*id), Step::Down(0)));
+        if v >= 3 * count {
+            for e in &having[v - 3 * count] {
+                steps.push((count + e, Step::Down(0)));
             }
             return (0, steps);
         }
-        let followed = v >= count;
+        let e = v % count;
         let node = doc
-            .get_node(roxmltree::NodeId::from(v % count))
+            .get_node(roxmltree::NodeId::from(e))
             .expect("a node of this document");
-        if followed {
-            steps.push((v - count, Step::Down(0)));
-            // What it inherits from where it is.
-            for a in node.ancestors().skip(1) {
-                named(url_refs(a.id(), true), Step::Across(REF_LEVELS), &mut steps);
+        let parent = node.parent().map(|p| index(p.id()));
+        if v >= 2 * count {
+            steps.extend(parent.map(|p| (2 * count + p, Step::Down(0))));
+            to_ids(&refs[e].inherited, Step::Down(REF_LEVELS), &mut steps);
+            return (0, steps);
+        }
+        if v >= count {
+            steps.push((e, Step::Down(0)));
+            // What it inherits from where it is, unless it draws nothing.
+            if !PAINT_SERVERS.contains(&node.tag_name().name()) {
+                steps.extend(parent.map(|p| (2 * count + p, Step::Across(0))));
             }
             // An `inherit` of what is not inherited takes the parent's.
-            for (name, value) in &props[index(node.id())] {
-                if value.trim() == "inherit" && !INHERITED.contains(name) {
-                    let parent = node.ancestors().skip(1).find_map(|a| {
-                        props[index(a.id())]
-                            .iter()
-                            .find(|(n, v)| n == name && v.trim() != "inherit")
-                    });
-                    let mut names = Vec::new();
-                    if let Some((_, value)) = parent {
-                        url_ids(value, &mut names);
-                    }
-                    named(names, Step::Across(REF_LEVELS), &mut steps);
+            for (k, owner) in owner[e].iter().enumerate() {
+                if let (true, Some(o)) = (refs[e].inherits[k], owner) {
+                    to_ids(
+                        &refs[*o].not_inherited[k],
+                        Step::Across(REF_LEVELS),
+                        &mut steps,
+                    );
                 }
             }
             return (0, steps);
@@ -270,36 +328,30 @@ pub fn svg_depth(doc: &roxmltree::Document) -> usize {
         for c in node.children().filter(|c| c.is_element()) {
             steps.push((index(c.id()), Step::Down(1)));
         }
-        if HREF_ELEMENTS.contains(&node.tag_name().name()) {
-            let hrefs = node.attributes().filter(|a| a.name() == "href");
-            let names = hrefs
-                .filter_map(|a| a.value().split_once('#'))
-                .map(|(_, id)| id.trim());
-            named(names.collect(), Step::Down(REF_LEVELS), &mut steps);
-        }
-        named(
-            url_refs(node.id(), false),
-            Step::Across(REF_LEVELS),
-            &mut steps,
-        );
+        to_ids(&refs[e].href, Step::Down(REF_LEVELS), &mut steps);
+        to_ids(&refs[e].all, Step::Across(REF_LEVELS), &mut steps);
         (1, steps)
     };
 
     // A depth-first walk, keeping the deepest each node leads to once all
     // it leads to is known.
-    const NEW: usize = 0;
-    const WALKING: usize = usize::MAX;
-    let mut depth = vec![NEW; 2 * count + id_names.len()];
+    #[derive(Clone, Copy, PartialEq)]
+    enum State {
+        New,
+        Walking,
+        Done,
+    }
+    let mut state = vec![State::New; 3 * count + having.len()];
+    let mut depth = vec![0usize; state.len()];
     // A node, its own levels, what it leads to and how far through that the
     // walk is.
     let mut stack: Vec<(usize, usize, Steps, usize)> = Vec::new();
     let mut deepest = 0;
-    for start in doc.descendants().filter(|n| n.is_element()) {
-        let start = index(start.id());
-        if depth[start] != NEW {
+    for start in elements().map(|n| index(n.id())) {
+        if state[start] != State::New {
             continue;
         }
-        depth[start] = WALKING;
+        state[start] = State::Walking;
         let (levels, steps) = next(start);
         stack.push((start, levels, steps, 0));
         while let Some((node, levels, leads_to, at)) = stack.last_mut() {
@@ -311,21 +363,21 @@ pub fn svg_depth(doc: &roxmltree::Document) -> usize {
                         Step::Across(l) => across = across.max(l.saturating_add(depth[v])),
                     }
                 }
-                // Never NEW, as a walked node may lead nowhere.
-                depth[*node] = down.saturating_add(across).clamp(1, WALKING - 1);
+                depth[*node] = down.saturating_add(across);
+                state[*node] = State::Done;
                 stack.pop();
                 continue;
             };
             *at += 1;
-            match depth[v] {
-                NEW => {
-                    depth[v] = WALKING;
+            match state[v] {
+                State::New => {
+                    state[v] = State::Walking;
                     let (levels, steps) = next(v);
                     stack.push((v, levels, steps, 0));
                 }
                 // A loop, which usvg may or may not break.
-                WALKING => return usize::MAX,
-                _ => {}
+                State::Walking => return usize::MAX,
+                State::Done => {}
             }
         }
         deepest = deepest.max(depth[start]);
@@ -847,6 +899,11 @@ mod tests {
         let doc = parse_xml(&svg).unwrap();
         assert_eq!(svg_depth(&doc), usize::MAX);
         assert!(parse(svg.as_bytes()).is_err());
+        // A gradient inside what it fills is no loop: its stops draw nothing.
+        let svg = format!(
+            r#"{SVG}<g fill="url(#g)"><linearGradient id="g"><stop offset="0"/></linearGradient><rect width="5" height="5"/></g></svg>"#
+        );
+        assert!(parse(svg.as_bytes()).is_ok());
     }
 
     #[test]
