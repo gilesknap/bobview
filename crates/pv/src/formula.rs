@@ -752,7 +752,7 @@ impl Formula {
         let Some(inner) = self.manager.upgrade() else {
             return;
         };
-        let manager = PvManager { inner };
+        let manager = PvManager { inner, tag: None };
         for (key, name) in new {
             // Subscribed meanwhile, by an evaluation after the one asking.
             if self.inputs.lock().contains_key(&key) {

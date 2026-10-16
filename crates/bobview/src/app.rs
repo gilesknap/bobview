@@ -1,6 +1,6 @@
 //! The application window: navigation bar, display area and status line.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use bob::{Macros, Source};
 use eframe::egui::{self, Id, Pos2, Rect, Vec2};
+use parking_lot::Mutex;
 use pv::PvManager;
 
 use crate::chrome::{self, Chrome, UiScale};
@@ -39,9 +40,8 @@ impl Location {
 
 pub struct BobApp {
     pvs: PvManager,
-    /// Set by a PV update that has asked for a repaint, cleared by the
-    /// frame that shows it.
-    repaint_asked: Arc<AtomicBool>,
+    /// What repaints each window (main, display and trend) for its PVs.
+    repaints: HashMap<egui::ViewportId, Arc<Repaint>>,
     /// The main window's display.
     main: View,
     /// Where the main window is, for saving a layout.
@@ -111,6 +111,54 @@ pub struct BobApp {
         std::sync::mpsc::Receiver<Launched>,
     ),
     chrome: Chrome,
+}
+
+/// Repaints one window when a PV it shows changes, at most ~10 times a
+/// second, asking once per pass of the window: egui keeps a record of every
+/// request until the window's next pass, and passes stop while the desktop
+/// is locked.
+struct Repaint {
+    ctx: egui::Context,
+    viewport: egui::ViewportId,
+    /// Set by a PV update that has asked, cleared by the window's next pass.
+    asked: AtomicBool,
+}
+
+impl Repaint {
+    fn new(ctx: &egui::Context, viewport: egui::ViewportId) -> Arc<Self> {
+        Arc::new(Self {
+            ctx: ctx.clone(),
+            viewport,
+            asked: AtomicBool::new(false),
+        })
+    }
+
+    /// The notifier to tag the window's PVs with (see `PvManager::tagged`).
+    fn notifier(self: &Arc<Self>) -> pv::Notifier {
+        let this = self.clone();
+        Arc::new(move || {
+            if !this.asked.swap(true, Ordering::Relaxed) {
+                repaint_after(&this.ctx, this.viewport, Duration::from_millis(100));
+            }
+        })
+    }
+
+    /// The window's pass begins: before its PVs are read, so a later update
+    /// asks again.
+    fn begin(&self) {
+        self.asked.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Repaint the window `viewport` after `delay`: the main window, where
+/// windows are drawn inside it.
+fn repaint_after(ctx: &egui::Context, viewport: egui::ViewportId, delay: Duration) {
+    let viewport = if ctx.embed_viewports() {
+        egui::ViewportId::ROOT
+    } else {
+        viewport
+    };
+    ctx.request_repaint_after_for(delay, viewport);
 }
 
 /// A command action's result, tagged with where it was started (its window
@@ -362,27 +410,17 @@ impl BobApp {
         // The controls' zoom is ours (see `chrome`), not ctrl+plus/minus.
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
 
+        // No notifier for every PV: each window's PVs repaint only it.
         let pvs = PvManager::new();
-        // Coalesce PV updates into at most ~10 repaints a second, asking
-        // once per frame: egui keeps a record of every request until its
-        // next frame, and frames stop while the desktop is locked.
-        let repaint_asked = Arc::new(AtomicBool::new(false));
-        let asked = repaint_asked.clone();
-        let ctx = ctx.clone();
-        pvs.set_notifier(Arc::new(move || {
-            if !asked.swap(true, Ordering::Relaxed) {
-                ctx.request_repaint_after_for(Duration::from_millis(100), egui::ViewportId::ROOT);
-            }
-        }));
-
-        let mut main = View::new(&pvs, zoom);
+        let repaint = Repaint::new(ctx, egui::ViewportId::ROOT);
+        let mut main = View::new(&pvs.tagged(repaint.notifier()), zoom);
         main.open_path = start
             .as_ref()
             .map(|l| l.source.to_string())
             .unwrap_or_default();
         let mut app = Self {
             pvs,
-            repaint_asked,
+            repaints: HashMap::from([(egui::ViewportId::ROOT, repaint)]),
             main,
             geometry: Geometry::default(),
             windows: Vec::new(),
@@ -439,6 +477,23 @@ impl BobApp {
             self.show_open = false;
         }
         self.pending_layout = Some((layout, name));
+    }
+
+    /// The PVs for the display or trend in the window `viewport`, which
+    /// repaint only that window.
+    fn pvs_for(&mut self, ctx: &egui::Context, viewport: egui::ViewportId) -> PvManager {
+        let repaint = self
+            .repaints
+            .entry(viewport)
+            .or_insert_with(|| Repaint::new(ctx, viewport));
+        self.pvs.tagged(repaint.notifier())
+    }
+
+    /// The window `viewport`'s pass begins (see `Repaint::begin`).
+    fn begin_pass(&self, viewport: egui::ViewportId) {
+        if let Some(r) = self.repaints.get(&viewport) {
+            r.begin();
+        }
     }
 
     /// The view drawn in `window`, unless that window has closed.
@@ -595,7 +650,7 @@ impl BobApp {
     ) -> WindowKey {
         let id = egui::ViewportId::from_hash_of(("display", self.next_window));
         self.next_window += 1;
-        let mut view = View::new(&self.pvs, None);
+        let mut view = View::new(&self.pvs_for(ctx, id), None);
         view.show(loc);
         // In desktop points: egui's are scaled by its zoom factor.
         let zoom = ctx.zoom_factor();
@@ -723,7 +778,9 @@ impl BobApp {
                 target,
             })
             .ok();
-            ctx.request_repaint();
+            // The main window's pass polls for it; on this thread
+            // `request_repaint` is whichever window is being drawn.
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
         });
     }
 
@@ -1125,7 +1182,8 @@ impl BobApp {
         }
         self.trends.clear();
         for t in &layout.trends {
-            let mut trend = Trend::new(self.next_trend, &t.pvs, &self.pvs);
+            let pvs = self.pvs_for(ctx, trend_viewport(self.next_trend));
+            let mut trend = Trend::new(self.next_trend, &t.pvs, &pvs);
             self.next_trend += 1;
             trend.set_view(t.span, t.log);
             trend.place = t.geometry(&monitors);
@@ -1406,21 +1464,82 @@ fn list_dir(dir: &Path) -> Vec<(PathBuf, bool)> {
     out
 }
 
-impl eframe::App for BobApp {
-    /// Run at the start of every pass, including those eframe runs without
-    /// `ui` while every window is hidden.
+/// bobview as eframe runs it: the application behind one lock, so that each
+/// display and trend window is drawn in a pass of its own (a deferred
+/// viewport), redrawn only for its own input and its own PVs, not in the
+/// main window's pass. eframe draws the windows one after another on one
+/// thread, so their passes never wait for each other.
+pub struct App(Arc<Mutex<BobApp>>);
+
+/// A window the main window's pass keeps open, drawn in a pass of its own.
+#[derive(Clone, Copy)]
+enum Child {
+    Display(egui::ViewportId),
+    Trend(u64),
+}
+
+impl App {
+    pub fn new(app: BobApp) -> Self {
+        Self(Arc::new(Mutex::new(app)))
+    }
+
+    /// The main window's pass, which keeps the other windows open.
+    pub fn draw(&self, ui: &mut egui::Ui) {
+        let children = self.0.lock().draw_main(ui);
+        // Not under the lock: where windows are embedded egui runs each
+        // window's pass at once, inside this one, and that takes the lock.
+        for (id, builder, child) in children {
+            let app = self.0.clone();
+            ui.ctx()
+                .show_viewport_deferred(id, builder, move |ui, class| match child {
+                    Child::Display(id) => app.lock().display_pass(ui, id, class),
+                    Child::Trend(id) => app.lock().trend_pass(ui, id, class),
+                });
+        }
+    }
+}
+
+impl eframe::App for App {
+    /// Run at the start of every pass of the main window, including those
+    /// eframe runs without `ui` while every window is hidden.
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Before the PVs are read, so a later update asks again.
-        self.repaint_asked.store(false, Ordering::Relaxed);
+        self.0.lock().begin_pass(egui::ViewportId::ROOT);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        // A layout's positions are checked against the monitors as they are
-        // when it is loaded; new windows are placed within them, asked for
-        // every few seconds (a laptop is docked).
         #[cfg(not(target_arch = "wasm32"))]
+        self.0.lock().find_monitors(ui, frame);
+        #[cfg(target_arch = "wasm32")]
+        let _ = frame;
+        self.draw(ui);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.0.lock().on_exit();
+    }
+}
+
+/// What a window's pass can change that other windows draw: the windows
+/// open and their titles (which the main window keeps), what each display
+/// window shows (in the navigator, and the window itself when the change
+/// came from another), and the windows the dialogs are in.
+#[derive(PartialEq)]
+struct Shape {
+    main: u64,
+    /// Each display window: its id, `View::shown`, title and whether it
+    /// is closing.
+    windows: Vec<(egui::ViewportId, u64, String, bool)>,
+    trends: Vec<(u64, String)>,
+    dialogs: [Option<WindowKey>; 2],
+}
+
+impl BobApp {
+    /// A layout's positions are checked against the monitors as they are
+    /// when it is loaded; new windows are placed within them, asked for
+    /// every few seconds (a laptop is docked).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn find_monitors(&mut self, ui: &egui::Ui, frame: &eframe::Frame) {
         let now = ui.input(|i| i.time);
-        #[cfg(not(target_arch = "wasm32"))]
         if (self.pending_layout.is_some() || self.monitors_at.is_none_or(|t| now - t > 3.0))
             && let Some(window) = frame.winit_window()
         {
@@ -1438,12 +1557,9 @@ impl eframe::App for BobApp {
                 })
                 .collect();
         }
-        #[cfg(target_arch = "wasm32")]
-        let _ = frame;
-        self.draw(ui);
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self) {
         if !self.settings.save_default_on_exit {
             return;
         }
@@ -1460,15 +1576,104 @@ impl eframe::App for BobApp {
             log::error!("{e}");
         }
     }
+
+    fn shape(&self) -> Shape {
+        Shape {
+            main: self.main.shown,
+            windows: self
+                .windows
+                .iter()
+                .map(|w| (w.id, w.view.shown, self.child_title(w), w.close))
+                .collect(),
+            trends: self.trend_titles(),
+            dialogs: [
+                self.confirm.front().map(|c| c.window),
+                self.details.as_ref().map(|(w, _)| *w),
+            ],
+        }
+    }
+
+    /// After a pass of the window `drawn`, repaint the other windows that
+    /// draw what it changed (see `Shape`). Where windows are embedded the
+    /// main window's pass draws them all.
+    fn repaint_changed(&self, ctx: &egui::Context, before: &Shape, drawn: egui::ViewportId) {
+        if ctx.embed_viewports() {
+            return;
+        }
+        let after = self.shape();
+        if after == *before {
+            return;
+        }
+        let repaint = |id: egui::ViewportId| {
+            if id != drawn {
+                ctx.request_repaint_of(id);
+            }
+        };
+        // It keeps the windows open, titles them and shows the navigator: a
+        // window opened from another opens on its next pass.
+        repaint(egui::ViewportId::ROOT);
+        for (id, shown, ..) in &after.windows {
+            if before
+                .windows
+                .iter()
+                .any(|(b, s, ..)| b == id && s != shown)
+            {
+                repaint(*id);
+            }
+        }
+        for (id, title) in &after.trends {
+            if before.trends.iter().any(|(b, t)| b == id && t != title) {
+                repaint(trend_viewport(*id));
+            }
+        }
+        if after.dialogs != before.dialogs {
+            for window in after.dialogs.iter().flatten() {
+                repaint(viewport(*window));
+            }
+        }
+    }
+
+    /// A display window's title: its display's, marked when pinned.
+    fn child_title(&self, w: &DisplayWindow) -> String {
+        w.view.screen.as_ref().map_or_else(
+            || "bobview".to_string(),
+            |s| window_title(&s.title, w.pinned && self.can_windows),
+        )
+    }
+
+    /// The open trend windows, (id, title), for a PV's context menu.
+    fn trend_titles(&self) -> Vec<(u64, String)> {
+        self.trends.iter().map(|t| (t.id, t.title())).collect()
+    }
 }
 
 impl BobApp {
+    /// Draw everything in one pass, where windows are embedded (snapshots).
+    #[cfg_attr(
+        target_arch = "wasm32",
+        expect(dead_code, reason = "a browser takes no snapshots")
+    )]
     pub fn draw(&mut self, ui: &mut egui::Ui) {
+        let children = self.draw_main(ui);
+        debug_assert!(
+            children.is_empty(),
+            "windows to draw in passes of their own"
+        );
+    }
+
+    /// The main window's pass, and where windows are embedded the others
+    /// too; else the display and trend windows to keep open, each drawn in
+    /// a pass of its own.
+    fn draw_main(
+        &mut self,
+        ui: &mut egui::Ui,
+    ) -> Vec<(egui::ViewportId, egui::ViewportBuilder, Child)> {
         let ctx = ui.ctx().clone();
+        let embedded = ctx.embed_viewports();
+        let before = self.shape();
+        // Here as well as in `logic`, for snapshots and tests.
+        self.begin_pass(egui::ViewportId::ROOT);
         self.main.poll_loading(&ctx);
-        for w in &mut self.windows {
-            w.view.poll_loading(&ctx);
-        }
         self.poll_launched(&ctx);
         if !self.touch && ui.input(|i| i.any_touches()) {
             self.touch = true;
@@ -1514,7 +1719,7 @@ impl BobApp {
             self.resize_main_by(&ctx, Vec2::new(grow, 0.0));
         }
 
-        let trends: Vec<(u64, String)> = self.trends.iter().map(|t| (t.id, t.title())).collect();
+        let trends = self.trend_titles();
         let vcx = ViewCx {
             window: WindowKey::Main,
             touch: self.touch,
@@ -1536,7 +1741,9 @@ impl BobApp {
         }
 
         let mut requests = drawn.requests;
-        requests.extend(self.display_windows(ui, &trends));
+        if embedded {
+            requests.extend(self.embedded_windows(&ctx, &trends));
+        }
         for (origin, req) in requests {
             self.request(ui.ctx(), origin, req);
         }
@@ -1556,7 +1763,24 @@ impl BobApp {
             &mut self.confirm,
         );
         self.save_as_window(ui);
-        self.trend_windows(ui);
+        let mut children = Vec::new();
+        if embedded {
+            self.embedded_trends(&ctx);
+        } else {
+            // After this pass's requests, which may open or close some.
+            children = self.display_viewports();
+            children.extend(self.trend_viewports(&ctx));
+        }
+        // The windows still open keep what repaints them.
+        let (windows, trends) = (&self.windows, &self.trends);
+        let open = |id: &egui::ViewportId| {
+            *id == egui::ViewportId::ROOT
+                || windows.iter().any(|w| w.id == *id)
+                || trends.iter().any(|t| trend_viewport(t.id) == *id)
+        };
+        self.repaints.retain(|id, _| open(id));
+        self.repaint_changed(&ctx, &before, egui::ViewportId::ROOT);
+        children
     }
 
     /// Make the main window `by` points bigger (or smaller), within its
@@ -1655,14 +1879,14 @@ impl BobApp {
             }
             Request::Trend(names) => {
                 log::info!("trend {}", names.join(", "));
-                self.trends
-                    .push(Trend::new(self.next_trend, &names, &self.pvs));
+                let pvs = self.pvs_for(ctx, trend_viewport(self.next_trend));
+                self.trends.push(Trend::new(self.next_trend, &names, &pvs));
                 self.next_trend += 1;
             }
             Request::TrendAdd(id, names) => {
                 if let Some(trend) = self.trends.iter_mut().find(|t| t.id == id) {
                     log::info!("add {} to trend {id}", names.join(", "));
-                    trend.extend(&names, &self.pvs);
+                    trend.extend(&names);
                     raise_trend(ctx, id);
                 }
             }
@@ -1706,121 +1930,189 @@ impl BobApp {
         }
     }
 
-    /// Each display window in its own native window, until it is closed, or
-    /// in a window inside this one where there's only one native window.
-    /// Returns the requests their widgets made.
-    fn display_windows(
+    /// Each display window in a window inside this one, where there's only
+    /// one native window. Returns the requests their widgets made.
+    fn embedded_windows(
         &mut self,
-        ui: &mut egui::Ui,
+        ctx: &egui::Context,
         trends: &[(u64, String)],
     ) -> Vec<(Origin, Request)> {
-        let ctx = ui.ctx().clone();
         let mut requests = Vec::new();
-        // Closed by Exit or Ctrl+W since they were last drawn.
+        // Closed by Exit since they were last drawn.
         self.windows.retain(|w| !w.close);
-        let (home, touch, auto_size) = (&self.home, self.touch, self.chrome.auto_size);
+        let titles: Vec<String> = self.windows.iter().map(|w| self.child_title(w)).collect();
         let desk = Desk {
-            monitors: self.monitors(&ctx),
+            monitors: self.monitors(ctx),
             pinned: self.pinned_frames(),
         };
-        let (details, confirm) = (&mut self.details, &mut self.confirm);
-        let clock = &mut self.clock;
-        let can_windows = self.can_windows;
-        for w in &mut self.windows {
+        for (w, title) in self.windows.iter_mut().zip(titles) {
+            if let Some(r) = self.repaints.get(&w.id) {
+                r.begin();
+            }
+            w.view.poll_loading(ctx);
             let key = WindowKey::Child(w.id);
             let vcx = ViewCx {
                 window: key,
-                touch,
+                touch: self.touch,
                 trends,
             };
-            let title = w.view.screen.as_ref().map_or_else(
-                || "bobview".to_string(),
-                |s| window_title(&s.title, w.pinned && can_windows),
-            );
-            if ctx.embed_viewports() {
-                let mut open = true;
-                egui::Window::new(&title)
-                    .id(display_window_id(w.id))
-                    .open(&mut open)
-                    .collapsible(false)
-                    .default_size(Vec2::new(640.0, 420.0))
-                    .show(&ctx, |ui| {
-                        requests.extend(child_ui(ui, w, home, &vcx, None, clock, &desk));
-                    });
-                dialogs(&ctx, key, details, confirm);
-                w.close |= !open;
-                continue;
-            }
-            let builder = w.builder.clone().with_title(title);
-            ctx.show_viewport_immediate(w.id, builder, |ui, class| {
-                // No native windows after all: a window in this one.
-                let native = (class != egui::ViewportClass::EmbeddedWindow).then_some(auto_size);
-                requests.extend(child_ui(ui, w, home, &vcx, native, clock, &desk));
-                dialogs(ui.ctx(), key, details, confirm);
-                // Closing the window drops its view, and its PVs with it.
-                if ui.input(|i| i.viewport().close_requested()) {
-                    w.close = true;
-                }
-            });
+            let mut open = true;
+            egui::Window::new(&title)
+                .id(display_window_id(w.id))
+                .open(&mut open)
+                .collapsible(false)
+                .default_size(Vec2::new(640.0, 420.0))
+                .show(ctx, |ui| {
+                    requests.extend(child_ui(
+                        ui,
+                        w,
+                        &self.home,
+                        &vcx,
+                        None,
+                        &mut self.clock,
+                        &desk,
+                    ));
+                });
+            dialogs(ctx, key, &mut self.details, &mut self.confirm);
+            w.close |= !open;
         }
         self.windows.retain(|w| !w.close);
         requests
     }
 
-    /// Each trend in its own native window, until it is closed, or in a
-    /// window inside this one where there's only one native window (the
-    /// browser, snapshots).
-    fn trend_windows(&mut self, ui: &mut egui::Ui) {
-        let pvs = &self.pvs;
-        let ctx = ui.ctx();
-        if ctx.embed_viewports() {
-            let screen = ctx.content_rect();
-            self.trends.retain_mut(|trend| {
-                let mut open = true;
-                // Each new window a little below and right of the one before.
-                let step = (trend.id % 8) as f32 * 24.0;
-                let size = Vec2::new(640.0, 420.0).min(screen.size() * 0.9);
-                egui::Window::new(trend.title())
-                    .id(trend_window_id(trend.id))
-                    .open(&mut open)
-                    .collapsible(false)
-                    .default_pos(screen.left_top() + Vec2::new(40.0, 60.0) + Vec2::splat(step))
-                    .default_size(size)
-                    .show(ctx, |ui| trend.ui(ui, pvs));
-                open
-            });
-            return;
-        }
+    /// Each trend in a window inside this one, where there's only one
+    /// native window (the browser, snapshots).
+    fn embedded_trends(&mut self, ctx: &egui::Context) {
+        let screen = ctx.content_rect();
+        let repaints = &self.repaints;
+        self.trends.retain_mut(|trend| {
+            if let Some(r) = repaints.get(&trend_viewport(trend.id)) {
+                r.begin();
+            }
+            let mut open = true;
+            // Each new window a little below and right of the one before.
+            let step = (trend.id % 8) as f32 * 24.0;
+            let size = Vec2::new(640.0, 420.0).min(screen.size() * 0.9);
+            egui::Window::new(trend.title())
+                .id(trend_window_id(trend.id))
+                .open(&mut open)
+                .collapsible(false)
+                .default_pos(screen.left_top() + Vec2::new(40.0, 60.0) + Vec2::splat(step))
+                .default_size(size)
+                .show(ctx, |ui| trend.ui(ui));
+            open
+        });
+    }
+
+    /// The display windows to keep open, each in its own native window
+    /// until it is closed.
+    fn display_viewports(&mut self) -> Vec<(egui::ViewportId, egui::ViewportBuilder, Child)> {
+        // Closed by Exit or Ctrl+W since they were last drawn.
+        self.windows.retain(|w| !w.close);
+        self.windows
+            .iter()
+            .map(|w| {
+                let builder = w.builder.clone().with_title(self.child_title(w));
+                (w.id, builder, Child::Display(w.id))
+            })
+            .collect()
+    }
+
+    /// The trend windows to keep open, each in its own native window until
+    /// it is closed.
+    fn trend_viewports(
+        &self,
+        ctx: &egui::Context,
+    ) -> Vec<(egui::ViewportId, egui::ViewportBuilder, Child)> {
         // In desktop points: egui's are scaled by its zoom factor.
         let zoom = ctx.zoom_factor();
-        self.trends.retain_mut(|trend| {
-            // The window manager places it, unless a layout says where;
-            // Wayland won't let us.
-            let size = trend
-                .place
-                .size
-                .map_or(Vec2::new(640.0, 420.0), |s| s / zoom);
-            let mut builder = egui::ViewportBuilder::default()
-                .with_title(trend.title())
-                .with_app_id("bobview")
-                .with_inner_size(size)
-                .with_min_inner_size([320.0, 200.0]);
-            if let Some(pos) = trend.place.position {
-                builder = builder.with_position(Pos2::ZERO + pos.to_vec2() / zoom);
-            }
-            ctx.show_viewport_immediate(trend_viewport(trend.id), builder, |ui, class| {
-                if class == egui::ViewportClass::EmbeddedWindow {
-                    // No native windows after all: a window in this one,
-                    // which can't be closed.
-                    trend.ui(ui, pvs);
-                    return true;
+        self.trends
+            .iter()
+            .map(|trend| {
+                // The window manager places it, unless a layout says where;
+                // Wayland won't let us.
+                let size = trend
+                    .place
+                    .size
+                    .map_or(Vec2::new(640.0, 420.0), |s| s / zoom);
+                let mut builder = egui::ViewportBuilder::default()
+                    .with_title(trend.title())
+                    .with_app_id("bobview")
+                    .with_inner_size(size)
+                    .with_min_inner_size([320.0, 200.0]);
+                if let Some(pos) = trend.place.position {
+                    builder = builder.with_position(Pos2::ZERO + pos.to_vec2() / zoom);
                 }
-                trend.geometry = geometry(ui);
-                egui::CentralPanel::default().show(ui, |ui| trend.ui(ui, pvs));
-                // Closing the window drops the trend, and its PVs with it.
-                !ui.input(|i| i.viewport().close_requested())
+                (trend_viewport(trend.id), builder, Child::Trend(trend.id))
             })
-        });
+            .collect()
+    }
+
+    /// The display window `id`'s own pass: it polls its display, and acts
+    /// on its widgets' requests at once.
+    fn display_pass(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: egui::ViewportId,
+        class: egui::ViewportClass,
+    ) {
+        let ctx = ui.ctx().clone();
+        let before = self.shape();
+        // Closed since the main window's last pass, which lets it go.
+        let Some(i) = self.windows.iter().position(|w| w.id == id && !w.close) else {
+            return;
+        };
+        self.begin_pass(id);
+        let trends = self.trend_titles();
+        let desk = Desk {
+            monitors: self.monitors(&ctx),
+            pinned: self.pinned_frames(),
+        };
+        let key = WindowKey::Child(id);
+        let vcx = ViewCx {
+            window: key,
+            touch: self.touch,
+            trends: &trends,
+        };
+        // No native windows after all: a window in the main one.
+        let native =
+            (class != egui::ViewportClass::EmbeddedWindow).then_some(self.chrome.auto_size);
+        let w = &mut self.windows[i];
+        w.view.poll_loading(&ctx);
+        let requests = child_ui(ui, w, &self.home, &vcx, native, &mut self.clock, &desk);
+        dialogs(&ctx, key, &mut self.details, &mut self.confirm);
+        // Closing the window drops its view, and its PVs with it.
+        if ui.input(|i| i.viewport().close_requested()) {
+            w.close = true;
+        }
+        for (origin, req) in requests {
+            self.request(&ctx, origin, req);
+        }
+        self.repaint_changed(&ctx, &before, id);
+    }
+
+    /// The trend `id`'s window's own pass.
+    fn trend_pass(&mut self, ui: &mut egui::Ui, id: u64, class: egui::ViewportClass) {
+        let ctx = ui.ctx().clone();
+        let before = self.shape();
+        let Some(i) = self.trends.iter().position(|t| t.id == id) else {
+            return;
+        };
+        self.begin_pass(trend_viewport(id));
+        let trend = &mut self.trends[i];
+        if class == egui::ViewportClass::EmbeddedWindow {
+            // No native windows after all: a window in the main one, which
+            // can't be closed.
+            trend.ui(ui);
+        } else {
+            trend.geometry = geometry(ui);
+            egui::CentralPanel::default().show(ui, |ui| trend.ui(ui));
+            // Closing the window drops the trend, and its PVs with it.
+            if ui.input(|i| i.viewport().close_requested()) {
+                self.trends.remove(i);
+            }
+        }
+        self.repaint_changed(&ctx, &before, trend_viewport(id));
     }
 }
 
@@ -2989,5 +3281,389 @@ mod tests {
         run(&ctx, &mut app, &mut size, frames);
         assert!(app.restoring.is_none());
         assert_eq!(size, Vec2::new(1200.0, 900.0));
+    }
+
+    /// Runs [`super::App`] as eframe does with native windows: each window's
+    /// pass runs on its own, when a repaint was asked of it (by the repaint
+    /// callback eframe sets) or it has input, the display and trend windows
+    /// through the callbacks the main window's pass registered. Time is
+    /// simulated, so a delayed repaint runs as soon as nothing comes first.
+    struct Desktop {
+        ctx: eframe::egui::Context,
+        app: super::App,
+        /// When each window has asked to be repainted, in simulated seconds.
+        asked: std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<ViewportId, f64>>>,
+        windows: std::collections::HashMap<ViewportId, std::sync::Arc<Callback>>,
+        /// Passes run of each window since the last `count`.
+        passes: std::collections::HashMap<ViewportId, usize>,
+        time: f64,
+        /// The time, for the repaint callback.
+        clock: std::sync::Arc<parking_lot::Mutex<f64>>,
+    }
+
+    type Callback = eframe::egui::viewport::DeferredViewportUiCallback;
+    use eframe::egui::ViewportId;
+
+    impl Desktop {
+        fn new(start: super::Location) -> Self {
+            let ctx = eframe::egui::Context::default();
+            ctx.set_embed_viewports(false);
+            let asked = std::sync::Arc::new(parking_lot::Mutex::new(std::collections::HashMap::<
+                ViewportId,
+                f64,
+            >::new()));
+            let app =
+                super::BobApp::new(&ctx, Some(start), None, crate::chrome::UiScale::Fixed(1.0));
+            let mut desk = Self {
+                ctx,
+                app: super::App::new(app),
+                asked,
+                windows: Default::default(),
+                passes: Default::default(),
+                time: 0.0,
+                clock: Default::default(),
+            };
+            let (asked, clock) = (desk.asked.clone(), desk.clock.clone());
+            desk.ctx.set_request_repaint_callback(move |info| {
+                let due = *clock.lock() + info.delay.as_secs_f64().min(1e6);
+                let mut asked = asked.lock();
+                let at = asked.entry(info.viewport_id).or_insert(due);
+                *at = at.min(due);
+            });
+            desk.pass(ViewportId::ROOT, Vec::new());
+            desk
+        }
+
+        /// Where each window is on the desktop: side by side.
+        fn rect(id: ViewportId) -> eframe::egui::Rect {
+            use eframe::egui::{Pos2, Rect, Vec2};
+            let i = if id == ViewportId::ROOT {
+                0.0
+            } else {
+                1.0 + (id.0.value() % 7) as f32
+            };
+            Rect::from_min_size(Pos2::new(i * 10.0, i * 10.0), Vec2::new(500.0, 400.0))
+        }
+
+        /// One pass of the window `id`, with `events` as its input.
+        fn pass(&mut self, id: ViewportId, events: Vec<eframe::egui::Event>) {
+            use eframe::egui;
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Self::rect(id).size());
+            let mut input = egui::RawInput {
+                viewport_id: id,
+                screen_rect: Some(screen),
+                time: Some(self.time),
+                events,
+                ..Default::default()
+            };
+            for vp in std::iter::once(ViewportId::ROOT).chain(self.windows.keys().copied()) {
+                let info = input.viewports.entry(vp).or_default();
+                info.parent = (vp != ViewportId::ROOT).then_some(ViewportId::ROOT);
+                info.native_pixels_per_point = Some(1.0);
+                info.inner_rect = Some(Self::rect(vp));
+                info.outer_rect = Some(Self::rect(vp));
+                info.monitor_size = Some(egui::Vec2::new(1920.0, 1080.0));
+            }
+            *self.clock.lock() = self.time;
+            self.asked.lock().remove(&id);
+            let mut output = if id == ViewportId::ROOT {
+                self.ctx.run_ui(input, |ui| self.app.draw(ui))
+            } else {
+                let Some(cb) = self.windows.get(&id).cloned() else {
+                    return;
+                };
+                self.ctx.run_ui(input, |ui| cb(ui))
+            };
+            output.textures_delta.clear();
+            *self.passes.entry(id).or_default() += 1;
+            // The windows still open, a new one drawn at once.
+            let open: Vec<ViewportId> = output.viewport_output.keys().copied().collect();
+            self.windows.retain(|vp, _| open.contains(vp));
+            for (vp, out) in output.viewport_output {
+                if let Some(cb) = out.viewport_ui_cb
+                    && self.windows.insert(vp, cb).is_none()
+                {
+                    self.asked.lock().insert(vp, self.time);
+                }
+            }
+        }
+
+        /// Run the passes asked for until none is due within half a second
+        /// (a trend scrolls once a second).
+        fn settle(&mut self) {
+            for _ in 0..2000 {
+                let next = {
+                    let asked = self.asked.lock();
+                    asked.values().copied().fold(f64::INFINITY, f64::min)
+                };
+                if next > self.time + 0.5 {
+                    return;
+                }
+                self.time = self.time.max(next);
+                // The main window first, as it opens and closes the others.
+                let mut due: Vec<ViewportId> = self
+                    .asked
+                    .lock()
+                    .iter()
+                    .filter(|(_, at)| **at <= self.time)
+                    .map(|(id, _)| *id)
+                    .collect();
+                due.sort_by_key(|id| *id != ViewportId::ROOT);
+                for id in due {
+                    self.pass(id, Vec::new());
+                }
+                // A frame's time; displays load, and images are read, on
+                // threads.
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                self.time += 1.0 / 60.0;
+            }
+            panic!("the windows never stop repainting");
+        }
+
+        /// The passes of each window since the last call.
+        fn count(&mut self) -> std::collections::HashMap<ViewportId, usize> {
+            std::mem::take(&mut self.passes)
+        }
+
+        /// The display windows, in the order they opened.
+        fn children(&self) -> Vec<ViewportId> {
+            self.app.0.lock().windows.iter().map(|w| w.id).collect()
+        }
+    }
+
+    /// A display of a text update on each PV of `pvs`, and an action button
+    /// over its top left that opens `link`.
+    fn pv_display(dir: &std::path::Path, name: &str, pvs: &[&str], link: &str) -> super::Location {
+        let mut widgets = String::new();
+        for (i, pv) in pvs.iter().enumerate() {
+            widgets += &format!(
+                r#"<widget type="textupdate" version="2.0.0"><name>t{i}</name><pv_name>{pv}</pv_name><x>10</x><y>{}</y><width>100</width><height>20</height></widget>"#,
+                60 + 30 * i
+            );
+        }
+        let file = dir.join(format!("{name}.bob"));
+        std::fs::write(
+            &file,
+            format!(
+                r#"<display version="2.0.0"><name>{name}</name><width>200</width><height>150</height>
+<widget type="action_button" version="3.0.0"><name>link</name><actions><action type="open_display"><file>{link}</file><target>replace</target></action></actions><x>0</x><y>0</y><width>200</width><height>50</height></widget>
+{widgets}</display>"#
+            ),
+        )
+        .unwrap();
+        super::Location {
+            source: bob::Source::File(file),
+            macros: bob::Macros::default(),
+        }
+    }
+
+    /// The main window showing M, and display windows showing A and B,
+    /// opened from it; A and B both show the PV `shared`.
+    fn three_windows(tag: &str) -> (Desktop, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("bobview-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pv = |n: &str| format!("loc://{tag}_{n}(0)");
+        let m = pv_display(&dir, "m", &[&pv("m")], "c.bob");
+        let a = pv_display(&dir, "a", &[&pv("a"), &pv("shared")], "c.bob");
+        let b = pv_display(&dir, "b", &[&pv("b"), &pv("shared")], "c.bob");
+        pv_display(&dir, "c", &[&pv("c")], "a.bob");
+        pv_display(&dir, "m2", &[&pv("m2")], "a.bob");
+        let mut desk = Desktop::new(m);
+        desk.settle();
+        for loc in [a, b] {
+            let origin = super::Origin {
+                window: super::WindowKey::Main,
+                ctrl: false,
+                shift: true,
+            };
+            let req = crate::widgets::Request::Open {
+                source: loc.source,
+                macros: loc.macros,
+                target: "replace".into(),
+            };
+            desk.app.0.lock().request(&desk.ctx, origin, req);
+        }
+        desk.asked.lock().insert(ViewportId::ROOT, desk.time);
+        desk.settle();
+        assert_eq!(desk.children().len(), 2);
+        assert_eq!(
+            desk.windows.len(),
+            2,
+            "each display window drawn on its own"
+        );
+        (desk, dir)
+    }
+
+    #[test]
+    fn the_pointer_in_one_window_redraws_only_that_window() {
+        use eframe::egui::{Event, Pos2};
+        let (mut desk, dir) = three_windows("pointer");
+        let [a, b] = desk.children()[..] else {
+            unreachable!()
+        };
+        desk.count();
+        for i in 0..20 {
+            let pos = Pos2::new(100.0 + i as f32 * 5.0, 200.0);
+            desk.pass(a, vec![Event::PointerMoved(pos)]);
+            desk.settle();
+        }
+        let passes = desk.count();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(passes.get(&a).is_some_and(|n| *n >= 20), "{passes:?}");
+        assert_eq!(passes.get(&ViewportId::ROOT), None, "{passes:?}");
+        assert_eq!(passes.get(&b), None, "{passes:?}");
+    }
+
+    #[test]
+    fn a_pv_change_repaints_only_the_windows_showing_it() {
+        let (mut desk, dir) = three_windows("pvchange");
+        let [a, b] = desk.children()[..] else {
+            unreachable!()
+        };
+        let pvs = desk.app.0.lock().pvs.clone();
+        let write = |desk: &mut Desktop, name: &str, value: &str| {
+            desk.count();
+            pvs.subscribe(&format!("loc://pvchange_{name}(0)"))
+                .write(value);
+            desk.settle();
+            desk.count()
+        };
+        let passes = write(&mut desk, "a", "1");
+        assert!(passes.contains_key(&a), "{passes:?}");
+        assert!(
+            !passes.contains_key(&b) && !passes.contains_key(&ViewportId::ROOT),
+            "{passes:?}"
+        );
+        let passes = write(&mut desk, "shared", "1");
+        assert!(
+            passes.contains_key(&a) && passes.contains_key(&b),
+            "{passes:?}"
+        );
+        assert!(!passes.contains_key(&ViewportId::ROOT), "{passes:?}");
+        let passes = write(&mut desk, "m", "1");
+        assert!(passes.contains_key(&ViewportId::ROOT), "{passes:?}");
+        assert!(
+            !passes.contains_key(&a) && !passes.contains_key(&b),
+            "{passes:?}"
+        );
+        // Many changes at once: still a few passes, not one each.
+        desk.count();
+        for i in 0..50 {
+            pvs.subscribe("loc://pvchange_a(0)").write(i.to_string());
+        }
+        desk.settle();
+        let passes = desk.count();
+        assert!(passes.get(&a).is_some_and(|n| *n <= 3), "{passes:?}");
+        // A trend window is one too.
+        let origin = super::Origin::default();
+        let req = crate::widgets::Request::Trend(vec!["loc://pvchange_b(0)".into()]);
+        desk.app.0.lock().request(&desk.ctx, origin, req);
+        desk.asked.lock().insert(ViewportId::ROOT, desk.time);
+        desk.settle();
+        let trend = super::trend_viewport(0);
+        assert!(desk.windows.contains_key(&trend));
+        let passes = write(&mut desk, "b", "2");
+        assert!(
+            passes.contains_key(&b) && passes.contains_key(&trend),
+            "{passes:?}"
+        );
+        assert!(
+            !passes.contains_key(&a) && !passes.contains_key(&ViewportId::ROOT),
+            "{passes:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn windows_opened_or_changed_from_another_are_drawn() {
+        use eframe::egui::{Event, Modifiers, PointerButton, Pos2};
+        let (mut desk, dir) = three_windows("opened");
+        let [a, b] = desk.children()[..] else {
+            unreachable!()
+        };
+        // Shift+click A's link: a new window, which the main window opens on
+        // its next pass.
+        let pos = Pos2::new(10.0, 10.0);
+        let click = |pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::SHIFT,
+        };
+        desk.count();
+        let shift = Event::ModifiersChanged(Modifiers::SHIFT);
+        desk.pass(a, vec![shift, Event::PointerMoved(pos), click(true)]);
+        desk.pass(a, vec![click(false)]);
+        desk.pass(a, vec![Event::ModifiersChanged(Modifiers::NONE)]);
+        desk.settle();
+        let passes = desk.count();
+        let children = desk.children();
+        assert_eq!(children.len(), 3, "{passes:?}");
+        let c = children[2];
+        assert!(desk.windows.contains_key(&c), "the new window is open");
+        assert!(
+            passes.contains_key(&ViewportId::ROOT) && passes.contains_key(&c),
+            "{passes:?}"
+        );
+        assert!(!passes.contains_key(&b), "{passes:?}");
+
+        // The main window's link goes to the viewer, C, which is repainted
+        // to show it, from the main window's pass (a finished command).
+        let to = |name: &str| super::Location {
+            source: bob::Source::File(dir.join(format!("{name}.bob"))),
+            macros: bob::Macros::default(),
+        };
+        {
+            let app = desk.app.0.lock();
+            let done = super::Launched {
+                key: (None, None, "x".into()),
+                origin: super::Origin::default(),
+                shown: app.main.shown,
+                target: Some(to("a")),
+            };
+            app.launched.0.send(done).unwrap();
+        }
+        // A was raised: it shows that display already.
+        desk.asked.lock().insert(ViewportId::ROOT, desk.time);
+        desk.settle();
+        let passes = desk.count();
+        assert!(!passes.contains_key(&b), "{passes:?}");
+        // Now one no window shows.
+        {
+            let app = desk.app.0.lock();
+            let done = super::Launched {
+                key: (None, None, "y".into()),
+                origin: super::Origin::default(),
+                shown: app.main.shown,
+                target: Some(to("m2")),
+            };
+            app.launched.0.send(done).unwrap();
+        }
+        desk.asked.lock().insert(ViewportId::ROOT, desk.time);
+        desk.settle();
+        let passes = desk.count();
+        let app = desk.app.0.lock();
+        let viewer = app
+            .windows
+            .iter()
+            .find(|w| w.view.current == Some(to("m2")));
+        let viewer = viewer.map(|w| w.id).expect("shown in the viewer");
+        assert!(passes.contains_key(&viewer), "{passes:?}");
+        assert!(!passes.contains_key(&b) || viewer == b, "{passes:?}");
+        drop(app);
+
+        // Ctrl+W in a window: the main window lets it go.
+        let ctrl_w = Event::Key {
+            key: eframe::egui::Key::W,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::COMMAND,
+        };
+        desk.pass(c, vec![ctrl_w]);
+        desk.settle();
+        assert_eq!(desk.children().len(), 2);
+        assert!(!desk.windows.contains_key(&c));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

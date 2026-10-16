@@ -363,7 +363,10 @@ the window's pin, and a chevron that shows or hides the toolbar, as
 background (which also has Close) do. In
 every window Ctrl+R reloads, Alt+← and Alt+→ go back and forward, and
 Ctrl+W closes the window. Closing the main window quits bobview and closes
-its windows.
+its windows. Each window is redrawn on its own: for its own input, and when
+a PV its display shows changes (at most 10 times a second), not when
+another window is. That matters most over `ssh -X`, where each redraw sends
+the whole window over the network.
 
 ### Navigator
 

@@ -46,7 +46,9 @@ impl Image {
 }
 
 enum Entry {
-    Loading,
+    /// Being read, for the windows that asked for it, each repainted when
+    /// it has been.
+    Loading(Vec<egui::ViewportId>),
     Ready(Image),
     Failed,
 }
@@ -117,20 +119,29 @@ pub fn loading() -> bool {
         .lock()
         .entries
         .values()
-        .any(|e| matches!(e, Entry::Loading))
+        .any(|e| matches!(e, Entry::Loading(_)))
 }
 
 /// The image at `source`: `Some(Ok)` when loaded, `Some(Err)` when it cannot
 /// be, and `None` while it loads (a repaint follows when it has).
 fn image(ctx: &egui::Context, source: &Source) -> Option<Result<Image, ()>> {
     let mut images = IMAGES.lock();
-    match images.entries.get(source) {
+    // The window being drawn (each draws in a pass of its own).
+    let viewport = ctx.viewport_id();
+    match images.entries.get_mut(source) {
         Some(Entry::Ready(img)) => return Some(Ok(img.clone())),
         Some(Entry::Failed) => return Some(Err(())),
-        Some(Entry::Loading) => return None,
+        Some(Entry::Loading(waiting)) => {
+            if !waiting.contains(&viewport) {
+                waiting.push(viewport);
+            }
+            return None;
+        }
         None => {}
     }
-    images.entries.insert(source.clone(), Entry::Loading);
+    images
+        .entries
+        .insert(source.clone(), Entry::Loading(vec![viewport]));
     let job = Job {
         source: source.clone(),
         generation: images.generation,
@@ -178,11 +189,18 @@ fn finish(job: Job, data: Result<Vec<u8>, bob::Error>) {
     };
     let entry = std::panic::catch_unwind(read).unwrap_or(Entry::Failed);
     let mut images = IMAGES.lock();
-    if images.generation == job.generation {
-        images.entries.insert(job.source, entry);
+    // Not `request_repaint`: on this thread that is whichever window is
+    // being drawn now.
+    let mut waiting = Vec::new();
+    if images.generation == job.generation
+        && let Some(Entry::Loading(w)) = images.entries.insert(job.source, entry)
+    {
+        waiting = w;
     }
     drop(images);
-    job.ctx.request_repaint();
+    for viewport in waiting {
+        job.ctx.request_repaint_of(viewport);
+    }
 }
 
 fn describe(source: &Source) -> String {
