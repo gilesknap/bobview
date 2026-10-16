@@ -2108,6 +2108,15 @@ pub(crate) fn alarm_border(painter: &egui::Painter, w: &Widget, s: &PvState, rec
     if w.bool("border_alarm_sensitive") == Some(false) {
         return;
     }
+    // A BOY widget (from an `.opi` file) drew INVALID and disconnected
+    // solid white, DLS's BOY INVALID colour.
+    if w.bool("boy_alarm_border") == Some(true)
+        && (!s.connected || s.severity == pv::Severity::Invalid)
+    {
+        let width = (2.0 * z).max(1.0);
+        outline(painter, rect.expand(width), width, Color32::WHITE);
+        return;
+    }
     let c = if s.connected {
         severity_color(s.severity)
     } else {

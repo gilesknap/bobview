@@ -459,6 +459,7 @@ fn widget(mut el: Element) -> Vec<Element> {
     el.children.extend(scripts);
     let mut children: Vec<Element> = kids.into_iter().flat_map(widget).collect();
 
+    alarm_sensitive(&mut el);
     let kind = kind(&short, &el);
     for (from, to) in renames(&short, &kind) {
         rename(&mut el, from, to);
@@ -1484,6 +1485,57 @@ fn visible_rule(pv: String) -> Element {
         .with_child(Element::with_text("pv_name", pv))
 }
 
+/// BOY's alarm-sensitive foreground and background colours as rules on the
+/// widget's PV (as Phoebus imports them), in DLS's BOY alarm colours:
+/// MINOR yellow, MAJOR red and INVALID (or disconnected) white. Written as
+/// BOY rules, before [`rules`] and the renames translate them. An
+/// alarm-sensitive border gets the bobview-only `<boy_alarm_border>`, which
+/// draws INVALID and disconnected solid white rather than Phoebus's dashed
+/// DISCONNECTED.
+fn alarm_sensitive(el: &mut Element) {
+    if !text(el, "pv_name").is_some_and(|p| !p.is_empty()) {
+        return;
+    }
+    if flag(el, "border_alarm_sensitive") != Some(false) {
+        set(el, "boy_alarm_border", true);
+    }
+    for (sensitive, prop) in [
+        ("forecolor_alarm_sensitive", "foreground_color"),
+        ("backcolor_alarm_sensitive", "background_color"),
+    ] {
+        if el.take_child(sensitive).map(|f| f.text.trim() == "true") != Some(true) {
+            continue;
+        }
+        let mut rule = Element::new("rule")
+            .with_attr("name", sensitive)
+            .with_attr("prop_id", prop)
+            .with_attr("out_exp", "false");
+        // BOY's numbering: 1 MAJOR, 2 MINOR, -1 INVALID.
+        for (sev, name, [r, g, b]) in [
+            (1, "Major", [255, 0, 0]),
+            (2, "Minor", [255, 241, 0]),
+            (-1, "Invalid", [255, 255, 255]),
+        ] {
+            let color = Element::new("color")
+                .with_attr("name", name)
+                .with_attr("red", r.to_string())
+                .with_attr("green", g.to_string())
+                .with_attr("blue", b.to_string());
+            rule.children.push(
+                Element::new("exp")
+                    .with_attr("bool_exp", format!("pvSev0=={sev}"))
+                    .with_child(Element::new("value").with_child(color)),
+            );
+        }
+        rule.children
+            .push(Element::with_text("pv", "$(pv_name)").with_attr("trig", "true"));
+        match el.child_mut("rules") {
+            Some(rules) => rules.children.push(rule),
+            None => el.children.push(Element::new("rules").with_child(rule)),
+        }
+    }
+}
+
 /// BOY rules as `.bob` rules: `<pv>` is `<pv_name>`, BOY severities are
 /// `pvLegacySev` (as Phoebus patches them), the widget's own value
 /// (`widget.getValue()`) is its PV as one more rule PV (or 0 if it has
@@ -1733,6 +1785,49 @@ menumap {
         assert_eq!(g.color("line_color").unwrap().r, 5);
         assert_eq!(g.children[0].kind, "label");
         assert_eq!(g.children[0].text("text"), Some("in"));
+    }
+
+    #[test]
+    fn alarm_sensitive_colours_are_rules_on_the_pv() {
+        let w = one(
+            "TextUpdate",
+            r#"<pv_name>X</pv_name><forecolor_alarm_sensitive>true</forecolor_alarm_sensitive>
+            <backcolor_alarm_sensitive>false</backcolor_alarm_sensitive><border_alarm_sensitive>true</border_alarm_sensitive>
+            <rules><rule name="r" prop_id="visible" out_exp="false"><exp bool_exp="pv0==1"><value>false</value></exp><pv trig="true">Y</pv></rule></rules>"#,
+        );
+        assert_eq!(w.bool("boy_alarm_border"), Some(true));
+        let rules = w.rules();
+        assert_eq!(rules.len(), 2);
+        let r = &rules[1];
+        assert_eq!(r.prop_id, "foreground_color");
+        assert_eq!(r.pv_names, ["$(pv_name)"]);
+        assert!(!r.check_connections);
+        let sev: Vec<_> = r.exprs.iter().map(|e| e.condition.as_str()).collect();
+        assert_eq!(
+            sev,
+            ["pvLegacySev0==1", "pvLegacySev0==2", "pvLegacySev0==-1"]
+        );
+        let rgba =
+            |i: usize| crate::Color::from_element(r.exprs[i].value.child("color").unwrap()).rgba();
+        assert_eq!(rgba(0), [255, 0, 0, 255]);
+        assert_eq!(rgba(1), [255, 241, 0, 255]);
+        assert_eq!(rgba(2), [255, 255, 255, 255]);
+
+        // A polyline's background is its line, and the rule follows it.
+        let w = one(
+            "polyline",
+            r#"<pv_name>X</pv_name><backcolor_alarm_sensitive>true</backcolor_alarm_sensitive>
+            <border_alarm_sensitive>false</border_alarm_sensitive>"#,
+        );
+        assert_eq!(w.rules()[0].prop_id, "line_color");
+        assert_eq!(w.get("boy_alarm_border"), None);
+        // Without a PV there is no alarm.
+        let w = one(
+            "TextUpdate",
+            r#"<pv_name></pv_name><forecolor_alarm_sensitive>true</forecolor_alarm_sensitive>"#,
+        );
+        assert!(w.rules().is_empty());
+        assert_eq!(w.get("boy_alarm_border"), None);
     }
 
     #[test]
