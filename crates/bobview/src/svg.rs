@@ -68,7 +68,7 @@ pub fn parse(data: &[u8]) -> Result<usvg::Tree, String> {
         return Err("SVG nests elements or references too deeply".into());
     }
     if cost.work > MAX_WORK {
-        return Err("SVG repeats references too often".into());
+        return Err("SVG is too large or complex".into());
     }
     // How deep the XML being parsed is so far, and how much has been
     // converted, embedded SVGs included.
@@ -101,7 +101,7 @@ pub fn parse(data: &[u8]) -> Result<usvg::Tree, String> {
                     }
                     let work = worked.load(Ordering::Relaxed).saturating_add(cost.work);
                     if work > MAX_WORK {
-                        log::warn!("embedded SVG is not shown: too much to convert");
+                        log::warn!("embedded SVG is not shown: too large or complex");
                         return None;
                     }
                     worked.store(work, Ordering::Relaxed);
@@ -1137,8 +1137,15 @@ mod tests {
             let doc = parse_xml(&svg).unwrap();
             assert!(svg_cost(&doc).work > MAX_WORK, "{}", svg_cost(&doc).work);
             let e = parse(svg.as_bytes()).err();
-            assert_eq!(e.as_deref(), Some("SVG repeats references too often"));
+            assert_eq!(e.as_deref(), Some("SVG is too large or complex"));
         }
+        // So is a big SVG without references.
+        let big = format!(
+            "{SVG}{}</svg>",
+            r#"<rect width="1" height="1"/>"#.repeat(MAX_WORK)
+        );
+        let e = parse(big.as_bytes()).err();
+        assert_eq!(e.as_deref(), Some("SVG is too large or complex"));
         // A few repeats are fine.
         let svg = levels(
             3,
