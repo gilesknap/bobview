@@ -232,6 +232,9 @@ enum Expr {
     Not(Box<Expr>),
     Neg(Box<Expr>),
     Bin(Box<Expr>, String, Box<Expr>),
+    /// A Python chained comparison, `a < b < c`: one more operand than
+    /// comparisons.
+    Chain(Vec<Expr>, Vec<String>),
     Call(Func, Vec<Expr>),
 }
 
@@ -440,6 +443,21 @@ fn eval(e: &Expr, env: &Env) -> Val {
                 _ => {}
             }
             binary(&a, op, &eval(b, env), env.lang)
+        }
+        // As Python, each operand is evaluated once, left to right, and
+        // the first false comparison stops the chain.
+        Expr::Chain(operands, ops) => {
+            let mut a = eval(&operands[0], env);
+            let mut result = Val::Bool(true);
+            for (op, b) in ops.iter().zip(&operands[1..]) {
+                let b = eval(b, env);
+                result = binary(&a, op, &b, env.lang);
+                if !result.truthy() {
+                    break;
+                }
+                a = b;
+            }
+            result
         }
     }
 }
@@ -765,21 +783,30 @@ impl Parser {
         }
         let ops = levels[level];
         let mut lhs = self.binary(level + 1)?;
-        // Python chains comparisons: `a < b < c` is `a < b and b < c`.
-        let chain = self.lang == Lang::Python && ops == COMPARISONS;
-        let mut last = lhs.clone();
-        let mut chained = false;
+        // Python chains comparisons: `a < b < c` is `a < b and b < c`, with
+        // `b` evaluated once.
+        if self.lang == Lang::Python && ops == COMPARISONS {
+            let mut operands = vec![lhs];
+            let mut chain_ops = Vec::new();
+            while let Some(op) = self.op().filter(|op| ops.contains(op)).map(str::to_string) {
+                self.pos += 1;
+                chain_ops.push(op);
+                operands.push(self.binary(level + 1)?);
+            }
+            return Some(match chain_ops.len() {
+                0 => operands.pop()?,
+                1 => {
+                    let b = operands.pop()?;
+                    let a = operands.pop()?;
+                    Expr::Bin(Box::new(a), chain_ops.pop()?, Box::new(b))
+                }
+                _ => Expr::Chain(operands, chain_ops),
+            });
+        }
         while let Some(op) = self.op().filter(|op| ops.contains(op)).map(str::to_string) {
             self.pos += 1;
             let rhs = self.binary(level + 1)?;
-            if chain && chained {
-                let next = Expr::Bin(Box::new(last), op, Box::new(rhs.clone()));
-                lhs = Expr::Bin(Box::new(lhs), "&&".into(), Box::new(next));
-            } else {
-                lhs = Expr::Bin(Box::new(lhs), op, Box::new(rhs.clone()));
-            }
-            last = rhs;
-            chained = chain;
+            lhs = Expr::Bin(Box::new(lhs), op, Box::new(rhs));
         }
         Some(lhs)
     }
@@ -899,6 +926,28 @@ mod tests {
             .unwrap()
             .join()
             .unwrap()
+    }
+
+    #[test]
+    fn nested_chained_comparisons_parse_in_linear_time() {
+        // Each level's middle operand is the next chain; copying it into
+        // both comparisons would double the tree at every level.
+        let mut e = String::from("1");
+        for _ in 0..40 {
+            e = format!("(0 < {e} < 2)");
+        }
+        let start = std::time::Instant::now();
+        let parsed = small_stack(move || parse(&e, Lang::Python));
+        assert!(parsed.is_some());
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        let env = Env {
+            states: &[],
+            lang: Lang::Python,
+        };
+        assert!(eval(&parsed.unwrap(), &env).truthy());
+        // The first false comparison decides, as in Python.
+        assert_eq!(run("3 > 2 > 2 > 1", &[]), Val::Bool(false));
+        assert_eq!(run("1 < 3 > 2 != 5", &[]), Val::Bool(true));
     }
 
     #[test]
