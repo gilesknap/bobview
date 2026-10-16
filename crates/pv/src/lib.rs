@@ -226,9 +226,15 @@ impl Pv {
     }
 
     /// Write text as Phoebus does for a widget whose `format` is string: into
-    /// an array of numbers, such as a CA char waveform, as a long string (see
-    /// [`long_string_bytes`]), cut to the PV's element count where the
-    /// backend knows it. Any other PV is written as by [`Pv::write`].
+    /// a char array as a long string (see [`long_string_bytes`]). Any other
+    /// PV is written as by [`Pv::write`].
+    ///
+    /// Over CA, as in Phoebus, a char array is a `DBF_CHAR` channel of more
+    /// than one element, and the text is cut to that element count with its
+    /// NUL kept. Over PVA and `loc://` it is any array of numbers. A PVA
+    /// array has no fixed element count to cut to, so an IOC that stores
+    /// only its first NELM elements may lose the NUL (and part of a
+    /// multi-byte character), as it does with Phoebus.
     pub fn write_long_string(&self, value: impl Into<String>) {
         self.put(value.into(), true);
     }

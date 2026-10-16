@@ -71,6 +71,22 @@ fn char_waveforms_take_long_strings() {
     ca.write("/plain");
     reads(&ca, "/plain");
 
+    // An empty one leaves the array holding just the NUL, which CA sends as
+    // a scalar: it stays an array, and a long string can still be written.
+    ca.write_long_string("");
+    reads(&ca, "");
+    assert_eq!(ca.state().value, pv::Value::LongArray(vec![0].into()));
+    ca.write_long_string("/after/empty");
+    reads(&ca, "/after/empty");
+
+    // Phoebus splits a list of numbers on commas only, and its numbers are
+    // finite, so these are text too.
+    ca.write("nan");
+    reads(&ca, "nan");
+    ca.write("1 2");
+    reads(&ca, "1 2");
+    assert_eq!(ca.state().write_error, None);
+
     pva.write_long_string("/over/pva");
     reads(&pva, "/over/pva");
     reads(&ca, "/over/pva");

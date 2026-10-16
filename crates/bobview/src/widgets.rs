@@ -621,6 +621,16 @@ pub(crate) fn format_value(w: &Widget, s: &PvState) -> String {
     let format = w.i64("format").unwrap_or(0);
     match (format, &s.value) {
         (STRING_FORMAT, v) if v.is_numeric_array() => v.as_long_string().unwrap_or_default(),
+        // A number as the character of its low byte, as Phoebus shows it.
+        (STRING_FORMAT, Value::Long(_) | Value::Double(_)) => {
+            let byte = s.value.as_i64().unwrap_or(0) as u8;
+            let text = pv::long_string([byte]);
+            if units && !s.units.is_empty() {
+                format!("{text} {}", s.units)
+            } else {
+                text
+            }
+        }
         (4, v) if v.as_i64().is_some() => format!("0x{:X}", v.as_i64().unwrap_or(0)),
         (10, v) if v.as_i64().is_some() => format!("0b{:b}", v.as_i64().unwrap_or(0)),
         (2, Value::Double(v)) => {
@@ -1122,11 +1132,11 @@ fn text_entry(
         node.edit = Some(buf);
     } else if resp.lost_focus() {
         if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            let text = buf.trim().to_string();
+            // Phoebus keeps the spaces of text written as a string.
             if writes_long_string(&node.w) {
-                write_with(node, |pv| pv.write_long_string(text));
+                write_with(node, |pv| pv.write_long_string(buf));
             } else {
-                write(node, text);
+                write(node, buf.trim().to_string());
             }
         }
         node.edit = None;
@@ -2412,7 +2422,18 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(format_value(&string, &text), "a b");
-        assert_eq!(format_value(&string, &state(65, true)), "65");
+        // A number shows as the character of its low byte, as in Phoebus,
+        // and NUL as nothing.
+        assert_eq!(format_value(&string, &state(65, true)), "A");
+        assert_eq!(format_value(&string, &state(0x141, true)), "A");
+        assert_eq!(format_value(&string, &state(0, true)), "");
+        let double = PvState {
+            connected: true,
+            value: Value::Double(104.7),
+            units: "mm".into(),
+            ..Default::default()
+        };
+        assert_eq!(format_value(&string, &double), "h mm");
     }
 
     #[test]

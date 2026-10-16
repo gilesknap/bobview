@@ -14,26 +14,30 @@ use crate::{Put, Severity, Shared, Value, Writer};
 /// `caput -S` does; the server converts it to the field's own type.
 const DBR_CHAR: u16 = 4;
 
-/// Whether to write `put` as a long string to a PV holding `value`, whose
-/// native type and element count are `native` and `count`.
+/// Whether to write `put` as a long string to a PV whose native type and
+/// element count are `native` and `count`, as Phoebus's CA layer decides
+/// it for text: when the PV is a char array (`DBF_CHAR`, more than one
+/// element). That depends on the channel, not on the value last read, which
+/// for an array holding one element can arrive as a scalar.
 ///
-/// With a string `format` it is one when the PV holds an array of numbers.
-/// Otherwise, as Phoebus's CA layer does, it is one when the PV is a char
-/// array and the text is not a list of numbers, which could not be
-/// written as an array anyway.
-fn as_long_string(
-    put: &Put,
-    value: &Value,
-    native: Option<DbFieldType>,
-    count: Option<usize>,
-) -> bool {
-    if put.long_string {
-        return value.is_numeric_array();
-    }
-    let items = crate::split_array(&put.text);
-    native == Some(DbFieldType::Char)
-        && count.is_some_and(|n| n > 1)
-        && (items.is_empty() || items.iter().any(|x| x.parse::<f64>().is_err()))
+/// With a string `format` all text is written so. Otherwise text that is a
+/// list of numbers is written as numbers, as Phoebus parses a text entry's
+/// text for an array; its list splits on commas only, and its numbers are
+/// finite, so `1 2`, `nan` or `inf` are text, as in Phoebus.
+fn as_long_string(put: &Put, native: Option<DbFieldType>, count: Option<usize>) -> bool {
+    let char_array = matches!(native, Some(DbFieldType::Char | DbFieldType::UChar))
+        && count.is_some_and(|n| n > 1);
+    char_array && (put.long_string || !is_number_list(&put.text))
+}
+
+/// Whether `text` is a list of finite numbers, `[1, 2]` or `1,2`, as
+/// Phoebus's `FormatOptionHandler.parse` reads one for an array.
+fn is_number_list(text: &str) -> bool {
+    let t = text.trim();
+    let t = t.strip_prefix('[').unwrap_or(t);
+    let t = t.strip_suffix(']').unwrap_or(t);
+    t.split(',')
+        .all(|x| x.trim().parse::<f64>().is_ok_and(f64::is_finite))
 }
 
 pub(crate) async fn run(client: &CaClient, pv: &str, shared: Arc<Shared>) {
@@ -71,7 +75,7 @@ pub(crate) async fn run(client: &CaClient, pv: &str, shared: Arc<Shared>) {
                 Err(broadcast::error::RecvError::Closed) => return,
             },
             update = monitor.recv() => match update {
-                Some(Ok(snap)) => apply(&shared, &snap, false),
+                Some(Ok(snap)) => apply(&shared, &channel, &snap, false),
                 Some(Err(e)) => {
                     log::debug!("{pv}: {e}");
                     shared.update(|s| s.connected = false);
@@ -88,7 +92,7 @@ pub(crate) async fn run(client: &CaClient, pv: &str, shared: Arc<Shared>) {
                 // returns to 0, and the IOC queues any later put-callback on
                 // that record behind it, so Stop could never reach it.
                 // Sent here, not on a spawned task, so writes keep their order.
-                let result = if as_long_string(&put, &value, native, count) {
+                let result = if as_long_string(&put, native, count) {
                     let bytes = crate::long_string_bytes(text, count);
                     channel
                         .put_as_dbr_nowait(DBR_CHAR, &EpicsValue::CharArray(bytes.into()))
@@ -119,7 +123,7 @@ pub(crate) async fn run(client: &CaClient, pv: &str, shared: Arc<Shared>) {
 /// Read units, precision, limits and enum labels once per connection.
 async fn fetch_metadata(channel: &CaChannel, shared: &Shared) {
     match channel.get_with_metadata(DbrClass::Ctrl).await {
-        Ok(snap) => apply(shared, &snap, true),
+        Ok(snap) => apply(shared, channel, &snap, true),
         Err(e) => {
             log::debug!("metadata read failed: {e}");
             shared.update(|s| s.connected = true);
@@ -127,8 +131,14 @@ async fn fetch_metadata(channel: &CaChannel, shared: &Shared) {
     }
 }
 
-fn apply(shared: &Shared, snap: &Snapshot, metadata: bool) {
-    let value = convert(&snap.value);
+fn apply(shared: &Shared, channel: &CaChannel, snap: &Snapshot, metadata: bool) {
+    let mut value = convert(&snap.value);
+    // An array holding one element arrives as a scalar; keep it an array,
+    // as Phoebus does for a channel of more than one element, so that it
+    // is shown and written as one.
+    if channel.element_count().is_ok_and(|n| n > 1) {
+        value = into_array(value);
+    }
     shared.update(|s| {
         s.connected = true;
         s.error = None;
@@ -157,6 +167,17 @@ fn apply(shared: &Shared, snap: &Snapshot, metadata: bool) {
                 .collect();
         }
     });
+}
+
+/// A scalar as an array of its one element; any other value as it is.
+fn into_array(value: Value) -> Value {
+    match value {
+        Value::Double(x) => Value::DoubleArray(Arc::from([x])),
+        Value::Long(x) => Value::LongArray(Arc::from([x])),
+        Value::Enum(x) => Value::LongArray(Arc::from([x as i64])),
+        Value::Str(x) => Value::StrArray(Arc::from([x])),
+        other => other,
+    }
 }
 
 fn convert(v: &EpicsValue) -> Value {
@@ -208,67 +229,44 @@ mod tests {
 
     #[test]
     fn chooses_long_string_writes_as_phoebus_does() {
-        let chars = Value::LongArray(Arc::from(vec![0; 4]));
         let char_wf = (Some(DbFieldType::Char), Some(256));
-        let long_wf = (Some(DbFieldType::Long), Some(256));
-        // A string format writes text into any array of numbers.
-        assert!(as_long_string(
-            &put("/data", true),
-            &chars,
-            char_wf.0,
-            char_wf.1
+        let long_string = |text, string_format, (native, count)| {
+            as_long_string(&put(text, string_format), native, count)
+        };
+        // A string format writes all text into a char array, whatever
+        // value was last read (one element arrives as a scalar).
+        assert!(long_string("/data", true, char_wf));
+        assert!(long_string("1, 2", true, char_wf));
+        assert!(long_string("", true, char_wf));
+        // ... but not into any other PV, which is written the usual way,
+        // as Phoebus writes text to it.
+        assert!(!long_string(
+            "/data",
+            true,
+            (Some(DbFieldType::Long), Some(256))
         ));
-        assert!(as_long_string(
-            &put("1 2", true),
-            &chars,
-            long_wf.0,
-            long_wf.1
+        assert!(!long_string(
+            "/data",
+            true,
+            (Some(DbFieldType::String), Some(1))
         ));
-        // ... but not into a string or a scalar.
-        let text = Value::Str(String::new());
-        assert!(!as_long_string(
-            &put("/data", true),
-            &text,
-            Some(DbFieldType::String),
-            Some(1)
+        assert!(!long_string("x", true, (Some(DbFieldType::Char), Some(1))));
+        assert!(!long_string("x", true, (None, None)));
+        // Otherwise text that is not a list of numbers, to a char array.
+        assert!(long_string("/data", false, char_wf));
+        assert!(long_string("", false, char_wf));
+        assert!(!long_string("[1, 2]", false, char_wf));
+        assert!(!long_string("5", false, char_wf));
+        // Phoebus splits on commas only, and its numbers are finite.
+        assert!(long_string("1 2", false, char_wf));
+        assert!(long_string("nan", false, char_wf));
+        assert!(long_string("inf", false, char_wf));
+        assert!(!long_string(
+            "/data",
+            false,
+            (Some(DbFieldType::Long), Some(256))
         ));
-        assert!(!as_long_string(
-            &put("3", true),
-            &Value::Long(0),
-            char_wf.0,
-            Some(1)
-        ));
-        // Otherwise only text that is not numbers, to a char array.
-        assert!(as_long_string(
-            &put("/data", false),
-            &chars,
-            char_wf.0,
-            char_wf.1
-        ));
-        assert!(as_long_string(
-            &put("", false),
-            &chars,
-            char_wf.0,
-            char_wf.1
-        ));
-        assert!(!as_long_string(
-            &put("[1, 2]", false),
-            &chars,
-            char_wf.0,
-            char_wf.1
-        ));
-        assert!(!as_long_string(
-            &put("/data", false),
-            &chars,
-            long_wf.0,
-            long_wf.1
-        ));
-        assert!(!as_long_string(
-            &put("x", false),
-            &Value::Long(0),
-            char_wf.0,
-            Some(1)
-        ));
+        assert!(!long_string("x", false, (Some(DbFieldType::Char), Some(1))));
     }
 
     #[test]
