@@ -1487,26 +1487,33 @@ fn closes_display(a: &Element) -> bool {
 /// </path>
 /// ```
 ///
-/// `None` for a script whose PV names nothing: it only hides the widget.
+/// `None` for a script whose local PV names nothing: it only hides the
+/// widget. A script whose first PV is not such a local PV is left alone,
+/// and the widget shown: what it reads at run time is not known here. (The
+/// DLS corpus has `visible.py` only in the motor module, every copy the
+/// same, with local trigger PVs.)
 fn visible_scripts(el: &mut Element) -> Vec<Option<String>> {
     let Some(scripts) = el.child_mut("scripts") else {
         return Vec::new();
     };
-    let (visible, others): (Vec<Element>, Vec<Element>) = std::mem::take(&mut scripts.children)
-        .into_iter()
-        .partition(|p| {
-            p.name == "path"
-                && p.attr("pathString")
-                    .is_some_and(|s| s.rsplit(['/', '\\']).next() == Some("visible.py"))
-        });
-    scripts.children = others;
-    visible
-        .iter()
-        .map(|p| {
-            let pv = p.children.iter().find(|c| c.name == "pv")?;
-            crate::opi_file_script::loc_initial(pv.text.trim()).filter(|n| !n.is_empty())
-        })
-        .collect()
+    let named = |p: &Element| {
+        let visible = p.name == "path"
+            && p.attr("pathString")
+                .is_some_and(|s| s.rsplit(['/', '\\']).next() == Some("visible.py"));
+        let pv = p.children.iter().find(|c| c.name == "pv")?;
+        visible
+            .then(|| crate::opi_file_script::loc_initial(pv.text.trim()))
+            .flatten()
+    };
+    let mut shown_by = Vec::new();
+    scripts.children.retain(|p| match named(p) {
+        Some(name) => {
+            shown_by.push(Some(name).filter(|n| !n.is_empty()));
+            false
+        }
+        None => true,
+    });
+    shown_by
 }
 
 /// A rule showing a widget while `pv` is true, as a `visible.py` script.
@@ -2569,10 +2576,15 @@ widget.setPropertyValue("opi_file", pv0 + ".opi");"#,
         );
         assert_eq!(r.exprs[0].condition, "pv0");
         assert_eq!(r.exprs[0].value.text, "true");
-        // A PV that names nothing: hidden, as the script's first line.
-        let w = one("Label", &script("X:Y"));
+        // A local PV that names nothing: hidden, as the script's first line.
+        let w = one("Label", &script("loc://$(DID)none(\"\")"));
         assert!(!w.has_scripts() && w.rules().is_empty());
         assert_eq!(w.text("visible"), Some("false"));
+        // Another PV, read at run time: the script is kept, and the
+        // widget shown.
+        let w = one("Label", &script("X:Y"));
+        assert!(w.has_scripts() && w.rules().is_empty());
+        assert_eq!(w.text("visible"), Some("true"));
         // Other scripts are kept.
         let w = one(
             "Label",
