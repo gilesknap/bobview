@@ -314,9 +314,10 @@ a symbol click …) open their displays, whatever their target:
 
 The **viewer** is the unpinned window used last (focused, opened or
 unpinned), so clicking a window once makes it where the next link goes.
-"Already open" means the same display with the same macros. A display
-opened in place or in the viewer keeps that window's history for Back and
-Forward.
+"Already open" means the same display with the same macros, in another
+window. A display opened in place or in the viewer keeps that window's
+history for Back and Forward. A link to the display its own window shows
+reloads it in place, as a Refresh button wants, without adding to Back.
 
 The main window starts pinned, so it stays where it is while the displays
 it links to come and go in one other window; pin that one too to keep it,
