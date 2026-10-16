@@ -9,10 +9,11 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 
 use base64::Engine;
 use futures_util::future::{AbortHandle, abortable};
+use parking_lot::Mutex;
 use serde_json::{Map, Value as Json, json};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
@@ -34,7 +35,7 @@ pub fn set_pvws(url: &str) {
     } else {
         host_url(url)
     };
-    *URL.lock().unwrap() = Some(url);
+    *URL.lock() = Some(url);
 }
 
 /// The token a server started with `--write` wants in every write.
@@ -42,11 +43,11 @@ static TOKEN: Mutex<Option<String>> = Mutex::new(None);
 
 /// Send `token` with every write, for a server that needs one (`--write`).
 pub fn set_write_token(token: &str) {
-    *TOKEN.lock().unwrap() = Some(token.to_string());
+    *TOKEN.lock() = Some(token.to_string());
 }
 
 fn url() -> String {
-    if let Some(url) = URL.lock().unwrap().clone() {
+    if let Some(url) = URL.lock().clone() {
         return url;
     }
     let host = web_sys::window()
@@ -109,7 +110,7 @@ pub(crate) fn write(name: &str, state: &PvState, text: String) {
         _ => json!(text),
     };
     let mut msg = json!({"type": "write", "pv": name, "value": value});
-    if let Some(token) = TOKEN.lock().unwrap().as_ref() {
+    if let Some(token) = TOKEN.lock().as_ref() {
         msg["token"] = json!(token);
     }
     SOCKET.with_borrow_mut(|s| {
