@@ -1,4 +1,4 @@
-//! Sizing of bobview's own controls (toolbar, status line, menus, keypad)
+//! Sizing of bobview's own controls (toolbar, status line, menus)
 //! and of the native window.
 //!
 //! egui sizes everything in points and multiplies by the desktop's scale
@@ -15,7 +15,7 @@ const TOOLBAR_FRACTION: f32 = 0.07;
 /// Smallest toolbar button, in physical pixels: a usable touch target.
 const MIN_BUTTON_PX: f32 = 40.0;
 /// Toolbar width, in points, below which it switches to the compact layout.
-pub const FULL_TOOLBAR_WIDTH: f32 = 520.0;
+pub const FULL_TOOLBAR_WIDTH: f32 = 600.0;
 /// Width of the compact toolbar in points; windows are never sized narrower.
 pub const COMPACT_TOOLBAR_WIDTH: f32 = 290.0;
 /// Largest share of the monitor an automatically sized window may take.
@@ -148,6 +148,8 @@ pub struct Chrome {
     first: bool,
     /// Keep the window's size for the next display shown: a layout gave it.
     hold: bool,
+    /// Size the window to the display next frame, Auto-size or not.
+    fit: bool,
 }
 
 impl Chrome {
@@ -162,6 +164,7 @@ impl Chrome {
             auto_size: true,
             first: true,
             hold: false,
+            fit: false,
         }
     }
 
@@ -175,6 +178,14 @@ impl Chrome {
     pub fn hold_size(&mut self) {
         self.first = false;
         self.hold = true;
+    }
+
+    /// Size the window to the display, as shown at its zoom, Auto-size or
+    /// not: the toolbar's zoom readout, which sets 100%.
+    pub fn fit_window(&mut self) {
+        self.resize = true;
+        self.hold = false;
+        self.fit = true;
     }
 
     /// A new display is being shown.
@@ -209,6 +220,7 @@ impl Chrome {
         let Some(display) = display else {
             self.resize = false;
             self.hold = false;
+            self.fit = false;
             return;
         };
         let (info, inner) = ctx.input(|i| (i.viewport().clone(), i.content_rect().size()));
@@ -221,13 +233,15 @@ impl Chrome {
         if std::mem::take(&mut self.hold) {
             return;
         }
-        let follow = self.first || self.auto_size;
+        let fit = std::mem::take(&mut self.fit);
+        let follow = self.first || self.auto_size || fit;
         self.first = false;
         if !follow || !can_resize(&info, ctx.zoom_factor()) {
             return;
         }
         let size = window_size(display, self.panels, info.monitor_size);
         if (size - inner).length() >= 1.0 {
+            log::debug!("size the window from {inner:?} to {size:?} for the display");
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
         }
     }
