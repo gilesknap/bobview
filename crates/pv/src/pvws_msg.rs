@@ -109,16 +109,18 @@ fn value(vtype: &str, msg: &Map<String, Json>) -> Option<Value> {
             _ => Value::LongArray(items.map(|b| b[0] as i8 as i64).collect()),
         });
     }
-    let text = msg.get("text").and_then(Json::as_str);
-    match msg.get("value") {
-        // bobview-server sends a string array as one, besides the text
-        // PVWS sends it as.
-        Some(Json::Array(items)) => Some(Value::StrArray(
+    // bobview-server sends a string array's items under a key of its own,
+    // besides the text PVWS sends it as.
+    if let Some(Json::Array(items)) = msg.get("strings") {
+        return Some(Value::StrArray(
             items
                 .iter()
                 .map(|v| v.as_str().unwrap_or_default().to_string())
                 .collect(),
-        )),
+        ));
+    }
+    let text = msg.get("text").and_then(Json::as_str);
+    match msg.get("value") {
         Some(v) if vtype == "VEnum" => Some(Value::Enum(v.as_f64()? as u16)),
         // Non-finite doubles come as text.
         Some(Json::String(_)) => Some(Value::Double(f64::NAN)),
@@ -164,7 +166,7 @@ mod tests {
         let mut s = PvState::default();
         update(
             &mut s,
-            json!({"vtype": "VStringArray", "value": ["a, b", "c"], "text": "a, b, c"}),
+            json!({"vtype": "VStringArray", "strings": ["a, b", "c"], "text": "a, b, c"}),
         );
         assert_eq!(
             s.value,

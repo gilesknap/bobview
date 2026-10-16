@@ -683,9 +683,11 @@ fn encode_value(m: &mut Map<String, Json>, s: &PvState) {
             m.insert("b64dbl".into(), b64(bytes));
         }
         Value::StrArray(a) => {
-            // The text for PVWS clients, the items for bobview.
+            // The text, as PVWS sends it, for any PVWS client; the items
+            // for bobview under a key of its own, so that a client reading
+            // `value` as a number (cs-web-lib) never sees an array.
             m.insert("text".into(), json!(a.join(", ")));
-            m.insert("value".into(), json!(a.as_ref()));
+            m.insert("strings".into(), json!(a.as_ref()));
         }
         Value::Image(img) => {
             // Images need a video stream, not JSON (bobview#20).
@@ -822,8 +824,9 @@ mod tests {
         };
         let m = parse(update("X", &s, None, false));
         assert_eq!(m["vtype"], "VStringArray");
-        assert_eq!(m["value"], json!(["a, b", "c"]));
+        assert_eq!(m["strings"], json!(["a, b", "c"]));
         assert_eq!(m["text"], "a, b, c");
+        assert!(!m.contains_key("value"), "PVWS sends no value for these");
     }
 
     #[test]

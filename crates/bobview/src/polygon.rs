@@ -1,6 +1,7 @@
 //! Filling polygons that may be concave (L shapes, arrows, synoptic
 //! outlines), which egui's `convex_polygon` fills wrongly.
 
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -13,7 +14,8 @@ const MAX_POINTS: usize = 1000;
 /// Fill the polygon `screen`, the points `display` placed on the screen.
 /// A convex one is filled by egui, with anti-aliased edges; a concave one
 /// is cut into triangles, worked out once for its display points (moving
-/// or zooming it does not change them) and kept in egui's memory.
+/// or zooming it does not change them) and kept in a bounded cache in
+/// egui's memory.
 pub fn fill(painter: &egui::Painter, display: &[(f64, f64)], screen: Vec<Pos2>, color: Color32) {
     if screen.len() < 3 || color.a() == 0 {
         return;
@@ -23,17 +25,18 @@ pub fn fill(painter: &egui::Painter, display: &[(f64, f64)], screen: Vec<Pos2>, 
         x.to_bits().hash(&mut hasher);
         y.to_bits().hash(&mut hasher);
     }
-    let id = egui::Id::new(("bobview-polygon", hasher.finish()));
-    let ctx = painter.ctx();
-    let cached: Option<Arc<Option<Vec<u32>>>> = ctx.memory_mut(|m| m.data.get_temp(id));
-    let triangles = cached.unwrap_or_else(|| {
-        let pts: Vec<Pos2> = display
-            .iter()
-            .map(|(x, y)| Pos2::new(*x as f32, *y as f32))
-            .collect();
-        let t = Arc::new(triangulate(&pts));
-        ctx.memory_mut(|m| m.data.insert_temp(id, t.clone()));
-        t
+    let key = hasher.finish();
+    let id = egui::Id::new("bobview-polygons");
+    let triangles = painter.ctx().memory_mut(|m| {
+        m.data
+            .get_temp_mut_or_default::<Cache>(id)
+            .get_or_insert(key, || {
+                let pts: Vec<Pos2> = display
+                    .iter()
+                    .map(|(x, y)| Pos2::new(*x as f32, *y as f32))
+                    .collect();
+                triangulate(&pts)
+            })
     });
     match triangles.as_ref() {
         Some(indices) => {
@@ -47,6 +50,37 @@ pub fn fill(painter: &egui::Painter, display: &[(f64, f64)], screen: Vec<Pos2>, 
         _ => {
             painter.add(Shape::convex_polygon(screen, color, Stroke::NONE));
         }
+    }
+}
+
+/// Triangles for each outline drawn, by a hash of its display points.
+type Triangles = Arc<Option<Vec<u32>>>;
+
+/// How many outlines the cache takes before it starts a new generation.
+const CACHE_SIZE: usize = 4096;
+
+/// The triangles worked out for outlines, in two generations so that it
+/// stays bounded when a rule keeps changing a polygon's points: once the
+/// newer is full it becomes the older and the older is dropped. An outline
+/// still in use is found in the older and moved to the newer, so it is
+/// not cut again.
+#[derive(Clone, Default)]
+struct Cache {
+    newer: HashMap<u64, Triangles>,
+    older: HashMap<u64, Triangles>,
+}
+
+impl Cache {
+    fn get_or_insert(&mut self, key: u64, make: impl FnOnce() -> Option<Vec<u32>>) -> Triangles {
+        if let Some(t) = self.newer.get(&key) {
+            return t.clone();
+        }
+        let t = self.older.remove(&key).unwrap_or_else(|| Arc::new(make()));
+        if self.newer.len() >= CACHE_SIZE {
+            self.older = std::mem::take(&mut self.newer);
+        }
+        self.newer.insert(key, t.clone());
+        t
     }
 }
 
@@ -144,6 +178,27 @@ pub fn triangulate(pts: &[Pos2]) -> Option<Vec<u32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_cache_stays_bounded_and_keeps_outlines_in_use() {
+        let mut cache = Cache::default();
+        let mut cuts = 0;
+        let mut get = |cache: &mut Cache, key| {
+            cache.get_or_insert(key, || {
+                cuts += 1;
+                None
+            });
+        };
+        // A rule moving one polygon through ever new shapes, while another
+        // stays as it is.
+        for key in 1..=10 * CACHE_SIZE as u64 {
+            get(&mut cache, 0);
+            get(&mut cache, key);
+            assert!(cache.newer.len() + cache.older.len() <= 2 * CACHE_SIZE);
+        }
+        drop(get);
+        assert_eq!(cuts, 1 + 10 * CACHE_SIZE, "the steady one is cut once");
+    }
 
     fn pts(p: &[(f32, f32)]) -> Vec<Pos2> {
         p.iter().map(|&(x, y)| Pos2::new(x, y)).collect()

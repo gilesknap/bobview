@@ -65,13 +65,18 @@ pub(crate) async fn run(client: &CaClient, pv: &str, shared: Arc<Shared>) {
         }
     };
 
+    // When to read the value if no monitor update has come since the channel
+    // connected; see `MONITOR_GRACE`.
+    let mut fallback: Option<tokio::time::Instant> = None;
     loop {
         tokio::select! {
             event = events.recv() => match event {
                 Ok(ConnectionEvent::Connected) => {
                     fetch_metadata(&channel, &shared).await;
+                    fallback = Some(tokio::time::Instant::now() + MONITOR_GRACE);
                 }
                 Ok(ConnectionEvent::Disconnected) => {
+                    fallback = None;
                     shared.update(|s| s.connected = false);
                 }
                 Ok(ConnectionEvent::AccessRightsChanged { write, .. }) => {
@@ -80,8 +85,19 @@ pub(crate) async fn run(client: &CaClient, pv: &str, shared: Arc<Shared>) {
                 Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(broadcast::error::RecvError::Closed) => return,
             },
+            _ = tokio::time::sleep_until(fallback.unwrap_or_else(tokio::time::Instant::now)),
+                if fallback.is_some() =>
+            {
+                fallback = None;
+                if !shared.snapshot().connected {
+                    read_value(&channel, &shared).await;
+                }
+            }
             update = monitor.recv() => match update {
-                Some(Ok(snap)) => apply(&shared, &channel, &snap, false),
+                Some(Ok(snap)) => {
+                    fallback = None;
+                    apply(&shared, &channel, &snap, false);
+                }
                 Some(Err(e)) => {
                     log::debug!("{pv}: {e}");
                     shared.update(|s| s.connected = false);
@@ -123,6 +139,28 @@ pub(crate) async fn run(client: &CaClient, pv: &str, shared: Arc<Shared>) {
                 shared.write_result(text, result.err().map(|e| e.to_string()));
             }
         }
+    }
+}
+
+/// How long after a channel connects its monitor has to send the first
+/// update before the value is read instead. The server sends one at once,
+/// but epics-ca-rs leaves a subscription uninstalled when it cannot re-send
+/// it on a reconnect (as C's `nciu::resubscribe` does), and the PV would
+/// then never show as connected.
+const MONITOR_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Read the value, alarm and time stamp, for a monitor that has sent
+/// nothing since the channel connected.
+async fn read_value(channel: &CaChannel, shared: &Shared) {
+    match channel.get_with_metadata(DbrClass::Time).await {
+        Ok(snap) => {
+            log::warn!(
+                "{}: no monitor update since connecting; showing a read value",
+                shared.name
+            );
+            apply(shared, channel, &snap, false);
+        }
+        Err(e) => log::debug!("{}: value read failed: {e}", shared.name),
     }
 }
 
@@ -278,6 +316,24 @@ mod tests {
         );
         assert_eq!(s.value, Value::None);
         assert_eq!(s.timestamp, None);
+    }
+
+    #[test]
+    fn a_value_read_connects_a_pv_its_monitor_left_waiting() {
+        // The metadata read alone leaves it disconnected; the DBR_TIME read
+        // `read_value` makes after `MONITOR_GRACE` is applied as a monitor
+        // update, so the PV connects with its value, alarm and time stamp.
+        let stamp = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let ctrl = Snapshot::new(EpicsValue::Double(0.0), 0, 0, UNIX_EPOCH);
+        let time = Snapshot::new(EpicsValue::Double(7.0), 3, 2, stamp);
+        let mut s = PvState::default();
+        apply_to(&mut s, &ctrl, None, true);
+        assert!(!s.connected);
+        apply_to(&mut s, &time, Some(convert(&time.value)), false);
+        assert!(s.connected);
+        assert_eq!(s.value, Value::Double(7.0));
+        assert_eq!(s.severity, Severity::Major);
+        assert_eq!(s.timestamp, Some(stamp));
     }
 
     fn put(text: &str, long_string: bool) -> Put {
