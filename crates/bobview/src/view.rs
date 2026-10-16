@@ -47,8 +47,8 @@ pub struct Drawn {
 /// view can be drawn without the rest of the application.
 pub struct ViewCx<'a> {
     pub window: WindowKey,
-    /// Text entries open the on-screen keypad instead of taking keyboard focus.
-    pub keypad: bool,
+    /// Touch mode: finger-sized rows in drop-down lists.
+    pub touch: bool,
     /// The open trend windows, (id, title), that a PV's context menu can
     /// add it to.
     pub trends: &'a [(u64, String)],
@@ -239,6 +239,23 @@ impl View {
         }
     }
 
+    /// Whether this shows `loc`: the same display with the same macros, its
+    /// own defaults under both, as a link on it has them (while it loads,
+    /// as it was opened). Macros from a link's group or widget still count.
+    pub fn shows(&self, loc: &Location) -> bool {
+        let Some(cur) = &self.current else {
+            return false;
+        };
+        let Some(screen) = &self.screen else {
+            return cur.same_display(loc);
+        };
+        let defaults = |l: &Location| Location {
+            source: l.source.clone(),
+            macros: screen.display.macros.with(&l.macros),
+        };
+        defaults(cur).same_display(&defaults(loc))
+    }
+
     /// Navigate to a display, recording where we came from.
     pub fn open(&mut self, loc: Location) {
         if let Some(cur) = self.current.take() {
@@ -366,7 +383,7 @@ impl View {
                         pvs: &self.pvs,
                         requests: &mut requests,
                         depth: 0,
-                        keypad: vcx.keypad,
+                        touch: vcx.touch,
                         trends: vcx.trends,
                         window: vcx.window,
                     };

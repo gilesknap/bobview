@@ -101,11 +101,42 @@ impl Value {
         }
     }
 
+    /// A numeric array as a long string, as Phoebus shows a char waveform
+    /// whose widget `format` is string: see [`long_string`].
+    pub fn as_long_string(&self) -> Option<String> {
+        match self {
+            Value::LongArray(a) => Some(long_string(a.iter().map(|c| *c as u8))),
+            Value::DoubleArray(a) => Some(long_string(a.iter().map(|c| *c as i64 as u8))),
+            _ => None,
+        }
+    }
+
+    /// Whether this is an array of numbers, which a long string is held in.
+    pub fn is_numeric_array(&self) -> bool {
+        matches!(self, Value::LongArray(_) | Value::DoubleArray(_))
+    }
+
     pub fn as_i64(&self) -> Option<i64> {
         match self {
             Value::Long(v) => Some(*v),
             Value::Enum(v) => Some(*v as i64),
             other => other.as_f64().map(|v| v as i64),
+        }
+    }
+
+    /// An unsigned 64-bit integer: a [`Value::Long`] when it fits, else a
+    /// [`Value::Double`] near it, rather than a negative number.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn from_u64(x: u64) -> Value {
+        i64::try_from(x).map_or(Value::Double(x as f64), Value::Long)
+    }
+
+    /// Unsigned 64-bit integers, as [`Value::from_u64`] takes one.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn from_u64s(a: &[u64]) -> Value {
+        match a.iter().map(|x| i64::try_from(*x)).collect() {
+            Ok(longs) => Value::LongArray(longs),
+            Err(_) => Value::DoubleArray(a.iter().map(|x| *x as f64).collect()),
         }
     }
 }
@@ -230,6 +261,30 @@ fn join(mut items: impl ExactSizeIterator<Item = String>) -> String {
     text
 }
 
+/// The text held in a char array, as Phoebus's `getLongString` reads it:
+/// the bytes up to the first NUL (or all of them), as UTF-8.
+pub fn long_string(bytes: impl IntoIterator<Item = u8>) -> String {
+    let bytes: Vec<u8> = bytes.into_iter().take_while(|b| *b != 0).collect();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// `text` as a char array holding a long string: its UTF-8 bytes and a
+/// terminating NUL, cut to fit `max` elements (the PV's element count, if
+/// known) with the NUL kept, and never inside a multi-byte character.
+pub fn long_string_bytes(text: &str, max: Option<usize>) -> Vec<u8> {
+    let mut end = text.len();
+    if let Some(max) = max {
+        end = end.min(max.saturating_sub(1));
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+    }
+    let mut bytes = Vec::with_capacity(end + 1);
+    bytes.extend_from_slice(&text.as_bytes()[..end]);
+    bytes.push(0);
+    bytes
+}
+
 /// The elements of an array typed as text, in the `[1, 2, 3]` form that
 /// arrays are shown in, or just separated by spaces or commas.
 pub fn split_array(text: &str) -> Vec<&str> {
@@ -287,6 +342,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unsigned_64_bit_values_never_wrap_negative() {
+        assert_eq!(Value::from_u64(5), Value::Long(5));
+        assert_eq!(Value::from_u64(u64::MAX), Value::Double(u64::MAX as f64));
+        assert_eq!(
+            Value::from_u64s(&[1, 2]),
+            Value::LongArray(Arc::from([1, 2]))
+        );
+        assert_eq!(
+            Value::from_u64s(&[1, u64::MAX]),
+            Value::DoubleArray(Arc::from([1.0, u64::MAX as f64]))
+        );
+    }
+
+    #[test]
     fn formats_with_precision_and_units() {
         let s = PvState {
             value: Value::Double(2.54),
@@ -335,6 +404,37 @@ mod tests {
         };
         // Strings are quoted, as Phoebus's StringList.join does.
         assert_eq!(s.format(None, true), r#"["a b", "say \"hi\""]"#);
+    }
+
+    #[test]
+    fn reads_long_strings_up_to_the_nul() {
+        assert_eq!(long_string(*b"/data/run1\0junk"), "/data/run1");
+        assert_eq!(long_string(*b"no nul"), "no nul");
+        assert_eq!(long_string(*b"\0"), "");
+        assert_eq!(long_string("caf\u{e9}".bytes()), "caf\u{e9}");
+        // A char waveform's elements are signed over CA and PVA.
+        let v = Value::LongArray(Arc::from(vec![104, 105, -61, -87, 0, 120]));
+        assert_eq!(v.as_long_string().as_deref(), Some("hi\u{e9}"));
+        let v = Value::DoubleArray(Arc::from(vec![111.0, 107.0]));
+        assert_eq!(v.as_long_string().as_deref(), Some("ok"));
+        assert_eq!(Value::Str("x".into()).as_long_string(), None);
+    }
+
+    #[test]
+    fn writes_long_strings_nul_terminated_and_cut_to_fit() {
+        assert_eq!(long_string_bytes("abc", None), b"abc\0");
+        assert_eq!(long_string_bytes("abc", Some(256)), b"abc\0");
+        assert_eq!(long_string_bytes("abcdef", Some(4)), b"abc\0");
+        assert_eq!(long_string_bytes("abc", Some(4)), b"abc\0");
+        assert_eq!(long_string_bytes("", Some(4)), b"\0");
+        assert_eq!(long_string_bytes("abc", Some(1)), b"\0");
+        assert_eq!(long_string_bytes("abc", Some(0)), b"\0");
+        // Not inside the two bytes of the é.
+        assert_eq!(long_string_bytes("ab\u{e9}", Some(4)), b"ab\0");
+        assert_eq!(
+            long_string(long_string_bytes("ab\u{e9}", Some(5))),
+            "ab\u{e9}"
+        );
     }
 
     #[test]

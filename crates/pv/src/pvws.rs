@@ -9,9 +9,10 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 
 use futures_util::future::{AbortHandle, abortable};
+use parking_lot::Mutex;
 use serde_json::{Value as Json, json};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
@@ -34,7 +35,7 @@ pub fn set_pvws(url: &str) {
     } else {
         host_url(url)
     };
-    *URL.lock().unwrap() = Some(url);
+    *URL.lock() = Some(url);
 }
 
 /// The token a server started with `--write` wants in every write.
@@ -42,11 +43,11 @@ static TOKEN: Mutex<Option<String>> = Mutex::new(None);
 
 /// Send `token` with every write, for a server that needs one (`--write`).
 pub fn set_write_token(token: &str) {
-    *TOKEN.lock().unwrap() = Some(token.to_string());
+    *TOKEN.lock() = Some(token.to_string());
 }
 
 fn url() -> String {
-    if let Some(url) = URL.lock().unwrap().clone() {
+    if let Some(url) = URL.lock().clone() {
         return url;
     }
     let host = web_sys::window()
@@ -102,14 +103,23 @@ pub(crate) fn subscribe(name: &PvName, shared: Arc<Shared>) -> Task {
 
 /// Write `text` to `name`: as a number when it reads as one, as the server
 /// converts only text to an enum's or string's value.
-pub(crate) fn write(name: &str, state: &PvState, text: String) {
+///
+/// A long string (see [`crate::Pv::write_long_string`]) to an array of
+/// numbers goes as text, marked `long_string` for bobview-server. A PVWS
+/// server ignores the mark and writes the text, which Phoebus's CA layer
+/// writes into a char array as a long string.
+pub(crate) fn write(name: &str, state: &PvState, text: String, long_string: bool) {
+    let long_string = long_string && state.value.is_numeric_array();
     let numeric = !matches!(state.value, Value::Str(_) | Value::StrArray(_));
     let value = match text.trim().parse::<f64>() {
-        Ok(x) if numeric && x.is_finite() => json!(x),
+        Ok(x) if numeric && !long_string && x.is_finite() => json!(x),
         _ => json!(text),
     };
     let mut msg = json!({"type": "write", "pv": name, "value": value});
-    if let Some(token) = TOKEN.lock().unwrap().as_ref() {
+    if long_string {
+        msg["long_string"] = json!(true);
+    }
+    if let Some(token) = TOKEN.lock().as_ref() {
         msg["token"] = json!(token);
     }
     SOCKET.with_borrow_mut(|s| {

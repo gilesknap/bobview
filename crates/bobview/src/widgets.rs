@@ -20,11 +20,6 @@ pub enum Request {
         target: String,
     },
     Webpage(String),
-    /// Edit a value with the on-screen keypad.
-    Keypad {
-        pv: pv::Pv,
-        text: String,
-    },
     /// Show the details of a widget's PV, from its context menu.
     Details(crate::pvmenu::Details),
     /// Open a trend window of these PVs.
@@ -55,8 +50,8 @@ pub struct Cx<'a> {
     pub pvs: &'a PvManager,
     pub requests: &'a mut Vec<Request>,
     pub depth: u32,
-    /// Text entries open the on-screen keypad instead of taking keyboard focus.
-    pub keypad: bool,
+    /// Touch mode: finger-sized rows in drop-down lists.
+    pub touch: bool,
     /// The open trend windows, (id, title), that a PV's context menu can
     /// add it to.
     pub trends: &'a [(u64, String)],
@@ -72,7 +67,7 @@ impl Cx<'_> {
             pvs: self.pvs,
             requests: self.requests,
             depth: self.depth + 1,
-            keypad: self.keypad,
+            touch: self.touch,
             trends: self.trends,
             window: self.window,
         }
@@ -90,7 +85,7 @@ const MOUSE_RADIUS: f32 = 5.0;
 /// [`TOUCH_TARGET`].
 const TOUCH_RADIUS: f32 = (TOUCH_TARGET - 20.0) / 2.0;
 
-/// Grow the hit area of every control in touch (keypad) mode, without
+/// Grow the hit area of every control in touch mode, without
 /// changing how anything is drawn. egui hit-tests in two steps: a touch
 /// directly on a control always goes to that control (the topmost one), and
 /// only a touch on no control at all goes to the nearest control within
@@ -620,17 +615,33 @@ pub(crate) fn placeholder(painter: &egui::Painter, rect: Rect, what: &str, z: f3
     );
 }
 
+/// The `format` that shows (and writes) an array of numbers as a long
+/// string, as areaDetector's `FilePath` and other char waveforms are.
+const STRING_FORMAT: i64 = 6;
+
+/// Whether a control writes its text as a long string, as Phoebus does
+/// when its `format` is string: see [`pv::Pv::write_long_string`].
+fn writes_long_string(w: &Widget) -> bool {
+    w.i64("format") == Some(STRING_FORMAT)
+}
+
 /// Value text as Phoebus formats it for the widget's `format` and `precision`.
 pub(crate) fn format_value(w: &Widget, s: &PvState) -> String {
     let precision = w.i64("precision").filter(|p| *p >= 0).map(|p| p as i32);
     let units = w.bool("show_units").unwrap_or(true);
     let format = w.i64("format").unwrap_or(0);
     match (format, &s.value) {
-        (6, Value::LongArray(a)) => a
-            .iter()
-            .take_while(|c| **c != 0)
-            .map(|c| (*c as u8) as char)
-            .collect(),
+        (STRING_FORMAT, v) if v.is_numeric_array() => v.as_long_string().unwrap_or_default(),
+        // A number as the character of its low byte, as Phoebus shows it.
+        (STRING_FORMAT, Value::Long(_) | Value::Double(_)) => {
+            let byte = s.value.as_i64().unwrap_or(0) as u8;
+            let text = pv::long_string([byte]);
+            if units && !s.units.is_empty() {
+                format!("{text} {}", s.units)
+            } else {
+                text
+            }
+        }
         (4, v) if v.as_i64().is_some() => format!("0x{:X}", v.as_i64().unwrap_or(0)),
         (10, v) if v.as_i64().is_some() => format!("0b{:b}", v.as_i64().unwrap_or(0)),
         (2, Value::Double(v)) => {
@@ -702,9 +713,14 @@ fn write_needs_confirmation(base: Option<&Source>) -> bool {
 }
 
 fn write(node: &Node, value: impl Into<String>) {
+    write_with(node, |pv| pv.write(value));
+}
+
+/// Write to the widget's PV with `put`, if the control may write it.
+fn write_with(node: &Node, put: impl FnOnce(&pv::Pv)) {
     if let Some(pv) = &node.pv {
         if can_write(&node.w, Some(&pv.state())) {
-            pv.write(value);
+            put(pv);
         } else {
             log::debug!("{}: not writing, the control is disabled", node.pv_name);
         }
@@ -1090,36 +1106,6 @@ fn text_entry(
     };
     let align = alignment(&w, 1);
     let enabled = can_write(&w, state);
-    if cx.keypad {
-        let resp = ui.interact(rect.intersect(cx.clip), id, Sense::click());
-        let painter = ui.painter().with_clip_rect(cx.clip);
-        fill(&painter, rect, bg(&w, "Write_Background"));
-        text_in(
-            &painter,
-            rect.shrink2(Vec2::new(2.0, 0.0)),
-            &shown,
-            font(&w, cx.view.zoom),
-            fg(&w),
-            align,
-            false,
-        );
-        if resp.clicked()
-            && enabled
-            && let Some(pv) = &node.pv
-        {
-            let text = state.map(|s| {
-                s.format(
-                    w.i64("precision").filter(|p| *p >= 0).map(|p| p as i32),
-                    false,
-                )
-            });
-            cx.requests.push(Request::Keypad {
-                pv: pv.clone(),
-                text: text.unwrap_or_default(),
-            });
-        }
-        return resp;
-    }
     let mut buf = node.edit.clone().unwrap_or(shown);
     // Text that does not fit is elided with `…` like a text update's, except
     // while it is being edited, when every character must be there for the
@@ -1157,7 +1143,12 @@ fn text_entry(
         node.edit = Some(buf);
     } else if resp.lost_focus() {
         if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            write(node, buf.trim().to_string());
+            // Phoebus keeps the spaces of text written as a string.
+            if writes_long_string(&node.w) {
+                write_with(node, |pv| pv.write_long_string(buf));
+            } else {
+                write(node, buf.trim().to_string());
+            }
         }
         node.edit = None;
     }
@@ -1624,7 +1615,7 @@ fn combo(
         font(&w, z),
         &ui.style().text_styles[&egui::TextStyle::Button],
     );
-    let row_h = if cx.keypad { TOUCH_TARGET } else { 0.0 };
+    let row_h = if cx.touch { TOUCH_TARGET } else { 0.0 };
     egui::Popup::menu(&resp).width(rect.width()).show(|ui| {
         ui.set_min_width(rect.width() - ui.spacing().menu_margin.sum().x);
         for item in &items {
@@ -1647,6 +1638,12 @@ fn combo_item_font(widget: FontId, ui: &FontId) -> FontId {
     } else {
         widget
     }
+}
+
+/// Phoebus labels a checkbox or slide button "Label" unless the file says
+/// otherwise; an explicit empty `<label>` stays empty.
+fn raw_label(w: &Widget) -> &str {
+    w.text("label").unwrap_or("Label")
 }
 
 fn checkbox(
@@ -1688,7 +1685,7 @@ fn checkbox(
     text_in(
         &painter,
         tr,
-        &node.prop("label"),
+        &node.expand(raw_label(&w)),
         font(&w, z),
         fg(&w),
         Align2::LEFT_CENTER,
@@ -1716,10 +1713,7 @@ fn slide_button(
     let on = s.is_some_and(|s| s.connected && is_on(&w, s));
     let resp = ui.interact(rect.intersect(cx.clip), id, Sense::click());
     let painter = ui.painter().with_clip_rect(cx.clip);
-    // Phoebus labels a slide button "Label" unless the file says otherwise.
-    let label = w
-        .text("label")
-        .map_or_else(|| "Label".to_string(), |t| node.expand(t));
+    let label = node.expand(raw_label(&w));
     let (track, label_rect) = slide_layout(rect, z, !label.is_empty());
     let track_color = if on {
         w.color("on_color")
@@ -2169,7 +2163,7 @@ mod tests {
                 pvs: &pvs,
                 requests: &mut requests,
                 depth: 0,
-                keypad: false,
+                touch: false,
                 trends: &[],
                 window: WindowKey::Main,
             };
@@ -2415,6 +2409,52 @@ mod tests {
     }
 
     #[test]
+    fn string_format_shows_char_arrays_as_text() {
+        let chars = |codes: &[i64]| PvState {
+            connected: true,
+            value: Value::LongArray(Arc::from(codes)),
+            ..Default::default()
+        };
+        let path = chars(&[47, 116, 109, 112, 0, 120, 121]);
+        let string = widget("<format>6</format>");
+        assert!(writes_long_string(&string));
+        assert_eq!(format_value(&string, &path), "/tmp");
+        assert_eq!(format_value(&string, &chars(&[104, 105])), "hi");
+        // Other formats, and values that are not arrays of numbers, are as before.
+        let default = widget("");
+        assert!(!writes_long_string(&default));
+        assert_eq!(
+            format_value(&default, &path),
+            "[47, 116, 109, 112, 0, 120, 121]"
+        );
+        let text = PvState {
+            connected: true,
+            value: Value::Str("a b".into()),
+            ..Default::default()
+        };
+        assert_eq!(format_value(&string, &text), "a b");
+        // A number shows as the character of its low byte, as in Phoebus,
+        // and NUL as nothing.
+        assert_eq!(format_value(&string, &state(65, true)), "A");
+        assert_eq!(format_value(&string, &state(0x141, true)), "A");
+        assert_eq!(format_value(&string, &state(0, true)), "");
+        let double = PvState {
+            connected: true,
+            value: Value::Double(104.7),
+            units: "mm".into(),
+            ..Default::default()
+        };
+        assert_eq!(format_value(&string, &double), "h mm");
+    }
+
+    #[test]
+    fn label_defaults_to_label_only_when_absent() {
+        assert_eq!(raw_label(&widget("")), "Label");
+        assert_eq!(raw_label(&widget("<label></label>")), "");
+        assert_eq!(raw_label(&widget("<label>Go</label>")), "Go");
+    }
+
+    #[test]
     fn toggles_the_whole_value_or_one_bit() {
         // A slide button's bit defaults to 0, as in Phoebus.
         let default = widget("");
@@ -2496,7 +2536,7 @@ mod tests {
             pvs: &pvs,
             requests: &mut requests,
             depth: 0,
-            keypad: false,
+            touch: false,
             trends: &[],
             window: WindowKey::Main,
         };
@@ -2530,7 +2570,7 @@ mod tests {
             pvs: &pvs,
             requests: &mut requests,
             depth: 0,
-            keypad: false,
+            touch: false,
             trends: &[],
             window: WindowKey::Main,
         };
@@ -2581,7 +2621,7 @@ pv.setValue(pv_value);
                 pvs: &pvs,
                 requests: &mut requests,
                 depth: 0,
-                keypad: false,
+                touch: false,
                 trends: &[],
                 window: WindowKey::Main,
             };

@@ -4,7 +4,9 @@
 //! there is no archived history.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 use web_time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{Local, TimeZone};
@@ -265,7 +267,7 @@ impl Series {
         let into = samples.clone();
         let listener: Listener = Arc::new(move |s: &PvState| {
             if let Some(v) = sample(s) {
-                into.lock().unwrap().push(now(), v);
+                into.lock().push(now(), v);
             }
         });
         pv.listen(&listener);
@@ -284,8 +286,8 @@ impl Series {
         // Copied out before the PV's state is read: an update holds that
         // lock while it adds a sample.
         let mut pts: Vec<(f64, f64)> = {
-            let mut thinned = self.thinned.lock().unwrap();
-            thinned.update(&self.samples.lock().unwrap(), from, dt);
+            let mut thinned = self.thinned.lock();
+            thinned.update(&self.samples.lock(), from, dt);
             thinned.points().collect()
         };
         if let Some(&(t, v)) = pts.last()
@@ -895,13 +897,7 @@ mod tests {
         let series = Series::new(pv.clone());
         pv.write("2");
         pv.write("3");
-        let samples: Vec<f64> = series
-            .samples
-            .lock()
-            .unwrap()
-            .since(0.0)
-            .map(|p| p.1)
-            .collect();
+        let samples: Vec<f64> = series.samples.lock().since(0.0).map(|p| p.1).collect();
         assert_eq!(samples, [1.0, 2.0, 3.0]);
         // Drawn (in columns of a second, so maybe thinned): from the
         // first to the last, which holds to now.

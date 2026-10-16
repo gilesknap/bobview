@@ -79,6 +79,9 @@ pub struct WindowLayout {
     /// were pinned (see `Layout::pinned`).
     #[serde(default)]
     pub pinned: Option<bool>,
+    /// Whether the main window shows the navigator.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub tree: bool,
 }
 
 /// A number, or the string "fit".
@@ -165,6 +168,7 @@ impl WindowLayout {
             zoom: None,
             toolbar: false,
             pinned: None,
+            tree: false,
         }
     }
 
@@ -569,6 +573,7 @@ mod tests {
             zoom: None,
             toolbar: false,
             pinned: None,
+            tree: false,
         };
         let laptop = [Rect::from_min_size(Pos2::ZERO, Vec2::new(1920.0, 1080.0))];
         let docked = [

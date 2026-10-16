@@ -6,7 +6,7 @@ use pv::{Pv, PvManager};
 use crate::rules::CompiledRule;
 
 /// How deep embedded displays may nest before we stop (guards against loops).
-const MAX_DEPTH: u32 = 8;
+pub(crate) const MAX_DEPTH: u32 = 8;
 
 /// A display ready to draw. Node rectangles are in this screen's own coordinates.
 pub struct Screen {
@@ -202,7 +202,7 @@ impl Node {
     }
 }
 
-fn expand_for(w: &Widget, macros: &Macros, text: &str) -> String {
+pub(crate) fn expand_for(w: &Widget, macros: &Macros, text: &str) -> String {
     expand_props(w, macros, text, &Default::default())
 }
 
@@ -242,7 +242,7 @@ fn expand_props(w: &Widget, macros: &Macros, text: &str, state: &Expanding) -> S
 
 /// The display's name with `macros` expanded; a display with no name is
 /// called after its file, as in BOY and Phoebus.
-fn title(display: &Display, macros: &Macros) -> String {
+pub(crate) fn title(display: &Display, macros: &Macros) -> String {
     let name = bob::expand(&display.name, &|n| macros.get(n).map(str::to_string));
     if !name.trim().is_empty() {
         return name;
@@ -548,7 +548,7 @@ pub fn tab_elements(w: &Widget) -> Vec<bob::Element> {
         .unwrap_or_default()
 }
 
-fn find_group<'a>(widgets: &'a [Widget], name: &str) -> Option<&'a Widget> {
+pub(crate) fn find_group<'a>(widgets: &'a [Widget], name: &str) -> Option<&'a Widget> {
     widgets.iter().find_map(|w| {
         if w.kind == "group" && w.name() == name {
             Some(w)
