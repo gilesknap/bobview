@@ -47,6 +47,8 @@ pub struct BobApp {
     /// window navigates in place.
     main_pinned: bool,
     main_used: Used,
+    /// When the main window was pinned, by `clock` (0: from the start).
+    main_pinned_at: u64,
     /// Counts the windows' uses, to find the one used last.
     clock: u64,
     /// Displays can have native windows of their own (see `can_multi_window`).
@@ -151,6 +153,8 @@ struct DisplayWindow {
     /// has been sized to its display.
     beside: Option<Frame>,
     pinned: bool,
+    /// When it was pinned, by the application's clock.
+    pinned_at: u64,
     used: Used,
     close: bool,
 }
@@ -164,35 +168,78 @@ struct Frame {
 }
 
 /// Where a window `size` inside (in desktop points) goes beside the window
-/// at `origin`, within the monitor `origin` is most on: the first of to its
-/// right (top edges level), below it (left edges level), to its left and
-/// above it that fits, else over it on the side with more room.
-fn beside(origin: Frame, size: Vec2, monitors: &[Rect]) -> Option<Pos2> {
+/// at `origin`, clear of it and of the `pinned` windows (the one pinned last
+/// first). The places tried are beside the window pinned last, so a row of
+/// small windows grows beside a big one, then beside `origin`, then beside
+/// each other pinned window: to its right (top edges level), below it (left
+/// edges level), to its left and above it, each slid along that side to
+/// stay on the monitor that window is most on.
+/// The first that fits on its monitor clear of them all wins; else the one
+/// that covers them least, or over `origin` on the side with more room.
+fn beside(origin: Frame, pinned: &[Rect], size: Vec2, monitors: &[Rect]) -> Option<Pos2> {
+    let monitor = |r: &Rect| {
+        monitors
+            .iter()
+            .max_by(|a, b| overlap(a, r).total_cmp(&overlap(b, r)))
+            .copied()
+    };
     let o = origin.outer;
-    let m = monitors
-        .iter()
-        .max_by(|a, b| overlap(a, &o).total_cmp(&overlap(b, &o)))?;
+    let m = monitor(&o)?;
     let outer = size + origin.border;
-    // Slid along the side it is on to keep it on the monitor.
-    let x = o.min.x.min(m.max.x - outer.x).max(m.min.x);
-    let y = o.min.y.min(m.max.y - outer.y).max(m.min.y);
-    let fits = |p: &Pos2| m.contains_rect(Rect::from_min_size(*p, outer));
-    let sides = [
-        Pos2::new(o.max.x, y),
-        Pos2::new(x, o.max.y),
-        Pos2::new(o.min.x - outer.x, y),
-        Pos2::new(x, o.min.y - outer.y),
-    ];
+    let clear: Vec<Rect> = std::iter::once(o).chain(pinned.iter().copied()).collect();
+    let anchors = pinned.first().into_iter().chain(&clear);
+    let mut places = Vec::new();
+    for a in anchors {
+        let Some(m) = monitor(a) else { continue };
+        let x = a.min.x.min(m.max.x - outer.x).max(m.min.x);
+        let y = a.min.y.min(m.max.y - outer.y).max(m.min.y);
+        let sides = [
+            Pos2::new(a.max.x, y),
+            Pos2::new(x, a.max.y),
+            Pos2::new(a.min.x - outer.x, y),
+            Pos2::new(x, a.min.y - outer.y),
+        ];
+        places.extend(
+            sides
+                .into_iter()
+                .filter(|p| m.contains_rect(Rect::from_min_size(*p, outer))),
+        );
+    }
+    let covered = |p: &Pos2| {
+        let r = Rect::from_min_size(*p, outer);
+        clear.iter().map(|c| overlap(c, &r)).sum::<f32>()
+    };
+    if let Some(p) = places.iter().find(|p| covered(p) == 0.0) {
+        return Some(*p);
+    }
     let over = if m.max.x - o.max.x >= o.min.x - m.min.x {
         m.max.x - outer.x
     } else {
         m.min.x
     };
-    let pos = sides
+    let y = o.min.y.min(m.max.y - outer.y).max(m.min.y);
+    places.push(Pos2::new(over.max(m.min.x), y));
+    // The first of those that cover them least.
+    places
         .into_iter()
-        .find(fits)
-        .unwrap_or(Pos2::new(over.max(m.min.x), y));
-    Some(pos)
+        .min_by(|a, b| covered(a).total_cmp(&covered(b)))
+}
+
+/// The monitors and the pinned windows, for placing a display window.
+struct Desk {
+    monitors: Vec<Rect>,
+    pinned: Vec<(WindowKey, Rect)>,
+}
+
+impl Desk {
+    /// The pinned windows other than `id`.
+    fn clear_of(&self, id: egui::ViewportId) -> Vec<Rect> {
+        self.pinned
+            .iter()
+            .filter(|(key, _)| *key != WindowKey::Child(id))
+            .map(|(_, r)| *r)
+            .collect()
+    }
 }
 
 /// The area two rectangles share.
@@ -303,6 +350,7 @@ impl BobApp {
             next_window: 0,
             main_pinned: true,
             main_used: Used::default(),
+            main_pinned_at: 0,
             clock: 0,
             can_windows: !cfg!(target_arch = "wasm32"),
             layout_name: None,
@@ -363,6 +411,23 @@ impl BobApp {
             WindowKey::Main => self.main_frame,
             WindowKey::Child(id) => self.windows.iter().find(|w| w.id == id)?.frame,
         }
+    }
+
+    /// Where the pinned windows are on the desktop, those the window system
+    /// says, the one pinned last first.
+    fn pinned_frames(&self) -> Vec<(WindowKey, Rect)> {
+        let main = self
+            .main_frame
+            .filter(|_| self.main_pinned)
+            .map(|f| (WindowKey::Main, f.outer, self.main_pinned_at));
+        let children = self
+            .windows
+            .iter()
+            .filter(|w| w.pinned && !w.close)
+            .filter_map(|w| Some((WindowKey::Child(w.id), w.frame?.outer, w.pinned_at)));
+        let mut pinned: Vec<_> = main.into_iter().chain(children).collect();
+        pinned.sort_by_key(|(_, _, at)| std::cmp::Reverse(*at));
+        pinned.into_iter().map(|(key, r, _)| (key, r)).collect()
     }
 
     /// The monitors, in desktop points: those the window system lists, else
@@ -485,6 +550,8 @@ impl BobApp {
         }
         let mut used = Used::default();
         used.touch(&mut self.clock);
+        // From a layout, pinned in the order it lists them.
+        let pinned_at = if pinned { used.at } else { 0 };
         self.windows.push(DisplayWindow {
             id,
             view,
@@ -495,6 +562,7 @@ impl BobApp {
             frame: None,
             beside: None,
             pinned,
+            pinned_at,
             used,
             close: false,
         });
@@ -509,6 +577,12 @@ impl BobApp {
             return;
         };
         let monitors = self.monitors(ctx);
+        let pinned: Vec<Rect> = self
+            .pinned_frames()
+            .into_iter()
+            .filter(|(key, _)| *key != window)
+            .map(|(_, r)| r)
+            .collect();
         let zoom = ctx.zoom_factor();
         let Some(w) = self
             .windows
@@ -522,7 +596,7 @@ impl BobApp {
             .inner_size
             .unwrap_or(chrome::DEFAULT_WINDOW / zoom)
             * zoom;
-        if let Some(pos) = beside(frame, size, &monitors) {
+        if let Some(pos) = beside(frame, &pinned, size, &monitors) {
             w.builder = w
                 .builder
                 .clone()
@@ -744,6 +818,10 @@ impl BobApp {
         });
         if was_pinned && !self.main_pinned {
             self.main_used.touch(&mut self.clock);
+        }
+        if !was_pinned && self.main_pinned {
+            self.clock += 1;
+            self.main_pinned_at = self.clock;
         }
         if let Some(action) = action {
             self.layout_action(action);
@@ -1329,7 +1407,10 @@ impl BobApp {
         // Closed by Exit or Ctrl+W since they were last drawn.
         self.windows.retain(|w| !w.close);
         let (home, keypad, auto_size) = (&self.home, self.keypad_mode, self.chrome.auto_size);
-        let monitors = self.monitors(&ctx);
+        let desk = Desk {
+            monitors: self.monitors(&ctx),
+            pinned: self.pinned_frames(),
+        };
         let (pad, details, clock) = (&mut self.keypad, &mut self.details, &mut self.clock);
         let can_windows = self.can_windows;
         for w in &mut self.windows {
@@ -1351,7 +1432,7 @@ impl BobApp {
                     .collapsible(false)
                     .default_size(Vec2::new(640.0, 420.0))
                     .show(&ctx, |ui| {
-                        requests.extend(child_ui(ui, w, home, &vcx, None, clock, &monitors));
+                        requests.extend(child_ui(ui, w, home, &vcx, None, clock, &desk));
                     });
                 dialogs(&ctx, key, pad, details);
                 w.close |= !open;
@@ -1361,7 +1442,7 @@ impl BobApp {
             ctx.show_viewport_immediate(w.id, builder, |ui, class| {
                 // No native windows after all: a window in this one.
                 let native = (class != egui::ViewportClass::EmbeddedWindow).then_some(auto_size);
-                requests.extend(child_ui(ui, w, home, &vcx, native, clock, &monitors));
+                requests.extend(child_ui(ui, w, home, &vcx, native, clock, &desk));
                 dialogs(ui.ctx(), key, pad, details);
                 // Closing the window drops its view, and its PVs with it.
                 if ui.input(|i| i.viewport().close_requested()) {
@@ -1644,7 +1725,7 @@ fn child_ui(
     vcx: &ViewCx,
     native: Option<bool>,
     clock: &mut u64,
-    monitors: &[Rect],
+    desk: &Desk,
 ) -> Vec<(Origin, Request)> {
     if native.is_some() {
         w.used.focus(ui.input(|i| i.focused), clock);
@@ -1707,7 +1788,7 @@ fn child_ui(
             }
             // Beside the window it was opened from, at its new size.
             if let Some(origin) = w.beside.take()
-                && let Some(pos) = beside(origin, size * zoom, monitors)
+                && let Some(pos) = beside(origin, &desk.clear_of(w.id), size * zoom, &desk.monitors)
             {
                 ui.ctx()
                     .send_viewport_cmd(egui::ViewportCommand::OuterPosition(
@@ -1745,8 +1826,12 @@ fn corner(ui: &egui::Ui, w: &mut DisplayWindow, clock: &mut u64) {
                 corner_glyph(ui, &resp, "📌");
                 if resp.on_hover_text(PIN_HELP).clicked() {
                     w.pinned = !w.pinned;
-                    // Unpinned, it is the viewer.
-                    if !w.pinned {
+                    // Unpinned, it is the viewer; pinned, new windows go
+                    // beside it.
+                    if w.pinned {
+                        *clock += 1;
+                        w.pinned_at = *clock;
+                    } else {
                         w.used.touch(clock);
                     }
                 }
@@ -2038,6 +2123,7 @@ mod tests {
     fn new_windows_open_beside_their_origin_then_below() {
         use super::{Frame, beside};
         use eframe::egui::{Pos2, Rect, Vec2};
+        let beside_alone = |o, size, monitors: &[Rect]| beside(o, &[], size, monitors);
         let left = Rect::from_min_size(Pos2::ZERO, Vec2::new(1920.0, 1080.0));
         let right = Rect::from_min_size(Pos2::new(1920.0, 0.0), Vec2::new(1920.0, 1080.0));
         let at = |x: f32, y: f32, w: f32| Frame {
@@ -2047,26 +2133,26 @@ mod tests {
         let size = Vec2::new(800.0, 500.0);
         // To the right, top edges level.
         assert_eq!(
-            beside(at(100.0, 50.0, 600.0), size, &[left]),
+            beside_alone(at(100.0, 50.0, 600.0), size, &[left]),
             Some(Pos2::new(700.0, 50.0))
         );
         // No room on the right: to the left.
         assert_eq!(
-            beside(at(1000.0, 50.0, 600.0), size, &[left]),
+            beside_alone(at(1000.0, 50.0, 600.0), size, &[left]),
             Some(Pos2::new(200.0, 50.0))
         );
         // Room on neither side: on the side with more room (left), over it.
         assert_eq!(
-            beside(at(300.0, 50.0, 1400.0), size, &[left]),
+            beside_alone(at(300.0, 50.0, 1400.0), size, &[left]),
             Some(Pos2::new(0.0, 50.0))
         );
         // Kept on the monitor the window is on, and above its bottom.
         assert_eq!(
-            beside(at(2100.0, 900.0, 600.0), size, &[left, right]),
+            beside_alone(at(2100.0, 900.0, 600.0), size, &[left, right]),
             Some(Pos2::new(2700.0, 550.0))
         );
         assert_eq!(
-            beside(at(3000.0, 0.0, 600.0), size, &[left, right]),
+            beside_alone(at(3000.0, 0.0, 600.0), size, &[left, right]),
             Some(Pos2::new(2200.0, 0.0))
         );
         // No room on the right: below, left edges level, slid back onto
@@ -2076,19 +2162,53 @@ mod tests {
             border: Vec2::new(0.0, 30.0),
         };
         assert_eq!(
-            beside(short(1000.0, 0.0, 600.0), size, &[left]),
+            beside_alone(short(1000.0, 0.0, 600.0), size, &[left]),
             Some(Pos2::new(1000.0, 300.0))
         );
         assert_eq!(
-            beside(short(1300.0, 0.0, 600.0), size, &[left]),
+            beside_alone(short(1300.0, 0.0, 600.0), size, &[left]),
             Some(Pos2::new(1120.0, 300.0))
         );
         assert_eq!(
-            beside(short(300.0, 600.0, 1400.0), size, &[left]),
+            beside_alone(short(300.0, 600.0, 1400.0), size, &[left]),
             Some(Pos2::new(300.0, 70.0))
         );
         // No monitors known: no place.
-        assert_eq!(beside(at(0.0, 0.0, 600.0), size, &[]), None);
+        assert_eq!(beside_alone(at(0.0, 0.0, 600.0), size, &[]), None);
+
+        // Beside the window pinned last, clear of the others: a row of
+        // small windows grows beside a big one.
+        let tall = Rect::from_min_size(Pos2::ZERO, Vec2::new(1920.0, 1200.0));
+        let main = at(0.0, 0.0, 600.0);
+        let small = Vec2::new(300.0, 270.0);
+        let first = Rect::from_min_size(Pos2::new(600.0, 0.0), Vec2::new(300.0, 300.0));
+        assert_eq!(
+            beside(main, &[first], small, &[tall]),
+            Some(Pos2::new(900.0, 0.0))
+        );
+        // No room beside it: below it, and failing that beside the others.
+        let right_of_main = Rect::from_min_size(Pos2::new(600.0, 0.0), Vec2::new(800.0, 600.0));
+        let below_main = Rect::from_min_size(Pos2::new(0.0, 600.0), Vec2::new(600.0, 600.0));
+        assert_eq!(
+            beside(main, &[right_of_main], size, &[tall]),
+            Some(Pos2::new(600.0, 600.0))
+        );
+        let bottom = Rect::from_min_size(Pos2::new(0.0, 600.0), Vec2::new(1920.0, 600.0));
+        assert_eq!(
+            beside(main, &[bottom], size, &[tall]),
+            Some(Pos2::new(600.0, 0.0))
+        );
+        assert_eq!(
+            beside(main, &[right_of_main, below_main], size, &[tall]),
+            Some(Pos2::new(600.0, 600.0))
+        );
+        // Nowhere clear: where it covers them least.
+        let rest = Rect::from_min_size(Pos2::new(600.0, 600.0), Vec2::new(1320.0, 600.0));
+        let far = Rect::from_min_size(Pos2::new(1400.0, 0.0), Vec2::new(520.0, 600.0));
+        let pos = beside(main, &[right_of_main, below_main, rest, far], size, &[tall]);
+        assert!(
+            pos.is_some_and(|p| tall.contains_rect(Rect::from_min_size(p, size + main.border)))
+        );
     }
 
     #[test]

@@ -308,9 +308,13 @@ close the display window they are in (in the main window they go back
 first, as before).
 
 A display window opens sized to its display at 100%, within the monitor,
-beside the window whose link opened it, on the first of its right, below
-it, its left and above it where there is room on the monitor (not on
-Wayland, where the compositor places windows). The viewer is sized and
+beside the window pinned last, so a row of small windows grows beside a
+big one: on the first of its right, below it, its left and above it where
+there is room on the monitor clear of the pinned windows. Failing that it
+goes beside the window whose link opened it, then beside the other pinned
+windows, or where it covers them least (not on Wayland, where the
+compositor places windows).
+The viewer is sized and
 placed so again for each display a pinned window's link opens in it. The
 display fits the window as you resize it. It has the native title
 bar only: its toolbar (Back, Forward, Reload, zoom and Home) is hidden until
