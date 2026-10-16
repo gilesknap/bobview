@@ -869,6 +869,14 @@ impl Builder<'_> {
         true
     }
 
+    /// Show tab `index` of a navigation tabs widget because the user picked
+    /// it: a load of its own, on this builder's budget, so that switching
+    /// tabs all day never spends the budget of the load that made the widget.
+    pub fn pick_navtab(&self, node: &mut Node, index: usize, depth: u32) {
+        node.budget = self.budget.clone();
+        self.select_navtab(node, index, depth);
+    }
+
     /// Show tab `index` of a navigation tabs widget.
     pub fn select_navtab(&self, node: &mut Node, index: usize, depth: u32) {
         let tabs = tab_elements(&node.w);
@@ -1098,6 +1106,30 @@ mod tests {
         assert!(screens <= MAX_SCREENS, "{screens} screens");
         assert!(errors > 0);
         assert!(s.nodes.iter().all(|n| n.building.is_none()));
+    }
+
+    #[test]
+    fn picking_navigation_tabs_never_spends_the_load_budget() {
+        let dir = std::env::temp_dir().join(format!("bobview-picks-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("tab.bob"),
+            "<display><widget type='label'/></display>",
+        )
+        .unwrap();
+        let tab = "<tab><file>tab.bob</file></tab>";
+        let main = dir.join("main.bob");
+        let xml =
+            format!("<display><widget type='navtabs'><tabs>{tab}{tab}</tabs></widget></display>");
+        std::fs::write(&main, xml).unwrap();
+        let pvs = PvManager::new();
+        let mut s = Screen::load(&Source::File(main), &Macros::default(), &pvs).unwrap();
+        for i in 0..2 * MAX_SCREENS as usize {
+            Builder::new(&pvs).pick_navtab(&mut s.nodes[0], i % 2, 0);
+        }
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(s.nodes[0].error, None);
+        assert!(s.nodes[0].embedded.is_some());
     }
 
     /// How long a hostile display may take; debug builds are far slower.

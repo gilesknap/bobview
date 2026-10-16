@@ -2427,7 +2427,7 @@ fn navtabs(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut Cx, id: Id) {
         }
     }
     if let Some(i) = clicked {
-        Builder::ui(cx.pvs).select_navtab(node, i, cx.depth);
+        Builder::ui(cx.pvs).pick_navtab(node, i, cx.depth);
     }
     if fetched(ui, node) {
         Builder::ui(cx.pvs).select_navtab(node, node.active_tab, cx.depth);
