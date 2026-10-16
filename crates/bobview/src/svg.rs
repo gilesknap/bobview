@@ -10,7 +10,9 @@
 //!
 //! So nesting is bounded twice: the XML, with references followed, before
 //! usvg parses it, and the tree usvg builds (which `<use>` and embedded SVGs
-//! can make deeper than the XML) before it is rendered. Embedded raster
+//! can make deeper than the XML) before it is rendered. usvg also converts
+//! a marker, pattern, mask, clip path or `<use>` again wherever it is used,
+//! so how much references make it convert is bounded too. Embedded raster
 //! images are decoded at render time, so their declared sizes are checked
 //! first.
 //!
@@ -29,6 +31,12 @@ use resvg::usvg;
 /// about 700 to exhaust Chromium's stack, and real SVGs follow two or three
 /// (and score at most 44).
 pub const MAX_XML_DEPTH: usize = 128;
+
+/// Most elements usvg may convert for an SVG, embedded SVGs included,
+/// counting each as often as references make it convert them (see
+/// [`Cost`]). usvg caches little, so references to references multiply:
+/// a few kilobytes can ask for billions. Real SVGs need at most 2000.
+pub const MAX_WORK: usize = 100_000;
 
 /// Levels of nesting that following one reference counts as. usvg recurses
 /// through several frames for each, more than for a nested group.
@@ -55,12 +63,17 @@ pub fn size_ok(width: u32, height: u32) -> bool {
 pub fn parse(data: &[u8]) -> Result<usvg::Tree, String> {
     let text = std::str::from_utf8(data).map_err(|_| "SVG is not UTF-8 text")?;
     let doc = parse_xml(text)?;
-    let depth = svg_depth(&doc);
-    if depth > MAX_XML_DEPTH {
+    let cost = svg_cost(&doc);
+    if cost.depth > MAX_XML_DEPTH {
         return Err("SVG nests elements or references too deeply".into());
     }
-    // How deep the XML being parsed is so far, embedded SVGs included.
-    let used = Arc::new(AtomicUsize::new(depth));
+    if cost.work > MAX_WORK {
+        return Err("SVG repeats references too often".into());
+    }
+    // How deep the XML being parsed is so far, and how much has been
+    // converted, embedded SVGs included.
+    let used = Arc::new(AtomicUsize::new(cost.depth));
+    let worked = Arc::new(AtomicUsize::new(cost.work));
     // An SVG may embed images as data: URLs, but never names files or URLs:
     // a display from the web is not trusted with local files.
     let options = usvg::Options {
@@ -75,17 +88,24 @@ pub fn parse(data: &[u8]) -> Result<usvg::Tree, String> {
                         }
                         return default(mime, data, opts);
                     }
-                    // A nested SVG is parsed now, deeper on the same stack.
-                    let depth = std::str::from_utf8(&data)
+                    // A nested SVG is parsed now, deeper on the same stack,
+                    // as often as the image is converted.
+                    let cost = std::str::from_utf8(&data)
                         .ok()
                         .and_then(|text| parse_xml(text).ok())
-                        .map_or(usize::MAX, |doc| svg_depth(&doc));
+                        .map_or(Cost::LOOP, |doc| svg_cost(&doc));
                     let outer = used.load(Ordering::Relaxed);
-                    if outer.saturating_add(depth) > MAX_XML_DEPTH {
+                    if outer.saturating_add(cost.depth) > MAX_XML_DEPTH {
                         log::warn!("embedded SVG is not shown: nested too deeply");
                         return None;
                     }
-                    used.store(outer + depth, Ordering::Relaxed);
+                    let work = worked.load(Ordering::Relaxed).saturating_add(cost.work);
+                    if work > MAX_WORK {
+                        log::warn!("embedded SVG is not shown: too much to convert");
+                        return None;
+                    }
+                    worked.store(work, Ordering::Relaxed);
+                    used.store(outer + cost.depth, Ordering::Relaxed);
                     let kind = default(mime, data, opts);
                     used.store(outer, Ordering::Relaxed);
                     kind
@@ -151,10 +171,30 @@ const PAINT_SERVERS: &[&str] = &["linearGradient", "radialGradient", "filter"];
 /// element may take from its parent by `inherit`.
 const NOT_INHERITED: [&str; 3] = ["clip-path", "mask", "filter"];
 
-/// The deepest element nesting in `doc` with the references usvg follows
-/// (`url(#id)` in an attribute, a `style` or a style sheet, and an `href` to
-/// `#id`) counted as `REF_LEVELS` levels each: how deep usvg recurses to
-/// parse it. `usize::MAX` if references form a loop. Found without
+/// What it costs usvg to parse an SVG.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Cost {
+    /// How deep it recurses.
+    pub depth: usize,
+    /// About how many elements it converts.
+    pub work: usize,
+}
+
+impl Cost {
+    /// References that loop, which usvg may follow for ever.
+    const LOOP: Cost = Cost {
+        depth: usize::MAX,
+        work: usize::MAX,
+    };
+}
+
+/// The cost of `doc`. Its depth is the deepest element nesting with the
+/// references usvg follows (`url(#id)` in an attribute, a `style` or a style
+/// sheet, and an `href` to `#id`) counted as `REF_LEVELS` levels each: how
+/// deep usvg recurses to parse it. Its work counts each element once for
+/// each time usvg may convert it: usvg converts a marker at every vertex
+/// it marks, and a pattern, mask, clip path or filter for each element
+/// using it, so references from references multiply. Found without
 /// recursion, in time linear in the size of `doc` and its style sheets.
 ///
 /// An element's references count from the deepest element below it, as
@@ -163,7 +203,7 @@ const NOT_INHERITED: [&str; 3] = ["clip-path", "mask", "filter"];
 /// others. Following one into an element also leads to the references it
 /// inherits from its own ancestors, as usvg converts patterns, markers,
 /// masks, clip paths and the elements a filter image names where they are.
-pub fn svg_depth(doc: &roxmltree::Document) -> usize {
+pub fn svg_cost(doc: &roxmltree::Document) -> Cost {
     let count = doc.descendants().count();
     let index = |id: roxmltree::NodeId| id.get_usize();
     let elements = || doc.descendants().filter(|n| n.is_element());
@@ -195,16 +235,19 @@ pub fn svg_depth(doc: &roxmltree::Document) -> usize {
         .rules
         .retain(|rule| rule.declarations.iter().any(|d| relevant(d.value)));
 
-    // The ids each element names: by `href`, in the properties its
-    // descendants inherit, in all its properties, and in each of
-    // `NOT_INHERITED`; and which of those it takes from its parent.
+    // The ids each element names: by `href`; in the paint and the markers
+    // its descendants inherit; in its other properties; and in each of
+    // `NOT_INHERITED`, with which of those it takes from its parent. And
+    // how many vertices it may put markers on.
     #[derive(Clone, Default)]
     struct Refs {
         href: Vec<usize>,
-        inherited: Vec<usize>,
-        all: Vec<usize>,
+        paint: Vec<usize>,
+        markers: Vec<usize>,
+        other: Vec<usize>,
         not_inherited: [Vec<usize>; 3],
         inherits: [bool; 3],
+        vertices: usize,
     }
     let mut refs = vec![Refs::default(); count];
     for node in elements() {
@@ -237,10 +280,14 @@ pub fn svg_depth(doc: &roxmltree::Document) -> usize {
                 }
                 continue;
             }
-            named(value, &mut r.all);
-            if INHERITED.contains(&name) {
-                named(value, &mut r.inherited);
-            }
+            named(
+                value,
+                match name {
+                    "fill" | "stroke" => &mut r.paint,
+                    _ if INHERITED.contains(&name) => &mut r.markers,
+                    _ => &mut r.other,
+                },
+            );
             if let Some(k) = k {
                 named(value, &mut r.not_inherited[k]);
             }
@@ -252,9 +299,17 @@ pub fn svg_depth(doc: &roxmltree::Document) -> usize {
                 }
             }
         }
-        for list in [&mut r.href, &mut r.inherited, &mut r.all] {
+        for list in [&mut r.href, &mut r.paint, &mut r.markers, &mut r.other] {
             list.sort_unstable();
             list.dedup();
+        }
+        // Each vertex takes at least two characters to write.
+        if matches!(
+            node.tag_name().name(),
+            "path" | "line" | "polyline" | "polygon"
+        ) {
+            let text = |name| node.attribute(name).map_or(0, str::len);
+            r.vertices = (text("d") + text("points")) / 2 + 2;
         }
     }
     // The element whose `NOT_INHERITED` property each element has, taking
@@ -274,115 +329,171 @@ pub fn svg_depth(doc: &roxmltree::Document) -> usize {
     }
 
     // The walk's nodes: each element; each element as followed to by a
-    // reference (`count +`); the references each node inherits from itself
-    // and its ancestors (`2 * count +`); and each id (`3 * count +`), which
-    // leads to every element with that id.
-    #[derive(Clone, Copy, PartialEq)]
-    enum Step {
-        /// Deeper by so many levels.
-        Down(usize),
-        /// Deeper by so many levels from the deepest `Down` step.
-        Across(usize),
+    // reference (`count +`); the paint (`2 * count +`) and the markers
+    // (`3 * count +`) each node inherits from itself and its ancestors; and
+    // each id (`4 * count +`), which leads to every element with that id.
+    let (followed, paint, markers, id) = (count, 2 * count, 3 * count, 4 * count);
+    #[derive(Clone, Copy)]
+    struct Step {
+        to: usize,
+        /// How much deeper.
+        levels: usize,
+        /// Deeper from the deepest step that is not.
+        across: bool,
+        /// How many times it is converted.
+        times: Times,
     }
-    type Steps = Vec<(usize, Step)>;
-    let to_ids = |list: &[usize], step: Step, steps: &mut Steps| {
-        steps.extend(list.iter().map(|i| (3 * count + i, step)));
+    #[derive(Clone, Copy, PartialEq)]
+    enum Times {
+        /// A child element, once.
+        Child,
+        Once,
+        /// Once for each element below the one it is followed from.
+        Each,
+        /// Once for each vertex there.
+        Vertex,
+    }
+    let step = |to, levels, across, times| Step {
+        to,
+        levels,
+        across,
+        times,
     };
-    // What a walk node leads to, and how many levels it is itself.
-    let next = |v: usize| -> (usize, Steps) {
-        let mut steps = Steps::new();
-        if v >= 3 * count {
-            for e in &having[v - 3 * count] {
-                steps.push((count + e, Step::Down(0)));
+    let to_ids = |list: &[usize], levels, across, times, steps: &mut Vec<Step>| {
+        steps.extend(list.iter().map(|i| step(id + i, levels, across, times)));
+    };
+    // What a walk node leads to.
+    let next = |v: usize| -> Vec<Step> {
+        let mut steps = Vec::new();
+        if v >= id {
+            for e in &having[v - id] {
+                steps.push(step(followed + e, 0, false, Times::Once));
             }
-            return (0, steps);
+            return steps;
         }
         let e = v % count;
         let node = doc
             .get_node(roxmltree::NodeId::from(e))
             .expect("a node of this document");
         let parent = node.parent().map(|p| index(p.id()));
-        if v >= 2 * count {
-            steps.extend(parent.map(|p| (2 * count + p, Step::Down(0))));
-            to_ids(&refs[e].inherited, Step::Down(REF_LEVELS), &mut steps);
-            return (0, steps);
+        if v >= paint {
+            let base = v - e;
+            steps.extend(parent.map(|p| step(base + p, 0, false, Times::Once)));
+            let list = if base == paint {
+                &refs[e].paint
+            } else {
+                &refs[e].markers
+            };
+            to_ids(list, REF_LEVELS, false, Times::Once, &mut steps);
+            return steps;
         }
-        if v >= count {
-            steps.push((e, Step::Down(0)));
+        if v >= followed {
+            steps.push(step(e, 0, false, Times::Once));
             // What it inherits from where it is, unless it draws nothing.
             if !PAINT_SERVERS.contains(&node.tag_name().name()) {
-                steps.extend(parent.map(|p| (2 * count + p, Step::Across(0))));
+                steps.extend(parent.map(|p| step(paint + p, 0, true, Times::Each)));
+                steps.extend(parent.map(|p| step(markers + p, 0, true, Times::Vertex)));
             }
-            // An `inherit` of what is not inherited takes the parent's.
-            for (k, owner) in owner[e].iter().enumerate() {
-                if let (true, Some(o)) = (refs[e].inherits[k], owner) {
-                    to_ids(
-                        &refs[*o].not_inherited[k],
-                        Step::Across(REF_LEVELS),
-                        &mut steps,
-                    );
-                }
-            }
-            return (0, steps);
+            return steps;
         }
         for c in node.children().filter(|c| c.is_element()) {
-            steps.push((index(c.id()), Step::Down(1)));
+            steps.push(step(index(c.id()), 1, false, Times::Child));
         }
-        to_ids(&refs[e].href, Step::Down(REF_LEVELS), &mut steps);
-        to_ids(&refs[e].all, Step::Across(REF_LEVELS), &mut steps);
-        (1, steps)
+        let r = &refs[e];
+        to_ids(&r.href, REF_LEVELS, false, Times::Once, &mut steps);
+        to_ids(&r.paint, REF_LEVELS, true, Times::Each, &mut steps);
+        to_ids(&r.markers, REF_LEVELS, true, Times::Vertex, &mut steps);
+        to_ids(&r.other, REF_LEVELS, true, Times::Once, &mut steps);
+        // An `inherit` of what is not inherited takes the parent's.
+        for (k, owner) in owner[e].iter().enumerate() {
+            if let (true, Some(o)) = (r.inherits[k], owner) {
+                let list = &refs[*o].not_inherited[k];
+                to_ids(list, REF_LEVELS, true, Times::Once, &mut steps);
+            }
+        }
+        steps
     };
 
-    // A depth-first walk, keeping the deepest each node leads to once all
-    // it leads to is known.
+    // A depth-first walk, keeping the deepest each node leads to, and how
+    // many elements converting it converts, once all it leads to is known;
+    // and for each element, how many elements and vertices are below it.
     #[derive(Clone, Copy, PartialEq)]
     enum State {
         New,
         Walking,
         Done,
     }
-    let mut state = vec![State::New; 3 * count + having.len()];
+    let mut state = vec![State::New; id + having.len()];
     let mut depth = vec![0usize; state.len()];
-    // A node, its own levels, what it leads to and how far through that the
-    // walk is.
-    let mut stack: Vec<(usize, usize, Steps, usize)> = Vec::new();
+    let mut work = vec![0usize; state.len()];
+    let (mut below, mut vertices) = (vec![0usize; count], vec![0usize; count]);
+    // A node, what it leads to and how far through that the walk is.
+    let mut stack: Vec<(usize, Vec<Step>, usize)> = Vec::new();
     let mut deepest = 0;
     for start in elements().map(|n| index(n.id())) {
         if state[start] != State::New {
             continue;
         }
         state[start] = State::Walking;
-        let (levels, steps) = next(start);
-        stack.push((start, levels, steps, 0));
-        while let Some((node, levels, leads_to, at)) = stack.last_mut() {
-            let Some(&(v, _)) = leads_to.get(*at) else {
-                let (mut down, mut across) = (*levels, 0usize);
-                for &(v, step) in leads_to.iter() {
-                    match step {
-                        Step::Down(l) => down = down.max(l.saturating_add(depth[v])),
-                        Step::Across(l) => across = across.max(l.saturating_add(depth[v])),
+        stack.push((start, next(start), 0));
+        while let Some((node, leads_to, at)) = stack.last_mut() {
+            let node = *node;
+            let Some(&Step { to, .. }) = leads_to.get(*at) else {
+                let e = node % count;
+                let element = node < followed;
+                if element {
+                    below[e] = 1;
+                    vertices[e] = refs[e].vertices;
+                    for s in leads_to.iter().filter(|s| s.times == Times::Child) {
+                        below[e] = below[e].saturating_add(below[s.to]);
+                        vertices[e] = vertices[e].saturating_add(vertices[s.to]);
                     }
                 }
-                depth[*node] = down.saturating_add(across);
-                state[*node] = State::Done;
+                let (mut down, mut across) = (usize::from(element), 0usize);
+                let mut w = usize::from(element);
+                for s in leads_to.iter() {
+                    let d = s.levels.saturating_add(depth[s.to]);
+                    if s.across {
+                        across = across.max(d);
+                    } else {
+                        down = down.max(d);
+                    }
+                    let times = match s.times {
+                        Times::Child | Times::Once => 1,
+                        Times::Each => below[e],
+                        Times::Vertex => vertices[e],
+                    };
+                    let converts = times.saturating_mul(work[s.to]);
+                    // Only one element with an id is the one followed.
+                    w = if node >= id {
+                        w.max(converts)
+                    } else {
+                        w.saturating_add(converts)
+                    };
+                }
+                depth[node] = down.saturating_add(across);
+                work[node] = w;
+                state[node] = State::Done;
                 stack.pop();
                 continue;
             };
             *at += 1;
-            match state[v] {
+            match state[to] {
                 State::New => {
-                    state[v] = State::Walking;
-                    let (levels, steps) = next(v);
-                    stack.push((v, levels, steps, 0));
+                    state[to] = State::Walking;
+                    stack.push((to, next(to), 0));
                 }
                 // A loop, which usvg may or may not break.
-                State::Walking => return usize::MAX,
+                State::Walking => return Cost::LOOP,
                 State::Done => {}
             }
         }
         deepest = deepest.max(depth[start]);
     }
-    deepest
+    Cost {
+        depth: deepest,
+        work: work[index(doc.root_element().id())],
+    }
 }
 
 /// The ids named by `url(#id)`s in `value`.
@@ -880,10 +991,108 @@ mod tests {
         on_small_stack(move || {
             for svg in chains {
                 let doc = parse_xml(&svg).unwrap();
-                assert!(svg_depth(&doc) > 13 * 60, "{}", svg_depth(&doc));
+                assert!(svg_cost(&doc).depth > 13 * 60, "{}", svg_cost(&doc).depth);
                 assert!(parse(svg.as_bytes()).is_err());
             }
         });
+    }
+
+    #[test]
+    fn references_repeated_by_references_are_refused() {
+        // `n` levels of `wrap`, each holding `per` copies of `link` naming
+        // the level before: `per^n` copies of the first, as usvg caches
+        // none of these.
+        let levels = |n: usize, per: usize, first: &str, link: &str, wrap: &str| {
+            let links: String = (1..=n)
+                .map(|i| {
+                    let content = link.replace("PREV", &(i - 1).to_string()).repeat(per);
+                    wrap.replace("ID", &i.to_string())
+                        .replace("CONTENT", &content)
+                })
+                .collect();
+            format!(r##"{SVG}<defs>{first}{links}</defs><use href="#x{n}"/></svg>"##)
+        };
+        let marker = r#"<marker id="x0"><rect width="1" height="1"/></marker>"#;
+        let svgs = [
+            levels(
+                6,
+                10,
+                marker,
+                r#"<path d="M0 0L1 1" stroke="black" marker-start="url(#xPREV)"/>"#,
+                r#"<marker id="xID">CONTENT</marker>"#,
+            ),
+            // Markers repeat at each vertex too.
+            levels(
+                4,
+                1,
+                marker,
+                &format!(
+                    r#"<path d="M0 0{}" stroke="black" marker-mid="url(#xPREV)"/>"#,
+                    "L1 1".repeat(20)
+                ),
+                r#"<marker id="xID">CONTENT</marker>"#,
+            ),
+            levels(
+                6,
+                10,
+                r#"<mask id="x0"><rect width="5" height="5" fill="white"/></mask>"#,
+                r#"<rect width="5" height="5" fill="white" mask="url(#xPREV)"/>"#,
+                r#"<mask id="xID">CONTENT</mask>"#,
+            ),
+            levels(
+                6,
+                10,
+                r#"<pattern id="x0" width="1" height="1"><rect width="1" height="1"/></pattern>"#,
+                r#"<rect width="1" height="1" fill="url(#xPREV)"/>"#,
+                r#"<pattern id="xID" width="1" height="1">CONTENT</pattern>"#,
+            ),
+            levels(
+                6,
+                10,
+                r#"<g id="x0"><rect width="1" height="1"/></g>"#,
+                r##"<use href="#xPREV"/>"##,
+                r#"<g id="xID">CONTENT</g>"#,
+            ),
+        ];
+        for svg in svgs {
+            let doc = parse_xml(&svg).unwrap();
+            assert!(svg_cost(&doc).work > MAX_WORK, "{}", svg_cost(&doc).work);
+            let e = parse(svg.as_bytes()).err();
+            assert_eq!(e.as_deref(), Some("SVG repeats references too often"));
+        }
+        // A few repeats are fine.
+        let svg = levels(
+            3,
+            10,
+            r#"<g id="x0"><rect width="1" height="1"/></g>"#,
+            r##"<use href="#xPREV"/>"##,
+            r#"<g id="xID">CONTENT</g>"#,
+        );
+        assert!(parse(svg.as_bytes()).is_ok());
+        // Embedded SVGs share the budget, however many times each is used.
+        let work = svg_cost(&parse_xml(&svg).unwrap()).work;
+        let image = format!(
+            r#"<image id="i" width="10" height="10" xlink:href="data:image/svg+xml;base64,{}"/>"#,
+            base64(svg.as_bytes())
+        );
+        let n = MAX_WORK / work + 2;
+        let outer = format!(
+            r##"{SVG}<defs>{image}</defs>{}</svg>"##,
+            r##"<use href="#i"/>"##.repeat(n)
+        );
+        let tree = parse(outer.as_bytes()).unwrap();
+        let mut images = 0;
+        let mut todo = vec![tree.root()];
+        while let Some(g) = todo.pop() {
+            for node in g.children() {
+                match node {
+                    usvg::Node::Group(g) => todo.push(g),
+                    usvg::Node::Image(_) => images += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert!(images > 0 && images < n, "{images} of {n}");
     }
 
     #[test]
@@ -892,12 +1101,12 @@ mod tests {
         let svg = format!(
             r#"{SVG}<g fill="url(#p)"><pattern id="p" width="1" height="1"><rect width="1" height="1"/></pattern><rect width="5" height="5"/></g></svg>"#
         );
-        assert_eq!(svg_depth(&parse_xml(&svg).unwrap()), usize::MAX);
+        assert_eq!(svg_cost(&parse_xml(&svg).unwrap()).depth, usize::MAX);
         let svg = format!(
             r#"{SVG}<defs><pattern id="a" width="1" height="1"><rect width="1" height="1" fill="url(#b)"/></pattern><pattern id="b" width="1" height="1"><rect width="1" height="1" style="fill: url( '#a' )"/></pattern></defs><rect width="10" height="10" fill="url(#a)"/></svg>"#
         );
         let doc = parse_xml(&svg).unwrap();
-        assert_eq!(svg_depth(&doc), usize::MAX);
+        assert_eq!(svg_cost(&doc).depth, usize::MAX);
         assert!(parse(svg.as_bytes()).is_err());
         // A gradient inside what it fills is no loop: its stops draw nothing.
         let svg = format!(
@@ -908,7 +1117,7 @@ mod tests {
 
     #[test]
     fn references_count_towards_the_depth() {
-        let depth = |body: &str| svg_depth(&parse_xml(&format!("{SVG}{body}</svg>")).unwrap());
+        let depth = |body: &str| svg_cost(&parse_xml(&format!("{SVG}{body}</svg>")).unwrap()).depth;
         assert_eq!(depth("<g><rect/></g>"), 3);
         // svg > rect, then the pattern the rect names: pattern > rect.
         let pattern = r#"<pattern id="p"><rect/></pattern>"#;
