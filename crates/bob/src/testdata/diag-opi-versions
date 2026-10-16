@@ -1,0 +1,56 @@
+# This file defines versions of the various components used for building the
+# display screens.
+
+SUPPORT=/dls_sw/prod/R3.14.12.3/support
+
+# Support module versions used by Diagnostics screens.
+# These versions need to be manually maintained: see python/versions.py in
+# the Diagnostics support module.
+MOTOR=$SUPPORT/motor/6-9dls11
+DEVIOCSTATS=$SUPPORT/devIocStats/3-1-14dls2-0
+ENZLOCUM4=$SUPPORT/enzLoCuM4/2-33
+PMACUTIL=$SUPPORT/pmacUtil/5-6
+TIMINGTEMPLATES=$SUPPORT/TimingTemplates/6-10-1
+_4CHTIMER=$SUPPORT/4chTimer/3-3
+# Enables link to vacuum valve GUI from XBPM screen
+DLSPLC=$SUPPORT/dlsPLC/1-44
+
+# Automatically maintained paths: for these we use the configured current
+# version.
+LIBERA="$(configure-ioc s -p DI-EBPM-gui-dir)"
+PBPM="$(configure-ioc s -p DI-PBPM-gui-dir)"
+MBF="$(configure-ioc s -p DI-MBF-gui-dir)"
+
+
+# Allow any of the definitions in this file to be overridden from the command
+# line to help with development.  All overrides are of the form
+#   key=new-value
+# and must precede any other arguments
+while [[ $1 =~ .*=.* ]]; do
+    IFS== read value path <<<"$1"
+    shift
+    eval $value=\'$path\'
+done
+
+
+# Define helper functions for use in calling script.
+
+# This joins the remaining arguments with the separator given as the first
+# argument.  Called as:
+#
+#   joined="$(join sep arg ... arg)"
+#
+join()
+{
+    local separator="$1"
+    shift
+
+    local sep=
+    local x
+    for x; do
+        printf "%s%s" "$sep" "$x"
+        sep="$separator"
+    done
+}
+
+# vim: filetype=sh:
