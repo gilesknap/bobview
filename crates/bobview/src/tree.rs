@@ -196,10 +196,7 @@ fn embed(
 
 /// A file named by a widget of the display at `base`.
 fn resolve(base: Option<&Source>, file: &str) -> Source {
-    match base {
-        Some(base) => base.resolve(file),
-        None => Source::parse(file),
-    }
+    crate::fetch::resolve(base, file)
 }
 
 /// What `action` of widget `w` opens, as clicking it would (see

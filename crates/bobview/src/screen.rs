@@ -193,10 +193,7 @@ impl Node {
 
     /// Resolve a file named by this widget against the display it is in.
     pub fn resolve(&self, file: &str) -> Source {
-        match &self.base {
-            Some(base) => base.resolve(file),
-            None => Source::parse(file),
-        }
+        crate::fetch::resolve(self.base.as_ref(), file)
     }
 }
 
