@@ -139,26 +139,24 @@ impl View {
         self.open_path = loc.source.to_string();
         #[cfg(target_arch = "wasm32")]
         set_page_url(&loc);
-        self.loading = None;
         // In a browser `poll_loading` fetches and builds every display.
-        #[cfg(target_arch = "wasm32")]
-        let fetch_first = true;
-        #[cfg(not(target_arch = "wasm32"))]
-        let fetch_first = loc.source.is_url();
-        if fetch_first {
-            self.loading = Some(self.start_loading(&loc));
-            self.error = None;
-            self.current = Some(loc);
-            return;
-        }
-        let loaded = Screen::load(&loc.source, &loc.macros, &self.pvs);
+        self.loading = Some(self.start_loading(&loc));
+        self.error = None;
         self.current = Some(loc);
-        self.loaded(loaded);
+        // A local or already fetched display is usually built at once: show
+        // it without a frame of "Loading".
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(rx) = &self.loading
+            && let Ok(loaded) = rx.recv_timeout(crate::screen::QUICK)
+        {
+            self.loading = None;
+            self.loaded(loaded);
+        }
     }
 
-    /// Build a fetched display on a thread, embedded displays and all, so a
-    /// slow server doesn't freeze the window; `poll_loading` shows it once
-    /// it arrives.
+    /// Build the display on a thread, embedded displays and all, so a slow
+    /// server or file system doesn't freeze the window; `poll_loading`
+    /// shows it once it arrives.
     #[cfg(not(target_arch = "wasm32"))]
     fn start_loading(&self, loc: &Location) -> Loading {
         let (tx, rx) = std::sync::mpsc::channel();
