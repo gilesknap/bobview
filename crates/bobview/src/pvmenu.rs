@@ -177,13 +177,26 @@ fn details_rows(details: &Details, s: &PvState) -> Vec<(&'static str, String)> {
         if !s.labels.is_empty() {
             rows.push(("States", s.labels.join(", ")));
         }
-        rows.push(("Writable", if s.writable { "yes" } else { "no" }.into()));
+        rows.push(("Writable", writable_text(s).into()));
+        if let Some(e) = &s.write_error {
+            rows.push(("Last write failed", e.clone()));
+        }
     }
     rows.push(("Widget", details.widget.clone()));
     if let Some(file) = &details.file {
         rows.push(("Display", file.to_string()));
     }
     rows
+}
+
+/// Whether a write is allowed: PV Access gives no access rights, so there
+/// the answer is a guess until a put is refused.
+fn writable_text(s: &PvState) -> &'static str {
+    match (s.writable, s.writable_known) {
+        (true, true) => "yes",
+        (false, _) => "no",
+        (true, false) => "unknown (the server decides when you write)",
+    }
 }
 
 /// A one-line summary for bug reports and logbooks.
@@ -295,6 +308,16 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn writable_text_says_when_it_is_only_a_guess() {
+        let mut s = PvState::default();
+        assert_eq!(writable_text(&s), "no");
+        s.writable = true;
+        assert!(writable_text(&s).starts_with("unknown"));
+        s.writable_known = true;
+        assert_eq!(writable_text(&s), "yes");
+    }
 
     #[test]
     fn formats_utc_time() {

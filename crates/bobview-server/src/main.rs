@@ -28,19 +28,26 @@ Serve the bobview web build, .bob files and a PV Web Socket on one port.
 Open http://HOST:PORT/?display=FILE.bob in a browser (default index.bob).
 
   -p, --port PORT        port to listen on (default 8080)
-  --bind ADDR            address to listen on (default 0.0.0.0, every
-                         interface)
+  --bind ADDR            address to listen on (default 127.0.0.1, this machine
+                         only; 0.0.0.0 is every interface)
   --web DIR              the web build from scripts/build-web.sh (default
                          ../share/bobview/web next to this binary, else dist/web)
   --opi DIR              serve .bob files from here; they take precedence over
                          files of the same name in the web build
   --write                let browsers write to PVs (off by default, as in PVWS);
-                         only pages from this server may then connect
-  --allow-origin ORIGIN  with --write, also let pages from ORIGIN connect, e.g.
-                         https://host.example.com (may be repeated)
-  --host NAME            with --write, let browsers call this server NAME, as
-                         well as an IP address, localhost, this machine's name
-                         and the hosts of --allow-origin (may be repeated)
+                         every write must carry the write token
+  --write-token TOKEN    the token --write wants (default: $BOBVIEW_WRITE_TOKEN,
+                         else a random one printed at startup); a page passes
+                         it as &token=TOKEN. Prefer the variable: arguments
+                         show in `ps`
+  --allow-origin ORIGIN  also let pages from ORIGIN connect, e.g.
+                         https://host.example.com (may be repeated); other
+                         pages than this server's own are refused
+  --host NAME            let browsers call this server NAME, as well as an IP
+                         address, localhost, this machine's name and the hosts
+                         of --allow-origin (may be repeated)
+  --max-per-ip N         most clients at once from one address (default 10;
+                         raise it behind a reverse proxy, which is one address)
   --throttle-ms MS       least time between updates of one PV (default 100)
   -h, --help             show this help
   -V, --version          show the version
@@ -54,14 +61,18 @@ fn main() {
         .init();
 
     let mut port = 8080;
-    let mut bind = "0.0.0.0".to_string();
+    let mut bind = "127.0.0.1".to_string();
     let mut web = None;
     let mut opi = None;
+    let mut token = std::env::var("BOBVIEW_WRITE_TOKEN").ok();
     let mut config = pvws::Config {
         write: false,
+        write_token: String::new(),
         allow_origins: Vec::new(),
         hosts: Vec::new(),
         throttle: Duration::from_millis(100),
+        max_per_ip: 10,
+        ping: Duration::from_secs(30),
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -71,8 +82,10 @@ fn main() {
             "--web" => web = Some(PathBuf::from(args.next().unwrap_or_default())),
             "--opi" => opi = args.next().map(PathBuf::from),
             "--write" => config.write = true,
+            "--write-token" => token = args.next(),
             "--allow-origin" => config.allow_origins.extend(args.next()),
             "--host" => config.hosts.extend(args.next()),
+            "--max-per-ip" => config.max_per_ip = parse(&arg, args.next()),
             "--throttle-ms" => config.throttle = Duration::from_millis(parse(&arg, args.next())),
             "-h" | "--help" => {
                 print!("{USAGE}");
@@ -88,8 +101,23 @@ fn main() {
             }
         }
     }
-    if !config.write && !(config.allow_origins.is_empty() && config.hosts.is_empty()) {
-        log::warn!("--allow-origin and --host do nothing without --write");
+    if config.write {
+        config.write_token = match token {
+            Some(token) if !token.is_empty() => token,
+            Some(_) => {
+                eprintln!("--write-token: the token is empty");
+                std::process::exit(2);
+            }
+            None => {
+                let token = random_token();
+                // Not the log: RUST_LOG=warn would hide it.
+                eprintln!("writes are on; pages must pass &token={token}");
+                token
+            }
+        };
+        log::info!("writes are on, and need the write token");
+    } else if token.is_some() {
+        log::warn!("--write-token does nothing without --write");
     }
     let web = web.unwrap_or_else(default_web);
     if !web.join("index.html").is_file() {
@@ -99,10 +127,10 @@ fn main() {
         );
         std::process::exit(1);
     }
-    let addr: SocketAddr = match format!("{bind}:{port}").parse() {
-        Ok(addr) => addr,
+    let addr = match bind.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
+        Ok(ip) => SocketAddr::new(ip, port),
         Err(e) => {
-            eprintln!("bad address {bind}:{port}: {e}");
+            eprintln!("--bind {bind}: {e}");
             std::process::exit(2);
         }
     };
@@ -131,10 +159,22 @@ fn main() {
         if let Some(opi) = &opi {
             log::info!("displays from {}", opi.display());
         }
+        let app = app.into_make_service_with_connect_info::<SocketAddr>();
         if let Err(e) = axum::serve(listener, app).await {
             log::error!("server stopped: {e}");
         }
     });
+}
+
+/// 128 random bits as hex, from the operating system.
+fn random_token() -> String {
+    use std::io::Read;
+    let mut bytes = [0u8; 16];
+    if let Err(e) = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut bytes)) {
+        eprintln!("cannot make a write token ({e}): pass --write-token TOKEN");
+        std::process::exit(1);
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The web build installed next to this binary, else the one

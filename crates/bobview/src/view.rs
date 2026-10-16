@@ -14,20 +14,23 @@ use crate::widgets::{self, Cx, Request};
 
 /// The window a view is drawn in, and so the window a widget's request acts
 /// on (Back, Reload and Close act on their own window).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum WindowKey {
     /// The main window, with the toolbar.
+    #[default]
     Main,
     /// A display window of its own.
     Child(egui::ViewportId),
 }
 
-/// Where a request came from: its window, and whether ctrl was held as it
-/// was made (a link then navigates in place in multi-window mode).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Where a request came from: its window, and whether ctrl or shift was
+/// held as it was made (a link then navigates in place, or opens a window
+/// of its own).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Origin {
     pub window: WindowKey,
     pub ctrl: bool,
+    pub shift: bool,
 }
 
 /// What drawing a view gives back.
@@ -51,6 +54,9 @@ pub struct ViewCx<'a> {
     pub trends: &'a [(u64, String)],
 }
 
+/// How long a PV write notice stays in the status line.
+const NOTICE_SECONDS: f64 = 8.0;
+
 /// A display shown in a window, with its history and zoom.
 pub struct View {
     pvs: PvManager,
@@ -71,6 +77,9 @@ pub struct View {
     pub open_path: String,
     /// The display at `current`, being fetched and built on a thread.
     loading: Option<Loading>,
+    /// The latest write notice seen (see [`PvManager::notice`]) and the
+    /// time, in egui seconds, it was first shown, to hide it after a while.
+    notice_seen: (u64, f64),
     /// Command actions still being worked out, so a double click runs one.
     pub launching: Vec<LaunchKey>,
     /// Bumped on every `show`, so a launch started on another display is dropped.
@@ -85,6 +94,16 @@ type Loading = Receiver<Result<Screen, bob::Error>>;
 /// once they have all arrived.
 #[cfg(target_arch = "wasm32")]
 struct Loading;
+
+/// A display window's title: the display's, after a pin when the window
+/// is pinned.
+pub fn window_title(title: &str, pinned: bool) -> String {
+    if pinned {
+        format!("📌 {title}")
+    } else {
+        title.to_string()
+    }
+}
 
 /// What makes two command actions the same: base, directory and command.
 pub type LaunchKey = (Option<String>, Option<String>, String);
@@ -106,6 +125,7 @@ impl View {
             open_path: String::new(),
             loading: None,
             launching: Vec::new(),
+            notice_seen: (0, 0.0),
             shown: 0,
             window_title: String::new(),
         }
@@ -270,12 +290,13 @@ impl View {
     }
 
     /// Title the window this view is drawn in (or the browser page) after
-    /// its display.
-    pub fn update_title(&mut self, ctx: &egui::Context) {
-        if let Some(s) = &self.screen
-            && s.title != self.window_title
-        {
-            self.window_title = s.title.clone();
+    /// its display, marked when the window is `pinned`.
+    pub fn update_title(&mut self, ctx: &egui::Context, pinned: bool) {
+        let Some(title) = self.screen.as_ref().map(|s| window_title(&s.title, pinned)) else {
+            return;
+        };
+        if title != self.window_title {
+            self.window_title = title;
             #[cfg(not(target_arch = "wasm32"))]
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.window_title.clone()));
             #[cfg(target_arch = "wasm32")]
@@ -363,6 +384,7 @@ impl View {
         let origin = Origin {
             window: vcx.window,
             ctrl: ui.input(|i| i.modifiers.command),
+            shift: ui.input(|i| i.modifiers.shift),
         };
         Drawn {
             status,
@@ -371,8 +393,29 @@ impl View {
         }
     }
 
-    fn status(&self, ui: &mut egui::Ui) {
+    /// The PV write notice to show now, if one is recent: shown for
+    /// [`NOTICE_SECONDS`] from the frame it first appears in.
+    fn notice(&mut self, ui: &egui::Ui) -> Option<String> {
+        let (n, text) = self.pvs.notice();
+        let now = ui.input(|i| i.time);
+        if n != self.notice_seen.0 {
+            self.notice_seen = (n, now);
+        }
+        let left = NOTICE_SECONDS - (now - self.notice_seen.1);
+        if n == 0 || left <= 0.0 {
+            return None;
+        }
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs_f64(left));
+        Some(text)
+    }
+
+    fn status(&mut self, ui: &mut egui::Ui) {
+        let notice = self.notice(ui);
         ui.horizontal(|ui| {
+            if let Some(text) = notice {
+                ui.colored_label(Color32::from_rgb(0xb0, 0x30, 0x00), text);
+            }
             if let Some(e) = &self.error {
                 ui.colored_label(Color32::RED, e);
             } else if self.loading.is_some()
@@ -438,6 +481,9 @@ fn set_page_url(loc: &Location) {
     let dir = format!("{}{}", url.origin(), &path[..=path.rfind('/').unwrap_or(0)]);
     let display = loc.source.to_string();
     let params = url.search_params();
+    // The write token is read at startup; keep it out of the address bar,
+    // history and bookmarks.
+    params.delete("token");
     params.set("display", display.strip_prefix(&dir).unwrap_or(&display));
     // Escaped for parse_macros.
     let macros: Vec<String> = loc

@@ -107,6 +107,17 @@ small high-DPI screen so that they take a small share of it; `--ui-scale F`
 PV and value; right-click it (long-press on a touch screen) to copy the PV
 name or value, open the PV details, or trend it (see [Trends](#trends)). On a touch screen, pinch to zoom.
 
+### Writes
+
+`--read-only` refuses every write to a PV: controls are disabled and a write
+action says in the status line why it did nothing. `loc://` PVs are exempt,
+as they live inside bobview and cannot reach a control system. PV Access
+does not report access rights, so such a PV is assumed writable (the PV
+details say "unknown") and a put the server refuses is shown as a write
+error in the status line and the PV details. A `write_pv` action (or the
+toggle script) of a display loaded from an `http://` or `https://` URL asks
+for confirmation before it writes; displays from local files write at once.
+
 ## What it draws
 
 | widgets | notes |
@@ -275,35 +286,63 @@ switch; each value holds until the next, and a gap marks where a PV was
 disconnected. Below the plot a legend gives each PV's colour, name and
 current value, or Disconnected; ✖ removes a PV, and Add PV adds one.
 
-## Multi-window mode and layouts
+## Pinned windows and layouts
 
 For a control room, several displays can be open side by side, each in a
-window of its own, and the arrangement saved and restored. Multi-window mode
-is switched on with 🗗 on the main window's toolbar (or `--multi-window`).
-The toggle and the layout controls are not shown in a browser, nor on a
-touch or small screen.
+window of its own, and the arrangement saved and restored. Each window is
+**pinned** or not, which decides where its links (an action or menu button,
+a symbol click …) open their displays, whatever their target:
 
-In multi-window mode a link (an action or menu button, a symbol click …)
-opens its display in a new window, whatever its target, and a link to a
-display already open with the same macros raises that window instead.
-**Ctrl+click** follows a link in place, in the window it is in, with Back
-and Forward as in one window; with multi-window mode off every link
-navigates in place, as before. BOY Exit buttons close the display window
-they are in (in the main window they go back first, as before).
+| Click | Display already open somewhere | Not open |
+|---|---|---|
+| in a pinned window | raise that window | open in the viewer, or a new window if every window is pinned |
+| in an unpinned window | raise that window | open in place |
+| **shift**+click | raise that window | open in a new window |
+| **ctrl**+click | open in place | open in place |
+
+The **viewer** is the unpinned window used last (focused, opened or
+unpinned), so clicking a window once makes it where the next link goes.
+"Already open" means the same display with the same macros. A display
+opened in place or in the viewer keeps that window's history for Back and
+Forward.
+
+The main window starts pinned, so it stays where it is while the displays
+it links to come and go in one other window; pin that one too to keep it,
+and the next link opens a new viewer. Unpinned, the main window navigates in
+place as one window does. Holding shift opens every display in a window of
+its own, as the old multi-window mode did. The main window's pin is 📌 on
+its toolbar; a display window's is in the corner of its display (below).
+Pinned windows have 📌 before their title. In a browser, and on a touch or
+small screen, displays have no windows of their own: every link navigates
+in place, and the pin and layout controls are not shown. BOY Exit buttons
+close the display window they are in (in the main window they go back
+first, as before).
 
 A display window opens sized to its display at 100%, within the monitor,
-and the display fits the window as you resize it. It has the native title
+beside the window pinned last, so a row of small windows grows beside a
+big one: on the first of its right, below it, its left and above it where
+there is room on the monitor clear of the pinned windows. Failing that it
+goes beside the window whose link opened it, then beside the other pinned
+windows, or where it covers them least (not on Wayland, where the
+compositor places windows).
+The viewer is sized and
+placed so again for each display a pinned window's link opens in it. The
+display fits the window as you resize it. It has the native title
 bar only: its toolbar (Back, Forward, Reload, zoom and Home) is hidden until
-you show it with the chevron that appears in the top-right corner while the
-pointer is over the window, with **Ctrl+T**, or with Show toolbar in the
-right-click menu on the display's background (which also has Close). In
+you show it. While the pointer is over the window, small buttons appear in
+the top-right corner of the display: ◀ Back (while the toolbar is hidden),
+📌 the window's pin, and a chevron that shows or hides the toolbar, as
+**Ctrl+T** and Show toolbar in the right-click menu on the display's
+background (which also has Close) do. In
 every window Ctrl+R reloads, Alt+← and Alt+→ go back and forward, and
 Ctrl+W closes the window. Closing the main window quits bobview and closes
 its windows.
 
 A layout records the open windows: each one's display, Eclipse project and
-effective macros, its position and size, the main window's zoom and whether
-a display window shows its toolbar. It records the trend windows too: each
+effective macros, its position and size, whether it is pinned, the main
+window's zoom and whether a display window shows its toolbar (a layout from
+before windows were pinned pins them all if it was saved in multi-window
+mode, and none if not). It records the trend windows too: each
 one's PVs, time span, log scale, position and size. Layouts are JSON files in
 `$XDG_CONFIG_HOME/bobview/layouts` (by default `~/.config/bobview/layouts`).
 The main toolbar's layout list loads one (closing the display and trend
@@ -340,21 +379,36 @@ bobview's own CA/PVA client. Run it anywhere `caget` works:
 bobview-server --opi /path/to/displays
 ```
 
-and open `http://HOST:8080/?display=index.bob`. The release tarball includes
+and open `http://localhost:8080/?display=index.bob` (on this machine; from another, start the server with `--bind` and use its name). The release tarball includes
 `bobview-server` and the web build, which it finds in `share/bobview/web`; in
 a checkout, `./scripts/build-web.sh` writes `dist/web` (it needs the
 `wasm-bindgen` CLI matching `Cargo.lock`) and `--web DIR` picks another. Files
 in `--opi` take precedence over same-named files in the web build (which has
 the test displays); dot-files such as `.git` are never served. The server
-listens on `--bind 0.0.0.0 --port 8080` by default, so on every interface.
+listens on `--bind 127.0.0.1 --port 8080` by default, so only this machine can
+reach it; use `--bind 0.0.0.0` (every interface) or a specific address to serve
+others, ideally behind a firewall or an authenticating reverse proxy, since
+reading PVs needs no login. The server holds at most 100 clients and 50,000
+subscribed PVs, and refuses PV names over 256 characters or with spaces or
+non-ASCII characters (so `loc://s("hello world")` is refused). One address
+may hold 10 clients (`--max-per-ip N`), and a client that stops answering
+websocket pings is dropped. Behind a reverse proxy every client has the
+proxy's address, so raise `--max-per-ip` and expect the logs to show the proxy;
+the `Host` the proxy passes on must also be one of the server's names, so give
+a public name with `--host NAME` (the Origin/Host check now applies to read-only
+servers too).
 
 The page also takes `&macros=P=X,R=Y`, `&zoom=F`, `&keypad` and, to use
 another PVWS server, `&pvws=host[:port]` (meaning `wss://host[:port]/pvws/pv`,
 or `ws://` when the page is plain `http:` and the port isn't 443) or a full
 `ws://` or `wss://` URL; `display` may be a URL on another server that allows
 cross-origin requests. Writes are off unless the server has `--write`, since
-they go out as the server's user. Browsers let any page open a websocket, so
-with `--write` the server accepts only pages from itself (by `Origin`), plus
+they go out as the server's user, and then each write must carry a token:
+`--write-token TOKEN` (arguments show in `ps`, so prefer the
+`BOBVIEW_WRITE_TOKEN` environment variable), or a random one that the server
+prints to stderr at startup; open the page with `&token=TOKEN`. The page removes
+the token from its address after reading it, so a reload needs it again. Browsers let any page open a websocket, so the
+server always accepts only pages from itself (by `Origin`), plus
 any named with `--allow-origin https://host.example.com` (repeatable). Those
 pages must also call the server by an IP address, `localhost`, this machine's
 name, the host of an `--allow-origin` or a name given with `--host NAME`
