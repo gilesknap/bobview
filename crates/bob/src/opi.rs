@@ -605,7 +605,11 @@ fn widget(mut el: Element) -> Vec<Element> {
         }
         (_, "multi_state_led") => {
             led_border(&mut el);
-            led_states(&mut el);
+            let labels = flag(&el, "show_boolean_label") != Some(false);
+            led_states(&mut el, labels);
+            if !labels {
+                set(&mut el, "fallback_label", "");
+            }
         }
         (_, "choice" | "radio" | "combo") => items(&mut el),
         (_, "bool_button") => {
@@ -1261,8 +1265,9 @@ fn led_border(el: &mut Element) {
     add(el, "height", -2.0 * b);
 }
 
-/// A BOY multi-state LED's numbered state properties as Phoebus `<states>`.
-fn led_states(el: &mut Element) {
+/// A BOY multi-state LED's numbered state properties as Phoebus `<states>`,
+/// with blank labels when BOY hid them (`show_boolean_label` false).
+fn led_states(el: &mut Element, labels: bool) {
     let n = num(el, "state_count").unwrap_or(0.0).clamp(0.0, MAX_COUNT) as usize;
     let mut states = Element::new("states");
     for i in 0..n {
@@ -1276,7 +1281,7 @@ fn led_states(el: &mut Element) {
         ));
         state.children.push(Element::with_text(
             "label",
-            label.map(|l| l.text).unwrap_or_default(),
+            label.filter(|_| labels).map(|l| l.text).unwrap_or_default(),
         ));
         if let Some(mut c) = color {
             c.name = "color".into();
@@ -2071,6 +2076,16 @@ widget.setPropertyValue("opi_file", pv0 + ".opi");"#,
             Some("1")
         );
         assert_eq!(w.color("fallback_color").unwrap().r, 2);
+        let w = one(
+            "LED",
+            r#"<state_count>1</state_count><state_label_0>Idle</state_label_0><state_label_fallback>Err</state_label_fallback>
+            <show_boolean_label>false</show_boolean_label>"#,
+        );
+        assert_eq!(
+            w.get("states").unwrap().children[0].child_text("label"),
+            Some("")
+        );
+        assert_eq!(w.text("fallback_label"), Some(""));
         let w = one(
             "bytemonitor",
             "<square_led>true</square_led><numBits>4</numBits><label><s>a</s><s>b</s></label>",
