@@ -2,8 +2,8 @@
 //!
 //! The expression language covers what rule editors produce: `pv0`, `pvStr0`,
 //! `pvInt0`, `pvSev0`, `pvLegacySev0` (BOY's numbering), numbers, strings, `true`/`false`, comparison,
-//! arithmetic, bitwise `&`, `|` and `^`, `&&`/`and`, `||`/`or`, `!`/`not`
-//! and parentheses.
+//! arithmetic, bitwise `&`, `|`, `^`, `<<` and `>>`, `&&`/`and`,
+//! `||`/`or`, `!`/`not` and parentheses.
 //!
 //! Phoebus runs a rule as a Jython script, so a `.bob` rule's operators bind
 //! as Python's do ([`Lang::Python`]): comparisons chain (`1 < pv0 < 5`) and
@@ -12,6 +12,13 @@
 //! integers floor. BOY ran rules as JavaScript, so an `.opi` rule's bind as
 //! JavaScript's do ([`Lang::JavaScript`]), as the display was written for.
 //! In both, as in Phoebus, macros in the expressions are expanded first.
+//! As Phoebus turns a rule's JavaScript-style logic into Python, a lone
+//! `=` in a `.bob` rule is `==`.
+//!
+//! The bitwise operators take the integer part of a double, so `pv0 & 4`
+//! works although `pv0` is a double. Jython raises a `TypeError` there
+//! instead, and the rule falls through to the property's own value; bobview
+//! is the more lenient.
 
 use bob::{Element, Rule};
 use pv::{Pv, PvManager};
@@ -275,6 +282,8 @@ fn eval(e: &Expr, env: &Env) -> Val {
         Expr::Not(x) => Val::Bool(!eval(x, env).truthy()),
         Expr::Neg(x) => match eval(x, env) {
             Val::Int(n) => n.checked_neg().map_or(Val::Num(-(n as f64)), Val::Int),
+            // A Python bool is an int.
+            Val::Bool(b) if env.lang == Lang::Python => Val::Int(-(b as i64)),
             v => Val::Num(-v.num()),
         },
         Expr::Bin(a, op, b) => {
@@ -344,20 +353,63 @@ fn binary(a: &Val, op: &str, b: &Val, lang: Lang) -> Val {
             (Lang::Python, None) => Val::Num(x - y * (x / y).floor()),
             (Lang::JavaScript, None) => Val::Num(x % y),
         },
-        // Bitwise, on the integer parts.
-        "&" | "|" | "^" => {
+        // Python's bitwise operators keep two bools a bool.
+        "&" | "|" | "^" if lang == Lang::Python => match (a, b) {
+            (Val::Bool(p), Val::Bool(q)) => Val::Bool(match op {
+                "&" => p & q,
+                "|" => p | q,
+                _ => p ^ q,
+            }),
+            _ => bitwise(op, x as i64, y as i64, lang),
+        },
+        "&" | "|" | "^" => bitwise(op, x as i64, y as i64, lang),
+        "<<" | ">>" => shift(op, x, y, lang),
+        _ => Val::Bool(false),
+    }
+}
+
+/// `i op j` for the bitwise operators, on the integer parts.
+fn bitwise(op: &str, i: i64, j: i64, lang: Lang) -> Val {
+    let r = match op {
+        "&" => i & j,
+        "|" => i | j,
+        _ => i ^ j,
+    };
+    match lang {
+        Lang::Python => Val::Int(r),
+        Lang::JavaScript => Val::Num(r as f64),
+    }
+}
+
+/// `x << y` or `x >> y`, on the integer parts. Python's integers do not
+/// overflow (a shift too big for 64 bits gives a double) and a negative
+/// count is an error (NaN here, as for a division by zero); JavaScript's are
+/// 32-bit, with the count taken modulo 32.
+fn shift(op: &str, x: f64, y: f64, lang: Lang) -> Val {
+    let left = op == "<<";
+    match lang {
+        Lang::Python => {
             let (i, j) = (x as i64, y as i64);
-            let r = match op {
-                "&" => i & j,
-                "|" => i | j,
-                _ => i ^ j,
+            if j < 0 {
+                return Val::Num(f64::NAN);
+            }
+            if !left {
+                return Val::Int(i >> j.min(63));
+            }
+            let r = if j < 64 {
+                i.checked_shl(j as u32)
+            } else {
+                None
             };
-            match lang {
-                Lang::Python => Val::Int(r),
-                Lang::JavaScript => Val::Num(r as f64),
+            match r.filter(|r| r >> j == i) {
+                Some(r) => Val::Int(r),
+                None => Val::Num(i as f64 * 2f64.powi(j.min(2000) as i32)),
             }
         }
-        _ => Val::Bool(false),
+        Lang::JavaScript => {
+            let (i, n) = (x as i64 as i32, (y as i64 as u32) & 31);
+            Val::Num(if left { i.wrapping_shl(n) } else { i >> n } as f64)
+        }
     }
 }
 
@@ -383,7 +435,7 @@ enum Tok {
     Close,
 }
 
-fn tokenize(s: &str) -> Option<Vec<Tok>> {
+fn tokenize(s: &str, lang: Lang) -> Option<Vec<Tok>> {
     let cs: Vec<char> = s.chars().collect();
     let mut i = 0;
     let mut out = Vec::new();
@@ -436,9 +488,13 @@ fn tokenize(s: &str) -> Option<Vec<Tok>> {
             i += 1;
         } else {
             let two: String = cs[i..(i + 2).min(cs.len())].iter().collect();
-            if ["==", "!=", "<=", ">=", "&&", "||", "//"].contains(&two.as_str()) {
+            if ["==", "!=", "<=", ">=", "&&", "||", "//", "<<", ">>"].contains(&two.as_str()) {
                 out.push(Tok::Op(two));
                 i += 2;
+            } else if c == '=' && lang == Lang::Python {
+                // As Phoebus's `javascriptToPythonLogic` makes it.
+                out.push(Tok::Op("==".into()));
+                i += 1;
             } else if "<>!+-*/%&|^".contains(c) {
                 out.push(Tok::Op(c.to_string()));
                 i += 1;
@@ -451,7 +507,7 @@ fn tokenize(s: &str) -> Option<Vec<Tok>> {
 }
 
 fn parse(s: &str, lang: Lang) -> Option<Expr> {
-    let toks = tokenize(s)?;
+    let toks = tokenize(s, lang)?;
     let mut p = Parser { toks, pos: 0, lang };
     let e = p.or()?;
     (p.pos == p.toks.len()).then_some(e)
@@ -472,6 +528,7 @@ const PYTHON: &[&[&str]] = &[
     &["|"],
     &["^"],
     &["&"],
+    &["<<", ">>"],
     &["+", "-"],
     &["*", "/", "//", "%"],
 ];
@@ -482,6 +539,7 @@ const JAVASCRIPT: &[&[&str]] = &[
     &["&"],
     &["==", "!="],
     &["<", ">", "<=", ">="],
+    &["<<", ">>"],
     &["+", "-"],
     &["*", "/", "%"],
 ];
@@ -669,6 +727,49 @@ mod tests {
     }
 
     #[test]
+    fn shifts_bind_as_in_python() {
+        use pv::Value::*;
+        // Looser than `+`, tighter than `&` and comparisons.
+        assert_eq!(run("1 << 2 + 1", &[]), Val::Int(8));
+        assert_eq!(run("pvInt0 & 1 << 2", &[Long(6)]), Val::Int(4));
+        assert_eq!(run("-8 >> 1", &[]), Val::Int(-4));
+        assert_eq!(run("1 << 64", &[]), Val::Num(2f64.powi(64)));
+        assert!(matches!(run("1 << -1", &[]), Val::Num(n) if n.is_nan()));
+        // As a techui-support positioner display chains them.
+        for (a, b, state) in [(0, 0, 0), (1, 0, 1), (0, 1, 2), (1, 1, 3)] {
+            let pvs = [Long(a), Long(b)];
+            assert_eq!(run("pvInt0 + (pvInt1<<1)", &pvs), Val::Int(state));
+            let mid = run(" 2 <= (pvInt0 + (pvInt1<<1)) < 4", &pvs).truthy();
+            assert_eq!(mid, (2..4).contains(&state), "{a} {b}");
+        }
+        // JavaScript's are 32-bit, below comparisons.
+        assert_eq!(js("1 << 2 + 1", &[]), Val::Num(8.0));
+        assert_eq!(js("1 << 33", &[]), Val::Num(2.0));
+        assert!(js("1 << 2 == 4", &[]).truthy());
+    }
+
+    #[test]
+    fn python_rules_turn_a_lone_equals_into_a_comparison() {
+        use pv::Value::*;
+        assert!(run("pv0 = 1", &[Long(1)]).truthy());
+        assert!(!run("pv0 = 1", &[Long(2)]).truthy());
+        assert!(run("pv0 <= 1 and pv0 >= 1 and pv0 != 2", &[Long(1)]).truthy());
+    }
+
+    #[test]
+    fn python_bools_stay_bools() {
+        // As Jython: `True & True` is a bool, which Phoebus sets a property
+        // to as Java's Boolean, "true"; `-True` is the int -1.
+        let v = run("(1 < 2) & (2 < 3)", &[]);
+        assert_eq!(v, Val::Bool(true));
+        assert_eq!(v.to_text(), "true");
+        assert_eq!(run("(1 < 2) ^ (2 < 3)", &[]), Val::Bool(false));
+        assert_eq!(run("(1 < 2) & 3", &[]), Val::Int(1));
+        assert_eq!(run("-(1 < 2)", &[]), Val::Int(-1));
+        assert_eq!(js("(1 < 2) & (2 < 3)", &[]), Val::Num(1.0));
+    }
+
+    #[test]
     fn opi_rules_bind_as_javascript() {
         use pv::Value::*;
         // 4 == 4 first, then pv0 & true.
@@ -749,11 +850,12 @@ mod tests {
     fn rejects_garbage() {
         for lang in [Lang::Python, Lang::JavaScript] {
             assert!(parse("pv0 ==", lang).is_none());
-            assert!(parse("pv0 = 1", lang).is_none());
             assert!(parse("(pv0", lang).is_none());
             assert!(parse("pv0 == $(STATE)", lang).is_none());
         }
         assert!(parse("7 // 2", Lang::JavaScript).is_none());
+        // A lone `=` is `==` only in Python, as Phoebus makes it.
+        assert!(parse("pv0 = 1", Lang::JavaScript).is_none());
     }
 
     #[test]
