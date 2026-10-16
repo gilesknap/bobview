@@ -1,6 +1,6 @@
 //! The application window: navigation bar, display area and status line.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -97,9 +97,6 @@ pub struct BobApp {
     touch: bool,
     /// The PV details dialog, and the window it was asked for in.
     details: Option<(WindowKey, pvmenu::Details)>,
-    /// Writes from a display from the web, waiting for the user's say-so,
-    /// asked about one at a time (see [`MAX_CONFIRMS`]).
-    confirm: VecDeque<Confirm>,
     /// The saved layouts, for the toolbar's menus.
     layouts: LayoutList,
     /// Open trend windows, and the id the next one gets.
@@ -169,20 +166,6 @@ struct Launched {
     shown: u64,
     target: Option<Location>,
 }
-
-struct Confirm {
-    window: WindowKey,
-    pv: pv::Pv,
-    value: String,
-    /// Whether Cancel has been given the focus, which happens once, as the
-    /// dialog first shows this write.
-    focused: bool,
-}
-
-/// Writes that may wait for confirmation at once. One click can ask for
-/// several (an action list run together), but a display must not be able
-/// to pile up writes behind the dialog; more are refused.
-const MAX_CONFIRMS: usize = 16;
 
 /// The saved layouts' names, read when a menu listing them opens and after
 /// a save or delete, not on every frame it is open.
@@ -445,7 +428,6 @@ impl BobApp {
             tree_toggled: false,
             touch: false,
             details: None,
-            confirm: VecDeque::new(),
             layouts: LayoutList::default(),
             trends: Vec::new(),
             next_trend: 0,
@@ -1522,7 +1504,7 @@ impl eframe::App for App {
 /// What a window's pass can change that other windows draw: the windows
 /// open and their titles (which the main window keeps), what each display
 /// window shows (in the navigator, and the window itself when the change
-/// came from another), and the windows the dialogs are in.
+/// came from another), and the window the PV details dialog is in.
 #[derive(PartialEq)]
 struct Shape {
     main: u64,
@@ -1530,7 +1512,7 @@ struct Shape {
     /// is closing.
     windows: Vec<(egui::ViewportId, u64, String, bool)>,
     trends: Vec<(u64, String)>,
-    dialogs: [Option<WindowKey>; 2],
+    details: Option<WindowKey>,
 }
 
 impl BobApp {
@@ -1586,10 +1568,7 @@ impl BobApp {
                 .map(|w| (w.id, w.view.shown, self.child_title(w), w.close))
                 .collect(),
             trends: self.trend_titles(),
-            dialogs: [
-                self.confirm.front().map(|c| c.window),
-                self.details.as_ref().map(|(w, _)| *w),
-            ],
+            details: self.details.as_ref().map(|(w, _)| *w),
         }
     }
 
@@ -1626,10 +1605,10 @@ impl BobApp {
                 repaint(trend_viewport(*id));
             }
         }
-        if after.dialogs != before.dialogs {
-            for window in after.dialogs.iter().flatten() {
-                repaint(viewport(*window));
-            }
+        if after.details != before.details
+            && let Some(window) = after.details
+        {
+            repaint(viewport(window));
         }
     }
 
@@ -1755,13 +1734,7 @@ impl BobApp {
         if self.details.as_ref().is_some_and(|(w, _)| closed(*w)) {
             self.details = None;
         }
-        self.confirm.retain(|c| !closed(c.window));
-        dialogs(
-            ui.ctx(),
-            WindowKey::Main,
-            &mut self.details,
-            &mut self.confirm,
-        );
+        details_dialog(ui.ctx(), WindowKey::Main, &mut self.details);
         self.save_as_window(ui);
         let mut children = Vec::new();
         if embedded {
@@ -1855,24 +1828,6 @@ impl BobApp {
                 macros,
                 target,
             } => self.follow(ctx, origin, Location { source, macros }, &target),
-            // Shown in the window asked from, which may have been drawn
-            // already this frame, after any asked for before it.
-            Request::ConfirmWrite { pv, value } => {
-                if self.confirm.len() < MAX_CONFIRMS {
-                    self.confirm.push_back(Confirm {
-                        window,
-                        pv,
-                        value,
-                        focused: false,
-                    });
-                } else {
-                    log::warn!(
-                        "not writing '{value}' to {}: {MAX_CONFIRMS} writes already wait to be confirmed",
-                        pv.name()
-                    );
-                }
-                ctx.request_repaint();
-            }
             Request::Details(details) => {
                 self.details = Some((window, details));
                 ctx.request_repaint();
@@ -1973,7 +1928,7 @@ impl BobApp {
                         &desk,
                     ));
                 });
-            dialogs(ctx, key, &mut self.details, &mut self.confirm);
+            details_dialog(ctx, key, &mut self.details);
             w.close |= !open;
         }
         self.windows.retain(|w| !w.close);
@@ -2080,7 +2035,7 @@ impl BobApp {
         let w = &mut self.windows[i];
         w.view.poll_loading(&ctx);
         let requests = child_ui(ui, w, &self.home, &vcx, native, &mut self.clock, &desk);
-        dialogs(&ctx, key, &mut self.details, &mut self.confirm);
+        details_dialog(&ctx, key, &mut self.details);
         // Closing the window drops its view, and its PVs with it.
         if ui.input(|i| i.viewport().close_requested()) {
             w.close = true;
@@ -2116,68 +2071,14 @@ impl BobApp {
     }
 }
 
-/// The write confirmation and PV details dialogs, when asked for in
-/// `window`: drawn in that window.
-fn dialogs(
+/// The PV details dialog, when asked for in `window`: drawn in that window.
+fn details_dialog(
     ctx: &egui::Context,
     window: WindowKey,
     details: &mut Option<(WindowKey, pvmenu::Details)>,
-    confirm: &mut VecDeque<Confirm>,
 ) {
-    if confirm.front().is_some_and(|c| c.window == window) {
-        confirm_window(ctx, confirm);
-    }
     if details.as_ref().is_some_and(|(w, _)| *w == window) {
         details_window(ctx, details);
-    }
-}
-
-/// Ask whether to write the first value a display from the web asked for.
-fn confirm_window(ctx: &egui::Context, confirm: &mut VecDeque<Confirm>) {
-    let waiting = confirm.len().saturating_sub(1);
-    let Some(c) = confirm.front_mut() else {
-        return;
-    };
-    let mut answer = None;
-    egui::Window::new("Write to PV?")
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-        .show(ctx, |ui| {
-            ui.label("A display loaded from the web asks to write");
-            ui.monospace(format!("{} = {}", plain_name(c.pv.name()), c.value));
-            if waiting > 0 {
-                ui.label(format!("{waiting} more to ask about after this one"));
-            }
-            ui.horizontal(|ui| {
-                let write = ui.button("Write").clicked();
-                let cancel = ui.button("Cancel");
-                // Cancel takes the focus from whatever had it (the button
-                // that asked for the write, perhaps), so Enter cancels; only
-                // a click writes. Once: the user may then tab to Write.
-                if !c.focused {
-                    cancel.request_focus();
-                    c.focused = true;
-                }
-                answer = if write {
-                    Some(true)
-                } else if cancel.clicked() {
-                    Some(false)
-                } else {
-                    None
-                };
-            });
-            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                answer = Some(false);
-            }
-        });
-    if let Some(yes) = answer {
-        if yes {
-            c.pv.write(c.value.clone());
-        }
-        confirm.pop_front();
-        // The next one, if any, is shown next frame.
-        ctx.request_repaint();
     }
 }
 
@@ -2584,62 +2485,8 @@ pub(crate) fn plain_name(name: &pv::PvName) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Confirm, WindowKey, confirm_window, plain_name};
-    use eframe::egui;
+    use super::plain_name;
     use pv::PvName;
-    use std::collections::VecDeque;
-
-    #[test]
-    fn writes_are_confirmed_one_at_a_time_and_enter_cancels() {
-        let pvs = pv::PvManager::new();
-        let pv = pvs.subscribe("loc://confirm_test(0)");
-        let ctx = egui::Context::default();
-        let mut confirm: VecDeque<Confirm> = ["1", "2"]
-            .map(|value| Confirm {
-                window: WindowKey::Main,
-                pv: pv.clone(),
-                value: value.into(),
-                focused: false,
-            })
-            .into();
-        // One frame; the display's button, which asked for the writes, has
-        // the focus to begin with, as one pressed with the keyboard keeps it.
-        let frame = |enter: bool, first: bool, confirm: &mut VecDeque<Confirm>| {
-            let mut input = egui::RawInput::default();
-            if enter {
-                input.events.push(egui::Event::Key {
-                    key: egui::Key::Enter,
-                    physical_key: None,
-                    pressed: true,
-                    repeat: false,
-                    modifiers: egui::Modifiers::NONE,
-                });
-            }
-            let out = ctx.run_ui(input, |ui| {
-                let asked = ui.button("Ask");
-                if first {
-                    asked.request_focus();
-                }
-                confirm_window(ui.ctx(), confirm);
-            });
-            out.drop_without_applying_deltas();
-        };
-        frame(false, true, &mut confirm);
-        frame(false, false, &mut confirm);
-        assert_eq!(confirm.len(), 2);
-        assert!(confirm[0].focused);
-        // Enter cancels the first write, not presses the display's button.
-        frame(true, false, &mut confirm);
-        assert_eq!(confirm.len(), 1);
-        assert_eq!(confirm[0].value, "2");
-        // The second gets Cancel focused in its turn.
-        frame(false, false, &mut confirm);
-        frame(false, false, &mut confirm);
-        assert!(confirm[0].focused);
-        frame(true, false, &mut confirm);
-        assert!(confirm.is_empty());
-        assert_eq!(pv.state().value.as_f64(), Some(0.0));
-    }
 
     #[test]
     fn lists_displays_and_project_links() {

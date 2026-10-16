@@ -30,11 +30,10 @@ waits, a 17th is refused), and fail with it if it gives up.
 
 ## Displays from the web
 
-A `write_pv` action (or the toggle script) of a display loaded from an
-`http://` or `https://` URL asks for confirmation before it writes; displays
-from local files write at once. Anyone who can put a file on a web server
-can make a display, so a click on one should not change the machine
-unasked.
+A `write_pv` action and the toggle script write at once, as in Phoebus,
+whether the display came from a local file or an `http://` or `https://`
+URL. To open displays without letting them write, use `--read-only`, which
+refuses every write.
 
 ## Commands
 
