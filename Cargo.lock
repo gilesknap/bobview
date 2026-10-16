@@ -372,6 +372,7 @@ dependencies = [
  "base64 0.23.1",
  "env_logger",
  "log",
+ "mime_guess",
  "percent-encoding",
  "pv",
  "serde_json",

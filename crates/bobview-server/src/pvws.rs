@@ -184,7 +184,9 @@ fn browser_allowed(headers: &HeaderMap, config: &Config) -> bool {
         return false;
     };
     let host = host.to_ascii_lowercase();
-    if !host_allowed(host_name(&host), config) {
+    // `name.` is the fully qualified `name`.
+    let name = host_name(&host);
+    if !host_allowed(name.strip_suffix('.').unwrap_or(name), config) {
         return false;
     }
     let origin = normalise_origin(origin);
@@ -490,13 +492,16 @@ fn new_names(subs: &Subs, text: &str) -> usize {
     ) {
         return 0;
     }
-    msg.get("pvs")
+    let new: HashSet<&str> = msg
+        .get("pvs")
         .and_then(Json::as_array)
         .into_iter()
         .flatten()
         .filter_map(Json::as_str)
-        .filter(|name| !subs.map.contains_key(*name))
-        .count()
+        .filter(|name| valid_name(name) && served_scheme(name) && !subs.map.contains_key(*name))
+        .collect();
+    // Only those `handle` will take.
+    new.len().min(MAX_PVS.saturating_sub(subs.map.len()))
 }
 
 /// Send one message, giving up on a client that takes too long to take it.
@@ -584,21 +589,26 @@ fn handle(hub: &Hub, subs: &mut Subs, text: &str, peer: SocketAddr) -> Vec<Strin
                 return vec![error(format!("Cannot write unknown PV {name}"))];
             };
             if !hub.config.write {
-                return vec![error("writes are disabled on this server (--write)".into())];
+                return vec![write_error(
+                    name,
+                    "writes are disabled on this server (--write)",
+                )];
             }
             let given = msg.get("token").and_then(Json::as_str).unwrap_or_default();
             if !token_ok(given, &hub.config.write_token) {
                 log::warn!("refused a write to {name} from {peer}: bad token");
-                return vec![error(format!("Cannot write {name}: bad or missing token"))];
+                return vec![write_error(name, "bad or missing token")];
             }
-            match msg.get("value").and_then(write_text) {
-                Some(value) => {
-                    log::info!("write {name} = {value} from {peer}");
-                    sub.pv.write(value);
-                    vec![]
-                }
-                None => vec![error(format!("Cannot write {name}: no value"))],
+            let Some(value) = msg.get("value").and_then(write_text) else {
+                return vec![write_error(name, "no value")];
+            };
+            // Said to the client, not the log, which would fill with them.
+            if !sub.pv.state().connected {
+                return vec![write_error(name, "not connected")];
             }
+            log::info!("write {name} = {value} from {peer}");
+            sub.pv.write(value);
+            vec![]
         }
         Some("echo") => vec![text.to_string()],
         Some("ping") => vec![],
@@ -608,6 +618,18 @@ fn handle(hub: &Hub, subs: &mut Subs, text: &str, peer: SocketAddr) -> Vec<Strin
 
 fn error(message: String) -> String {
     json!({"type": "error", "message": message}).to_string()
+}
+
+/// An error naming the PV a write was refused for, so the page can show
+/// it by the PV as well as log it.
+fn write_error(name: &str, why: &str) -> String {
+    json!({
+        "type": "error",
+        "pv": name,
+        "message": format!("Cannot write {name}: {why}"),
+        "write_error": why,
+    })
+    .to_string()
 }
 
 /// A written value as the text `Pv::write` takes; whole numbers lose their
@@ -998,6 +1020,15 @@ mod tests {
         assert!(ok("127.0.0.1:8080", Some("http://127.0.0.1:8080"), &none));
         assert!(ok("[::1]:8080", Some("http://[::1]:8080"), &none));
         assert!(ok("localhost:8080", Some("http://localhost:8080"), &none));
+        // A trailing dot is the same name, fully qualified.
+        assert!(ok("localhost.:8080", Some("http://localhost.:8080"), &none));
+        assert!(ok("server.", Some("http://server."), &none));
+        assert!(!ok(
+            "evil.example.:8080",
+            Some("http://evil.example.:8080"),
+            &none
+        ));
+        assert!(!ok("server..", Some("http://server.."), &none));
         assert!(!ok("[evil]:8080", Some("http://[evil]:8080"), &none));
         // The host of an allowed origin is one of ours.
         assert!(ok(
@@ -1075,6 +1106,34 @@ mod tests {
         let later = t0 + Duration::from_secs(20);
         assert_eq!(pace.spend(MAX_PVS, later), Duration::ZERO);
         assert!(pace.spend(1, later) > Duration::ZERO);
+    }
+
+    #[test]
+    fn pacing_counts_only_pvs_that_would_be_subscribed() {
+        let mut subs = Subs::default();
+        let total = Arc::new(AtomicUsize::new(0));
+        let pvs = PvManager::new();
+        subs.add(
+            "HAVE",
+            pvs.subscribe("loc://pace_have"),
+            SubSlot::take(&total).unwrap(),
+        );
+        let msg = |names: Vec<&str>| json!({"type": "subscribe", "pvs": names}).to_string();
+        let mut names = vec!["DUP:X"; 30_000];
+        names.extend([
+            "HAVE",
+            "bad name",
+            "loc://x",
+            "sim://sine",
+            "NEW",
+            "pva://NEW",
+        ]);
+        assert_eq!(new_names(&subs, &msg(names)), 3);
+        // No more than the client may still have.
+        let many: Vec<String> = (0..MAX_PVS + 5).map(|i| format!("PV{i}")).collect();
+        let many = msg(many.iter().map(String::as_str).collect());
+        assert_eq!(new_names(&subs, &many), MAX_PVS - 1);
+        assert_eq!(new_names(&subs, r#"{"type": "clear", "pvs": ["A"]}"#), 0);
     }
 
     #[test]
@@ -1264,7 +1323,11 @@ mod tests {
         };
         assert!(write(&mut subs, None)[0].contains("token"));
         assert!(write(&mut subs, Some("wrong"))[0].contains("token"));
-        assert!(write(&mut subs, Some("secret")).is_empty());
+        // The right token: TEST:WRITE is not there, and the client hears so.
+        let refused = write(&mut subs, Some("secret"));
+        let m: Map<String, Json> = serde_json::from_str(&refused[0]).unwrap();
+        assert_eq!(m["pv"], "TEST:WRITE");
+        assert_eq!(m["write_error"], "not connected");
         // Bad names are refused and not counted.
         assert!(sub(&mut subs, "bad name")[0].contains("Cannot subscribe"));
         assert_eq!(subs.map.len(), 1);

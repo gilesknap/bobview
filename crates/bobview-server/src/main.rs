@@ -157,18 +157,16 @@ fn main() {
     let app = Router::new()
         .route("/pvws/pv", get(pvws::socket))
         .route("/pvws/info", get(pvws::info));
-    let roots: Vec<PathBuf> = opi.iter().chain([&web]).cloned().collect();
     let app = match &opi {
-        Some(opi) => app.fallback_service(ServeDir::new(opi).fallback(ServeDir::new(&web))),
-        None => app.fallback_service(ServeDir::new(&web)),
-    };
-    let app = if follow_symlinks {
-        app
-    } else {
-        let roots = Arc::new(Roots::new(&roots));
-        app.layer(middleware::from_fn(move |request, next| {
-            confine(roots.clone(), request, next)
-        }))
+        Some(opi) if follow_symlinks => {
+            app.fallback_service(ServeDir::new(opi).fallback(ServeDir::new(&web)))
+        }
+        None if follow_symlinks => app.fallback_service(ServeDir::new(&web)),
+        _ => {
+            let dirs: Vec<PathBuf> = opi.iter().chain([&web]).cloned().collect();
+            let roots = Arc::new(Roots::new(&dirs));
+            app.fallback(move |request: Request| serve_file(roots.clone(), request))
+        }
     }
     .layer(middleware::from_fn(hide_dot_files))
     .layer(middleware::from_fn(no_framing))
@@ -263,54 +261,115 @@ impl Roots {
         )
     }
 
-    /// Whether the file a request path names, in the first root that has
-    /// it (as ServeDir picks), is really inside that root: a symbolic link
-    /// may lead anywhere on the machine.
-    fn contains(&self, path: &str) -> bool {
-        let path = percent_encoding::percent_decode_str(path).decode_utf8_lossy();
-        let rel: PathBuf = path
-            .split('/')
-            .filter(|s| !s.is_empty() && *s != ".")
-            .collect();
+    /// Open the file a request path names, from the first root that has it
+    /// (`index.html` for a directory), unless it is really outside that
+    /// root: a symbolic link may lead anywhere on the machine. The file is
+    /// checked after it is opened, and served from what was opened, so a
+    /// link swapped in meanwhile is caught too.
+    fn open(&self, path: &str) -> Found {
+        let decoded = percent_encoding::percent_decode_str(path).decode_utf8_lossy();
+        let mut rel = PathBuf::new();
+        for segment in decoded.split('/') {
+            match segment {
+                "" | "." => {}
+                ".." => return Found::Missing,
+                s if s.contains('\\') || s.contains('\0') => return Found::Missing,
+                s => rel.push(s),
+            }
+        }
         for (dir, real_dir) in &self.0 {
-            let file = dir.join(&rel);
-            let Ok(real) = std::fs::canonicalize(&file) else {
-                // Not here (or a dangling link): ServeDir looks in the next.
+            let mut file = dir.join(&rel);
+            match std::fs::metadata(&file) {
+                Ok(m) if m.is_dir() => {
+                    if !path.ends_with('/') {
+                        return Found::Redirect(format!("{path}/"));
+                    }
+                    file.push("index.html");
+                }
+                Ok(_) => {}
+                // Not here (or a dangling link): look in the next.
+                Err(_) => continue,
+            }
+            let Ok(opened) = std::fs::File::open(&file) else {
                 continue;
             };
-            let Some(real_dir) = real_dir else {
-                return false;
+            let inside = || -> Option<bool> {
+                use std::os::unix::fs::MetadataExt;
+                let real = std::fs::canonicalize(&file).ok()?;
+                let (now, then) = (std::fs::metadata(&real).ok()?, opened.metadata().ok()?);
+                // The real path is inside, and is the file that was opened.
+                Some(
+                    real.starts_with(real_dir.as_ref()?)
+                        && then.is_file()
+                        && (now.dev(), now.ino()) == (then.dev(), then.ino()),
+                )
             };
-            if !real.starts_with(real_dir) {
-                return false;
-            }
-            // A directory is served as its index.html.
-            if real.is_dir()
-                && let Ok(index) = std::fs::canonicalize(real.join("index.html"))
-            {
-                return index.starts_with(real_dir);
-            }
-            return true;
+            return match inside() {
+                Some(true) => Found::File(opened, file),
+                _ => Found::Refused,
+            };
         }
-        true
+        Found::Missing
     }
 }
 
-/// Refuse files reached through a symbolic link that leads out of the
-/// directory served (see --follow-symlinks).
-async fn confine(roots: Arc<Roots>, request: Request, next: Next) -> Response {
+/// What a request path names.
+enum Found {
+    File(std::fs::File, PathBuf),
+    /// A directory, named without its trailing `/`.
+    Redirect(String),
+    Missing,
+    /// Something outside the served directories.
+    Refused,
+}
+
+/// Serve a file from `roots`, refusing those reached through a symbolic
+/// link that leads out of them (see --follow-symlinks).
+async fn serve_file(roots: Arc<Roots>, request: Request) -> Response {
+    use axum::http::Method;
+    use axum::http::header::{CONTENT_TYPE, LOCATION};
+    if !matches!(*request.method(), Method::GET | Method::HEAD) {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
     let path = request.uri().path().to_string();
-    let inside = tokio::task::spawn_blocking(move || roots.contains(&path))
-        .await
-        .unwrap_or(false);
-    if inside {
-        next.run(request).await
-    } else {
-        log::warn!(
-            "refused {}: a link out of the served directories (see --follow-symlinks)",
-            request.uri().path()
-        );
-        StatusCode::NOT_FOUND.into_response()
+    let read = tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        match roots.open(&path) {
+            Found::File(mut file, name) => {
+                let mut body = Vec::new();
+                match file.read_to_end(&mut body) {
+                    Ok(_) => Ok((body, name)),
+                    Err(_) => Err(Found::Missing),
+                }
+            }
+            other => Err(other),
+        }
+    });
+    match read.await {
+        Ok(Ok((body, name))) => {
+            let mime = mime_guess::from_path(&name).first_or_octet_stream();
+            let mime = HeaderValue::from_str(mime.as_ref())
+                .unwrap_or(HeaderValue::from_static("application/octet-stream"));
+            ([(CONTENT_TYPE, mime)], body).into_response()
+        }
+        Ok(Err(Found::Redirect(to))) => {
+            let to = match request.uri().query() {
+                Some(q) => format!("{to}?{q}"),
+                None => to,
+            };
+            match HeaderValue::from_str(&to) {
+                Ok(to) => (StatusCode::TEMPORARY_REDIRECT, [(LOCATION, to)]).into_response(),
+                Err(_) => StatusCode::NOT_FOUND.into_response(),
+            }
+        }
+        Ok(Err(Found::Refused)) => {
+            log::warn!(
+                "refused {}: a link out of the served directories (see --follow-symlinks)",
+                request.uri().path()
+            );
+            StatusCode::NOT_FOUND.into_response()
+        }
+        _ => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
@@ -326,7 +385,7 @@ fn parse<T: std::str::FromStr>(flag: &str, value: Option<String>) -> T {
 
 #[cfg(test)]
 mod tests {
-    use super::{Roots, is_hidden};
+    use super::{Found, Roots, is_hidden};
     use std::path::PathBuf;
 
     #[test]
@@ -351,15 +410,30 @@ mod tests {
         link(&opi.join("sub"), "inside");
 
         let roots = Roots::new(&[opi.clone(), web.clone()]);
-        assert!(roots.contains("/a.bob"));
-        assert!(roots.contains("/sub/b.bob"));
-        assert!(roots.contains("/inside/b.bob"));
-        assert!(roots.contains("/index.html"));
-        assert!(roots.contains("/"));
-        assert!(roots.contains("/missing.bob"));
-        assert!(!roots.contains("/secret.bob"));
-        assert!(!roots.contains("/out/secret"));
-        assert!(!roots.contains("/%73ecret.bob"));
+        let read = |path: &str| match roots.open(path) {
+            Found::File(mut f, _) => {
+                let mut text = String::new();
+                std::io::Read::read_to_string(&mut f, &mut text).unwrap();
+                text
+            }
+            Found::Redirect(to) => format!("-> {to}"),
+            Found::Missing => "missing".into(),
+            Found::Refused => "refused".into(),
+        };
+        assert_eq!(read("/a.bob"), "a");
+        assert_eq!(read("/sub/b.bob"), "b");
+        assert_eq!(read("/inside/b.bob"), "b");
+        assert_eq!(read("/%73ub/b.bob"), "b");
+        assert_eq!(read("/index.html"), "w");
+        // The web build's index, as opi has none.
+        assert_eq!(read("/"), "w");
+        assert_eq!(read("/sub"), "-> /sub/");
+        assert_eq!(read("/missing.bob"), "missing");
+        assert_eq!(read("/../opi/a.bob"), "missing");
+        assert_eq!(read("/secret.bob"), "refused");
+        assert_eq!(read("/out/secret"), "refused");
+        assert_eq!(read("/%73ecret.bob"), "refused");
+        assert_eq!(read("/out%2Fsecret"), "refused");
         std::fs::remove_dir_all(&base).unwrap();
     }
 

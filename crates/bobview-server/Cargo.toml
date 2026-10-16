@@ -10,6 +10,7 @@ axum = { version = "0.8.9", features = ["ws"] }
 base64 = "0.23.1"
 env_logger = { version = "0.11", default-features = false, features = ["humantime"] }
 log = "0.4.34"
+mime_guess = "2.0.5"
 percent-encoding = "2.3.2"
 pv = { path = "../pv" }
 serde_json = "1.0.154"

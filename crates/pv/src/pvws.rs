@@ -302,7 +302,25 @@ impl Socket {
                     shared.update(|s| apply(s, &sub.vtype, &msg));
                 }
             }
-            Some("error") => log::warn!("PVWS: {}", msg.get("message").unwrap_or(&Json::Null)),
+            Some("error") => {
+                let message = msg
+                    .get("message")
+                    .and_then(Json::as_str)
+                    .unwrap_or_default();
+                // A refused write names its PV: tell the user, as for a
+                // write refused here.
+                let shared = msg
+                    .get("pv")
+                    .and_then(Json::as_str)
+                    .and_then(|name| self.subs.get(name))
+                    .and_then(|sub| sub.shared.upgrade());
+                match shared {
+                    Some(shared) if msg.contains_key("write_error") => {
+                        shared.ctl.notify(message.to_string())
+                    }
+                    _ => log::warn!("PVWS: {message}"),
+                }
+            }
             _ => {}
         }
     }

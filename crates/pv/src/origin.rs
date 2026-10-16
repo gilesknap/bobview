@@ -3,9 +3,22 @@
 /// The origin of an absolute URL: `scheme://host[:port]` in lowercase,
 /// without user info or a default port, and with a websocket's scheme as
 /// the page's (`ws` as `http`, `wss` as `https`), so a socket and a page
-/// on one server have one origin. `None` for anything else.
+/// on one server have one origin. `None` for anything else, including a
+/// URL with a backslash, a control character or white space: a browser
+/// reads those otherwise (`\` is `/` to it, so `ws://evil\@server/` is a
+/// socket to `evil`).
 pub fn url_origin(url: &str) -> Option<String> {
-    let (scheme, rest) = url.trim().split_once("://")?;
+    // In a browser, first as the browser reads it.
+    #[cfg(target_arch = "wasm32")]
+    let url = &web_sys::Url::new(url).ok()?.href();
+    let url = url.trim();
+    if url
+        .chars()
+        .any(|c| c == '\\' || c.is_control() || c.is_whitespace())
+    {
+        return None;
+    }
+    let (scheme, rest) = url.split_once("://")?;
     let scheme = match scheme.to_ascii_lowercase().as_str() {
         "http" | "ws" => "http",
         "https" | "wss" => "https",
@@ -66,5 +79,20 @@ mod tests {
         // A user-info trick names another host.
         assert!(!same_origin("http://server/", "http://server@evil/x.bob"));
         assert!(!same_origin("x", "x"));
+        // A browser takes `\` for `/`: these are sockets to `evil`.
+        let page = "http://server:8080/";
+        for socket in [
+            r"ws://evil\@server:8080/pvws/pv",
+            r"ws://evil\\@server:8080/pvws/pv",
+            "ws://evil\t@server:8080/pvws/pv",
+            "ws://evil\n@server:8080/pvws/pv",
+            "ws://evil @server:8080/pvws/pv",
+            r"ws:\\server:8080/pvws/pv",
+        ] {
+            assert!(!same_origin(page, socket), "{socket}");
+            assert_eq!(url_origin(socket), None, "{socket}");
+        }
+        // Encoded, a backslash is only text in the user info.
+        assert!(same_origin(page, "ws://evil%5C@server:8080/pvws/pv"));
     }
 }
