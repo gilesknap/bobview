@@ -544,6 +544,8 @@ fn time_label(t: f64, step: f64) -> String {
 pub struct Trend {
     /// Tells this window from the others.
     pub id: u64,
+    /// What its PVs are subscribed through: tagged to repaint its window.
+    pvs: PvManager,
     series: Vec<Series>,
     span: f64,
     log: bool,
@@ -556,10 +558,11 @@ pub struct Trend {
 }
 
 impl Trend {
-    /// A trend of the PVs `names`, each once.
+    /// A trend of the PVs `names`, each once, subscribed through `pvs`.
     pub fn new(id: u64, names: &[String], pvs: &PvManager) -> Self {
         let mut t = Self {
             id,
+            pvs: pvs.clone(),
             series: Vec::new(),
             span: DEFAULT_SPAN,
             log: false,
@@ -567,7 +570,7 @@ impl Trend {
             place: Geometry::default(),
             geometry: Geometry::default(),
         };
-        t.extend(names, pvs);
+        t.extend(names);
         t
     }
 
@@ -594,17 +597,17 @@ impl Trend {
 
     /// Add the PVs `names` that it doesn't have yet, each taking the next
     /// line colour as a new trend's PVs do.
-    pub fn extend(&mut self, names: &[String], pvs: &PvManager) {
+    pub fn extend(&mut self, names: &[String]) {
         for name in names {
-            self.add(name, pvs);
+            self.add(name);
         }
     }
 
-    fn add(&mut self, name: &str, pvs: &PvManager) {
+    fn add(&mut self, name: &str) {
         let name = name.trim();
         let key = pv::PvName::parse(name).key();
         if !name.is_empty() && !self.series.iter().any(|s| s.pv.name().key() == key) {
-            self.series.push(Series::new(pvs.subscribe(name)));
+            self.series.push(Series::new(self.pvs.subscribe(name)));
         }
     }
 
@@ -623,7 +626,7 @@ impl Trend {
         }
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, pvs: &PvManager) {
+    pub fn ui(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             egui::ComboBox::from_id_salt(("trend-span", self.id))
                 .selected_text(span_name(self.span))
@@ -641,7 +644,7 @@ impl Trend {
             );
             if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 let name = std::mem::take(&mut self.adding);
-                self.add(&name, pvs);
+                self.add(&name);
             }
         });
 
@@ -1050,7 +1053,7 @@ mod tests {
         let pvs = PvManager::new();
         let names = |n: &[&str]| -> Vec<String> { n.iter().map(|s| s.to_string()).collect() };
         let mut t = Trend::new(0, &names(&["A"]), &pvs);
-        t.extend(&names(&["ca://A", "B", "B", " ", "C"]), &pvs);
+        t.extend(&names(&["ca://A", "B", "B", " ", "C"]));
         // Each PV once, in the order added, so the new ones take the next
         // colours as in a new trend of all three.
         let shown: Vec<String> = t

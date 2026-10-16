@@ -135,6 +135,9 @@ impl View {
     pub fn show(&mut self, loc: Location) {
         // Drop the old screen first so its PVs disconnect before the new ones start.
         self.screen = None;
+        // Its PVs tagged afresh, so the old display's stop repainting this
+        // window, though another window may still show them.
+        self.pvs = self.pvs.retagged();
         self.shown += 1;
         self.open_path = loc.source.to_string();
         #[cfg(target_arch = "wasm32")]

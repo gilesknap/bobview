@@ -54,6 +54,10 @@ pub use value::{
 /// Called whenever any PV changes, so a UI can schedule a repaint.
 pub type Notifier = Arc<dyn Fn() + Send + Sync>;
 
+/// A notifier that PVs are tagged with as they are subscribed through a
+/// [`PvManager::tagged`] handle, called only when one of them changes.
+struct Tag(Notifier);
+
 /// Called with a PV's new state on each change, from the thread making it,
 /// for as long as the caller keeps the `Arc` (see [`Pv::listen`]).
 pub type Listener = Arc<ListenFn>;
@@ -91,6 +95,8 @@ pub(crate) struct Control {
     /// The UI's repaint callback (see [`PvManager::set_notifier`]), so a
     /// new notice is shown without waiting for some PV to change.
     repaint: Arc<RwLock<Option<Notifier>>>,
+    /// Every tag made, called on a new notice too: each window shows it.
+    tags: Mutex<Vec<Weak<Tag>>>,
 }
 
 impl Control {
@@ -103,7 +109,17 @@ impl Control {
         if let Some(n) = self.repaint.read().as_ref() {
             n();
         }
+        for tag in live(&self.tags) {
+            (tag.0)();
+        }
     }
+}
+
+/// The tags in `tags` still held, the others dropped from it.
+fn live(tags: &Mutex<Vec<Weak<Tag>>>) -> Vec<Arc<Tag>> {
+    let mut tags = tags.lock();
+    tags.retain(|t| t.strong_count() > 0);
+    tags.iter().filter_map(Weak::upgrade).collect()
 }
 
 /// Writes to one PV that may wait for the backend at once; more are
@@ -214,6 +230,9 @@ pub(crate) struct Shared {
     #[cfg(not(target_arch = "wasm32"))]
     in_flight: AtomicUsize,
     notify: Arc<RwLock<Option<Notifier>>>,
+    /// The tags of the handles it was subscribed through, called after each
+    /// change while they are held.
+    tags: Mutex<Vec<Weak<Tag>>>,
     listeners: Mutex<Vec<Weak<ListenFn>>>,
     /// Set (under the state lock) once the PV has first connected.
     was_connected: AtomicBool,
@@ -232,6 +251,7 @@ impl Shared {
             #[cfg(not(target_arch = "wasm32"))]
             in_flight: AtomicUsize::new(0),
             notify,
+            tags: Mutex::new(Vec::new()),
             listeners: Mutex::new(Vec::new()),
             was_connected: AtomicBool::new(false),
         })
@@ -268,6 +288,21 @@ impl Shared {
         after_listeners();
         if let Some(n) = self.notify.read().as_ref() {
             n();
+        }
+        for tag in live(&self.tags) {
+            (tag.0)();
+        }
+    }
+
+    /// Call `tag`'s notifier after each change, until it is dropped.
+    fn add_tag(&self, tag: &Arc<Tag>) {
+        let mut tags = self.tags.lock();
+        tags.retain(|t| t.strong_count() > 0);
+        if !tags
+            .iter()
+            .any(|t| std::ptr::eq(t.as_ptr(), Arc::as_ptr(tag)))
+        {
+            tags.push(Arc::downgrade(tag));
         }
     }
 
@@ -629,6 +664,9 @@ impl Pv {
 #[derive(Clone)]
 pub struct PvManager {
     inner: Arc<Inner>,
+    /// What the PVs subscribed through this handle are tagged with (see
+    /// [`PvManager::tagged`]).
+    tag: Option<Arc<Tag>>,
 }
 
 struct Inner {
@@ -692,6 +730,7 @@ impl PvManager {
                 notify: ctl.repaint.clone(),
                 ctl,
             }),
+            tag: None,
         }
     }
 
@@ -714,12 +753,41 @@ impl PvManager {
                 notify: ctl.repaint.clone(),
                 ctl,
             }),
+            tag: None,
         }
     }
 
     /// Register a callback run after every PV change.
     pub fn set_notifier(&self, notifier: Notifier) {
         *self.inner.notify.write() = Some(notifier);
+    }
+
+    /// A handle to the same PVs that tags each PV subscribed through it with
+    /// `notifier`, called after each change of those PVs (and each new
+    /// notice) for as long as this handle or a clone of it is held. A UI
+    /// window gives its display one, to repaint only the windows showing a
+    /// PV that changed.
+    pub fn tagged(&self, notifier: Notifier) -> Self {
+        let tag = Arc::new(Tag(notifier));
+        let mut tags = self.inner.ctl.tags.lock();
+        tags.retain(|t| t.strong_count() > 0);
+        tags.push(Arc::downgrade(&tag));
+        drop(tags);
+        Self {
+            inner: self.inner.clone(),
+            tag: Some(tag),
+        }
+    }
+
+    /// A handle with this one's notifier under a new tag: PVs subscribed
+    /// through it are tagged afresh, and those subscribed only through this
+    /// one stop calling the notifier once it and its clones are dropped (a
+    /// window showing another display).
+    pub fn retagged(&self) -> Self {
+        match &self.tag {
+            Some(tag) => self.tagged(tag.0.clone()),
+            None => self.clone(),
+        }
     }
 
     /// Refuse (or allow again) writes to every PV but `loc://` ones; PVs then
@@ -750,6 +818,10 @@ impl PvManager {
         let key = name.key();
         let mut entries = self.inner.entries.lock();
         if let Some(entry) = entries.map.get(&key).and_then(Weak::upgrade) {
+            drop(entries);
+            if let Some(tag) = &self.tag {
+                entry.shared.add_tag(tag);
+            }
             return Pv(entry);
         }
         // A macro left unexpanded makes a name that is not what was meant,
@@ -790,6 +862,9 @@ impl PvManager {
         entries.insert(key, Arc::downgrade(&entry));
         // Its inputs are subscribed to with the entries unlocked.
         drop(entries);
+        if let Some(tag) = &self.tag {
+            entry.shared.add_tag(tag);
+        }
         if let Some(f) = formula {
             f.start();
         }
@@ -949,6 +1024,55 @@ mod tests {
         pv.write("1");
         assert_eq!(pvs.notice().0, 1);
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn tagged_pvs_call_only_the_notifiers_of_handles_showing_them() {
+        let pvs = PvManager::new();
+        let counter = || {
+            let calls = Arc::new(AtomicU64::new(0));
+            let c = calls.clone();
+            let notifier: Notifier = Arc::new(move || {
+                c.fetch_add(1, Ordering::Relaxed);
+            });
+            (calls, notifier)
+        };
+        let ((a_calls, a), (b_calls, b)) = (counter(), counter());
+        let calls = || {
+            (
+                a_calls.load(Ordering::Relaxed),
+                b_calls.load(Ordering::Relaxed),
+            )
+        };
+        let (a, b) = (pvs.tagged(a), pvs.tagged(b));
+        let x = a.subscribe("loc://tag_x(0)");
+        let y = b.subscribe("loc://tag_y(0)");
+        // One PV that both show, subscribed through each.
+        let both = a.subscribe("loc://tag_both(0)");
+        let _also = b.subscribe("loc://tag_both(0)");
+        x.write("1");
+        assert_eq!(calls(), (1, 0));
+        y.write("1");
+        assert_eq!(calls(), (1, 1));
+        both.write("1");
+        assert_eq!(calls(), (2, 2));
+        // b shows another display: the PVs it showed no longer call it.
+        let old = b;
+        let b = old.retagged();
+        drop(old);
+        both.write("2");
+        y.write("2");
+        assert_eq!(calls(), (3, 2));
+        let _z = b.subscribe("loc://tag_both(0)");
+        both.write("3");
+        assert_eq!(calls(), (4, 3));
+        // A new notice is shown in every window.
+        pvs.subscribe("sys://time").write("1");
+        assert_eq!(calls(), (5, 4));
+        // An untagged handle tags nothing.
+        let plain = pvs.subscribe("loc://tag_plain(0)");
+        plain.write("1");
+        assert_eq!(calls(), (5, 4));
     }
 
     /// A PV whose writes go to a queue no backend reads.

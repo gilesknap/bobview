@@ -352,9 +352,10 @@ fn run(cli: Cli, clicks: Vec<(egui::Pos2, egui::PointerButton)>) -> Result<(), F
             .with_inner_size(chrome::DEFAULT_WINDOW)
             .with_fullscreen(cli.fullscreen),
         // No vsync: each window's buffer swap would wait for a screen
-        // refresh, and every window is drawn in the main one's frame, so a
-        // frame took a refresh per window (~120 ms with 7 windows). We only
-        // repaint on change, so this doesn't spin.
+        // refresh, and eframe draws the windows one after another on one
+        // thread, so windows repainting together would take a refresh each
+        // (~120 ms for 7, when they were all drawn in the main one's frame).
+        // We only repaint on change, so this doesn't spin.
         glow_options: eframe::egui_glow::GlowConfiguration {
             vsync: false,
             ..Default::default()
@@ -371,7 +372,7 @@ fn run(cli: Cli, clicks: Vec<(egui::Pos2, egui::PointerButton)>) -> Result<(), F
             if let Some((layout, name)) = layout {
                 app.restore_layout(layout, Some(name));
             }
-            Ok(Box::new(app))
+            Ok(Box::new(app::App::new(app)))
         }),
     )
     .map_err(|e| Failure::failed(e.to_string()))
@@ -465,7 +466,7 @@ fn main() {
                 Box::new(move |cc| {
                     let ui_scale = chrome::UiScale::from_env();
                     let app = app::BobApp::new(&cc.egui_ctx, Some(start), zoom, ui_scale);
-                    Ok(Box::new(app))
+                    Ok(Box::new(app::App::new(app)))
                 }),
             )
             .await;
