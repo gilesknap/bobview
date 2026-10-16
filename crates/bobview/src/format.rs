@@ -202,7 +202,8 @@ fn parse_sexagesimal(text: &str) -> Option<f64> {
 /// `FormatOptionHandler.parse` makes it: trailing units (anything after
 /// the last space) dropped from a number, `0x…` and `0b…` read as hex and
 /// binary, an enum label as its index; the PV's backend converts the rest.
-/// Text that does not parse is written as it is.
+/// A number that does not parse is written as Phoebus leaves it, without
+/// its units; other text as it is.
 pub(crate) fn entry_value(w: &Widget, s: Option<&PvState>, text: &str) -> String {
     let format = w.i64("format").unwrap_or(DEFAULT);
     let Some(s) = s.filter(|s| s.connected) else {
@@ -220,39 +221,44 @@ fn parse(value: &Value, labels: &[String], units: &str, format: i64, text: &str)
             _ => t,
         }
     };
-    let radix = |t: &str, prefix: [&str; 2], radix: u32| {
-        let t = t
-            .strip_prefix(prefix[0])
-            .or_else(|| t.strip_prefix(prefix[1]))
-            .unwrap_or(t);
-        // Hex is unsigned, so 0x8000000000000000 sets the top bit; binary
-        // is signed, as Phoebus's `Long.parseLong`, so -101 is -5.
-        if radix == 16 {
-            u64::from_str_radix(t, radix)
-                .ok()
-                .map(|n| (n as i64).to_string())
-        } else {
-            i64::from_str_radix(t, radix).ok().map(|n| n.to_string())
-        }
-    };
+    // As Phoebus, text that does not parse is written as it stands by
+    // then: units dropped, and in some cases its prefix or case changed.
+    let parsed = |t: String, n: Option<String>| Some(n.unwrap_or(t));
     let pi = std::f64::consts::PI;
     match format {
         STRING => None,
-        HEX => radix(number_text(), ["0x", "0X"], 16),
-        BINARY => radix(number_text(), ["0b", "0B"], 2),
+        HEX => {
+            let t = number_text();
+            let digits = t.strip_prefix("0x").or(t.strip_prefix("0X")).unwrap_or(t);
+            // Unsigned, so 0x8000000000000000 sets the top bit.
+            let n = u64::from_str_radix(digits, 16).ok();
+            parsed(t.to_string(), n.map(|n| (n as i64).to_string()))
+        }
+        BINARY => {
+            let t = number_text().to_uppercase();
+            let t = t.strip_prefix("0B").unwrap_or(&t).to_string();
+            // Signed, as Phoebus's `Long.parseLong`, so -101 is -5.
+            let n = i64::from_str_radix(&t, 2).ok();
+            parsed(t, n.map(|n| n.to_string()))
+        }
         SEXAGESIMAL => parse_sexagesimal(text).map(|v| v.to_string()),
         SEXAGESIMAL_HMS => parse_sexagesimal(text).map(|v| (v * pi / 12.0).to_string()),
         SEXAGESIMAL_DMS => parse_sexagesimal(text).map(|v| (v * pi / 180.0).to_string()),
         _ => match value {
             Value::Double(_) | Value::Long(_) => {
                 let t = number_text();
-                if let Some(n) = radix_prefixed(t) {
-                    return Some(n);
+                // `0x…` and `0b…` are signed here, unlike the HEX format.
+                if let Some(h) = t.strip_prefix("0x").or(t.strip_prefix("0X")) {
+                    let h = h.to_uppercase();
+                    let n = i64::from_str_radix(&h, 16).ok();
+                    return parsed(h, n.map(|n| n.to_string()));
                 }
-                match value {
-                    Value::Double(_) => t.parse::<f64>().ok().map(|_| t.to_string()),
-                    _ => t.parse::<i64>().ok().map(|_| t.to_string()),
+                if let Some(b) = t.strip_prefix("0b").or(t.strip_prefix("0B")) {
+                    let n = i64::from_str_radix(b, 2).ok();
+                    return parsed(b.to_string(), n.map(|n| n.to_string()));
                 }
+                // A number or not, the PV's backend converts it.
+                Some(t.to_string())
             }
             Value::Enum(_) => {
                 let t = text.trim();
@@ -267,19 +273,6 @@ fn parse(value: &Value, labels: &[String], units: &str, format: i64, text: &str)
             _ => None,
         },
     }
-}
-
-/// A number typed as `0x…` or `0b…` in a format that is not hex or binary.
-fn radix_prefixed(t: &str) -> Option<String> {
-    let (digits, radix) = if let Some(h) = t.strip_prefix("0x").or(t.strip_prefix("0X")) {
-        (h, 16)
-    } else {
-        (t.strip_prefix("0b").or(t.strip_prefix("0B"))?, 2)
-    };
-    // Unsigned, as in the HEX and BINARY formats.
-    u64::from_str_radix(digits, radix)
-        .ok()
-        .map(|n| (n as i64).to_string())
 }
 
 #[cfg(test)]
@@ -315,8 +308,18 @@ mod tests {
         assert_eq!(entry_value(&w, Some(&s), "0x1F mm"), "31");
         assert_eq!(entry_value(&w, Some(&s), "0b101"), "5");
         assert_eq!(entry_value(&w, Some(&s), "1e3"), "1e3");
-        // Text that is not a number goes as typed: the IOC says no.
+        // Text that is not a number goes without its units, as Phoebus
+        // sends it: the IOC says no.
         assert_eq!(entry_value(&w, Some(&s), "abc"), "abc");
+        assert_eq!(entry_value(&w, Some(&s), " abc mm "), "abc");
+        // A bad `0x…` or `0b…` loses its prefix, as in Phoebus; `0x…` is
+        // signed outside the HEX format.
+        assert_eq!(entry_value(&w, Some(&s), "0x1g mm"), "1G");
+        assert_eq!(entry_value(&w, Some(&s), "0b12"), "12");
+        assert_eq!(
+            entry_value(&w, Some(&s), "0x8000000000000000"),
+            "8000000000000000"
+        );
         let l = state(Value::Long(1), "cts");
         assert_eq!(entry_value(&w, Some(&l), "42 cts"), "42");
         // An array's units are not one more element.
@@ -350,7 +353,8 @@ mod tests {
         assert_eq!(entry_value(&bin, Some(&s), "-101"), "-5");
         assert_eq!(entry_value(&bin, Some(&s), "0b-101"), "-5");
         // Hex stays unsigned.
-        assert_eq!(entry_value(&hex, Some(&s), "-1F"), "-1F");
+        assert_eq!(entry_value(&hex, Some(&s), "-1F units"), "-1F");
+        assert_eq!(entry_value(&bin, Some(&s), "0b12 units"), "12");
     }
 
     #[test]
