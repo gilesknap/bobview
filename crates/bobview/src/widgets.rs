@@ -1952,12 +1952,36 @@ fn slider_layout(
     }
 }
 
+/// A scaled slider's alarm level markers, as Phoebus': each of LOLO, LOW,
+/// HIGH and HIHI there is a level for, unless its `show_*` is false. The
+/// levels are the PV's with `limits_from_pv`, else the widget's `level_*`
+/// (10, 20, 80 and 90 unless given). Room is kept for them all; those
+/// outside the range are not drawn.
+fn slider_markers(w: &Widget, s: Option<&PvState>) -> Vec<(f64, &'static str)> {
+    let mut levels = crate::meter::levels(w, s);
+    if !w.bool("limits_from_pv").unwrap_or(true) {
+        for (level, default) in levels.iter_mut().zip([10.0, 20.0, 80.0, 90.0]) {
+            level.get_or_insert(default);
+        }
+    }
+    levels
+        .into_iter()
+        .zip([
+            ("LOLO", "show_lolo"),
+            ("LOW", "show_low"),
+            ("HIGH", "show_high"),
+            ("HIHI", "show_hihi"),
+        ])
+        .filter(|(_, (_, show))| w.bool(show).unwrap_or(true))
+        .filter_map(|(level, (name, _))| Some((level?, name)))
+        .collect()
+}
+
 /// Phoebus ScaledSlider and ScrollBar: a groove along the widget with a
 /// thumb at the value, and for a scaled slider with `show_scale` labelled
-/// ticks on one side and with `show_markers` its alarm levels on the
-/// other, as Phoebus' JavaFX Slider; no value box. A click or
-/// drag moves the thumb, and its value is written when the button is let
-/// go. An empty range (`maximum` equal to `minimum`) leaves the thumb at
+/// ticks on one side and its alarm level markers on the other, as
+/// Phoebus' JavaFX Slider; no value box. A click or drag moves the thumb,
+/// and its value is written when the button is let go. An empty range (`maximum` equal to `minimum`) leaves the thumb at
 /// the start and writes nothing.
 fn slider(
     ui: &mut Ui,
@@ -1997,21 +2021,18 @@ fn slider(
     } else {
         (widest + 2.0 * z, line_h / 2.0)
     };
-    // Phoebus' markers: the alarm levels inside the range, named.
-    let markers: Vec<(f64, &str)> = crate::meter::levels(&w, s)
-        .into_iter()
-        .zip(["LOLO", "LOW", "HIGH", "HIHI"])
-        .filter_map(|(level, name)| Some((level?, name)))
-        .filter(|(level, _)| (min.min(max)..=max.max(min)).contains(level))
-        .collect();
-    let mark_room = (w.kind == "scaledslider" && w.bool("show_markers") == Some(true) && live)
-        .then(|| {
-            if horizontal {
-                line_h
-            } else {
-                size_of("HIHI").x + 2.0 * z
-            }
-        });
+    let markers = if w.kind == "scaledslider" {
+        slider_markers(&w, s)
+    } else {
+        Vec::new()
+    };
+    let mark_room = (!markers.is_empty() && live).then(|| {
+        if horizontal {
+            line_h
+        } else {
+            size_of("HIHI").x + 2.0 * z
+        }
+    });
     let lay = slider_layout(rect, horizontal, z, show_scale.then_some(room), mark_room);
     let scale = crate::axis::Scale {
         lo: min,
@@ -2110,7 +2131,8 @@ fn slider(
         } else {
             area.right()
         };
-        for (level, name) in &markers {
+        let range = min.min(max)..=max.max(min);
+        for (level, name) in markers.iter().filter(|(l, _)| range.contains(l)) {
             tick_at(edge, scale.pos(*level), -1.0, Some(name.to_string()));
         }
     }
@@ -3265,5 +3287,46 @@ pv.setValue(pv_value);
         let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(120.0, 300.0));
         let lay = slider_layout(rect, false, 1.0, Some((40.0, 7.0)), Some(36.0));
         assert_eq!(lay.markers.unwrap().right(), lay.band.left());
+    }
+
+    #[test]
+    fn scaled_slider_markers_follow_the_show_flags() {
+        let slider = |props: &str| {
+            let xml = format!(r#"<display><widget type="scaledslider">{props}</widget></display>"#);
+            bob::Display::parse(&xml).unwrap().widgets.remove(0)
+        };
+        let names = |w: &Widget, s| -> Vec<&str> {
+            slider_markers(w, s).into_iter().map(|(_, n)| n).collect()
+        };
+        // Phoebus' default levels, all shown, without `show_markers`.
+        let own = slider("<limits_from_pv>false</limits_from_pv>");
+        assert_eq!(
+            slider_markers(&own, None),
+            [
+                (10.0, "LOLO"),
+                (20.0, "LOW"),
+                (80.0, "HIGH"),
+                (90.0, "HIHI")
+            ]
+        );
+        let some = slider(
+            "<limits_from_pv>false</limits_from_pv><level_low>30</level_low>
+            <show_lolo>false</show_lolo><show_hihi>false</show_hihi>",
+        );
+        assert_eq!(slider_markers(&some, None), [(30.0, "LOW"), (80.0, "HIGH")]);
+        // From the PV: only the limits it has.
+        let pv = PvState {
+            connected: true,
+            warning_range: Some((2.0, 8.0)),
+            ..Default::default()
+        };
+        assert_eq!(names(&slider(""), Some(&pv)), ["LOW", "HIGH"]);
+        assert!(
+            names(
+                &slider("<show_low>false</show_low><show_high>false</show_high>"),
+                Some(&pv)
+            )
+            .is_empty()
+        );
     }
 }

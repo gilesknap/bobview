@@ -300,6 +300,12 @@ fn renames(short: &str, kind: &str) -> &'static [(&'static str, &'static str)] {
             ("color_lolo", "major_warning_color"),
             ("color_lo", "minor_warning_color"),
         ],
+        (_, "scaledslider") => &[
+            ("level_lo", "level_low"),
+            ("level_hi", "level_high"),
+            ("show_lo", "show_low"),
+            ("show_hi", "show_high"),
+        ],
         (_, "textentry") => &[("multiline_input", "multi_line")],
         (_, "progressbar") => &[("color_fillbackground", "background_color")],
         (_, "picture") => &[("image_file", "file"), ("stretch_to_fit", "stretch_image")],
@@ -518,9 +524,7 @@ fn widget(mut el: Element) -> Vec<Element> {
             }
         }
         (_, "polyline" | "polygon") => points(&mut el),
-        // BOY's slider fills its box with its background colour; Phoebus'
-        // is transparent unless told otherwise.
-        ("scaledslider", _) => default(&mut el, "transparent", "false"),
+        (_, "scaledslider") => scaled_slider(&mut el, &short),
         ("arc", _) => {
             if let Some(fill) = flag(&el, "fill") {
                 set(&mut el, "transparent", !fill);
@@ -661,6 +665,22 @@ fn widget(mut el: Element) -> Vec<Element> {
     let mut all = vec![out];
     all.extend(extra);
     all
+}
+
+/// A scaled slider or knob. BOY's `show_markers` (true unless given)
+/// hides all four level markers, which Phoebus shows by their own
+/// `show_*` alone.
+fn scaled_slider(el: &mut Element, short: &str) {
+    if short == "scaledslider" {
+        // BOY's slider fills its box with its background colour; Phoebus'
+        // is transparent unless told otherwise.
+        default(el, "transparent", "false");
+    }
+    if flag(el, "show_markers") == Some(false) {
+        for show in ["show_lolo", "show_low", "show_high", "show_hihi"] {
+            set(el, show, false);
+        }
+    }
 }
 
 /// The most axes, traces or LED states a widget may have: more than BOY
@@ -2630,5 +2650,24 @@ widget.setPropertyValue("opi_file", pv0 + ".opi");"#,
         let w = one("scaledslider", "<horizontal>true</horizontal>");
         assert_eq!(w.bool("transparent"), Some(false));
         assert_eq!(w.bool("horizontal"), Some(true));
+    }
+
+    #[test]
+    fn scaled_slider_markers_follow_show_markers() {
+        let w = one(
+            "scaledslider",
+            "<level_lo>3</level_lo><level_hi>7</level_hi><show_hi>false</show_hi>",
+        );
+        assert_eq!(w.f64("level_low"), Some(3.0));
+        assert_eq!(w.f64("level_high"), Some(7.0));
+        assert_eq!(w.bool("show_high"), Some(false));
+        assert_eq!(w.get("show_lolo"), None);
+        let hidden = one(
+            "scaledslider",
+            "<show_markers>false</show_markers><show_lo>true</show_lo>",
+        );
+        for show in ["show_lolo", "show_low", "show_high", "show_hihi"] {
+            assert_eq!(hidden.bool(show), Some(false), "{show}");
+        }
     }
 }
