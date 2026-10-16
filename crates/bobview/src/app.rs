@@ -977,7 +977,7 @@ impl BobApp {
     /// The open windows as a layout.
     fn layout(&self) -> Layout {
         let mut windows = Vec::new();
-        if let Some(loc) = &self.main.current {
+        if let Some(loc) = self.main.saved_location() {
             let mut w = WindowLayout::new(loc, self.geometry);
             w.main = true;
             w.pinned = Some(self.main_pinned);
@@ -986,7 +986,7 @@ impl BobApp {
             windows.push(w);
         }
         for dw in self.windows.iter().filter(|w| !w.close) {
-            if let Some(loc) = &dw.view.current {
+            if let Some(loc) = dw.view.saved_location() {
                 let mut w = WindowLayout::new(loc, dw.geometry);
                 w.toolbar = dw.toolbar;
                 w.pinned = Some(dw.pinned);

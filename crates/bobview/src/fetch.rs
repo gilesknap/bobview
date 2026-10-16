@@ -76,7 +76,8 @@ pub fn forget() {
 
 /// The file or URL `text` that the user named (on the command line, in the
 /// Open panel, or in a saved layout). The user's own choice is fetched
-/// wherever it is, even if a display from a public address named it before.
+/// wherever it is, whether a display from a public address named it before
+/// or names it later.
 pub fn user_named(text: &str) -> Source {
     let source = Source::parse(text);
     #[cfg(not(target_arch = "wasm32"))]
@@ -84,6 +85,17 @@ pub fn user_named(text: &str) -> Source {
         native::user_named(url);
     }
     source
+}
+
+/// Whether `source` was refused because a display from a public address
+/// named it, so it is not one to keep (in a layout, say) as the user's.
+pub fn refused(source: &Source) -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Source::Url(url) = source {
+        return native::refused(url);
+    }
+    let _ = source;
+    false
 }
 
 /// The file `file` named by the display at `base` (with no display, a plain
@@ -164,9 +176,15 @@ mod native {
     pub(super) static PRETEND: LazyLock<Mutex<std::collections::HashMap<u16, Vec<IpAddr>>>> =
         LazyLock::new(Default::default);
 
+    /// URLs the user named: fetched wherever they are, whoever names them.
+    static USER: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
+
+    /// URLs in [`FROM_PUBLIC`] refused for being on a private address.
+    static REFUSED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
+
     /// Note that the display at `base` names `url`.
     pub(super) fn named_by(base: &str, url: &str) {
-        if PUBLIC.lock().contains(base) {
+        if PUBLIC.lock().contains(base) && !USER.lock().contains(url) {
             let mut from_public = FROM_PUBLIC.lock();
             if !from_public.contains(url) {
                 from_public.insert(url.to_string());
@@ -176,7 +194,14 @@ mod native {
 
     /// Note that the user named `url`, so it is fetched wherever it is.
     pub(super) fn user_named(url: &str) {
+        USER.lock().insert(url.to_string());
         FROM_PUBLIC.lock().remove(url);
+        REFUSED.lock().remove(url);
+    }
+
+    /// Whether `url` was refused for a display from a public address.
+    pub(super) fn refused(url: &str) -> bool {
+        REFUSED.lock().contains(url)
     }
 
     /// GET `url`, following redirects, but not from https to http, nor from
@@ -198,12 +223,16 @@ mod native {
             .lock()
             .contains(url)
             .then_some("refused: a display from a public address named a private one");
+        let named = url;
         let mut url = url.to_string();
-        for _ in 0..=MAX_REDIRECTS {
+        for hop in 0..=MAX_REDIRECTS {
             let addrs = addresses(&url);
             if let Some(why) = refuse
                 && target_private(&addrs)
             {
+                if hop == 0 {
+                    REFUSED.lock().insert(named.to_string());
+                }
                 return Err(format!("{why} ({url})"));
             }
             let left = deadline.saturating_duration_since(Instant::now());
@@ -317,7 +346,7 @@ mod native {
     pub(super) fn private_ip(ip: IpAddr) -> bool {
         match ip {
             IpAddr::V4(v4) => {
-                let [a, b, ..] = v4.octets();
+                let [a, b, c, _] = v4.octets();
                 v4.is_loopback()
                     || v4.is_private()
                     || v4.is_link_local()
@@ -325,6 +354,9 @@ mod native {
                     || v4.is_broadcast()
                     || a == 0
                     || (a == 100 && (64..128).contains(&b))
+                    || (a == 192 && b == 0 && c == 0) // IETF protocol assignments
+                    || (a == 198 && b & 0xfe == 18) // benchmarking, used inside sites
+                    || a >= 240 // reserved
             }
             IpAddr::V6(v6) => {
                 let s = v6.segments();
@@ -544,7 +576,7 @@ pub(crate) mod tests {
 
     /// Serve `DISPLAY` at /opi/a.bob and 404 elsewhere; returns the base URL
     /// and a count of requests handled.
-    fn serve() -> (String, Arc<Mutex<usize>>) {
+    pub(crate) fn serve() -> (String, Arc<Mutex<usize>>) {
         serve_to("/opi/a.bob")
     }
 
@@ -632,7 +664,7 @@ pub(crate) mod tests {
     }
 
     /// A server that counts as on a public address.
-    fn serve_public(away: &str) -> (String, Arc<Mutex<usize>>) {
+    pub(crate) fn serve_public(away: &str) -> (String, Arc<Mutex<usize>>) {
         serve_at(&[PUBLIC_IP], away)
     }
 
@@ -709,6 +741,28 @@ pub(crate) mod tests {
         let err = bytes(&image).unwrap_err().to_string();
         assert!(err.contains("named a private one"), "{err}");
         assert_eq!(*private_hits.lock(), 0);
+    }
+
+    #[test]
+    fn a_url_the_user_named_stays_theirs() {
+        let (private, private_hits) = serve();
+        let (public, _) = serve_public("/opi/a.bob");
+        let mine = user_named(&format!("{private}/opi/a.bob"));
+        load(&mine).unwrap();
+        // A public display (in another window, say) naming it later does
+        // not stop it loading again, as on a reload.
+        let d = load(&Source::parse(&format!("{public}/opi/a.bob"))).unwrap();
+        assert_eq!(resolve(d.source.as_ref(), &mine.to_string()), mine);
+        let _cache = CACHE_USERS.lock();
+        forget();
+        load(&mine).unwrap();
+        assert_eq!(*private_hits.lock(), 2);
+        assert!(!refused(&mine));
+        // Nor is it marked as refused; what the display named is.
+        let other = resolve(d.source.as_ref(), &format!("{private}/opi/b.bob"));
+        assert!(load(&other).is_err() && refused(&other));
+        assert_eq!(user_named(&other.to_string()), other);
+        assert!(!refused(&other));
     }
 
     #[test]
@@ -797,6 +851,11 @@ pub(crate) mod tests {
             "2002:a00:1::",
             "2002:7f00:1::1",
             "fec0::1",
+            "192.0.0.8",
+            "198.18.0.1",
+            "198.19.255.255",
+            "240.0.0.1",
+            "::ffff:198.18.0.1",
         ] {
             assert!(private_ip(ip.parse().unwrap()), "{ip}");
         }
@@ -810,6 +869,9 @@ pub(crate) mod tests {
             "64:ff9b::808:808",
             "2002:808:808::1",
             "2606:4700::1111",
+            "192.0.1.1",
+            "198.17.255.255",
+            "198.20.0.1",
         ] {
             assert!(!private_ip(ip.parse().unwrap()), "{ip}");
         }
