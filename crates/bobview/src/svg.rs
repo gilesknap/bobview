@@ -353,6 +353,10 @@ pub fn svg_cost(doc: &roxmltree::Document) -> Cost {
     enum Times {
         /// A child element, once.
         Child,
+        /// Once, as the element's content: what is cloned by a `<use>`
+        /// (and by any other `href`, as a pattern uses another's content),
+        /// or what a reference or an id leads to.
+        Content,
         Once,
         /// Once for each element below the one it is followed from.
         Each,
@@ -373,7 +377,7 @@ pub fn svg_cost(doc: &roxmltree::Document) -> Cost {
         let mut steps = Vec::new();
         if v >= id {
             for e in &having[v - id] {
-                steps.push(step(followed + e, 0, false, Times::Once));
+                steps.push(step(followed + e, 0, false, Times::Content));
             }
             return steps;
         }
@@ -394,7 +398,7 @@ pub fn svg_cost(doc: &roxmltree::Document) -> Cost {
             return steps;
         }
         if v >= followed {
-            steps.push(step(e, 0, false, Times::Once));
+            steps.push(step(e, 0, false, Times::Content));
             // What it inherits from where it is, unless it draws nothing.
             if !PAINT_SERVERS.contains(&node.tag_name().name()) {
                 steps.extend(parent.map(|p| step(paint + p, 0, true, Times::Each)));
@@ -406,7 +410,7 @@ pub fn svg_cost(doc: &roxmltree::Document) -> Cost {
             steps.push(step(index(c.id()), 1, false, Times::Child));
         }
         let r = &refs[e];
-        to_ids(&r.href, REF_LEVELS, false, Times::Once, &mut steps);
+        to_ids(&r.href, REF_LEVELS, false, Times::Content, &mut steps);
         to_ids(&r.paint, REF_LEVELS, true, Times::Each, &mut steps);
         to_ids(&r.markers, REF_LEVELS, true, Times::Vertex, &mut steps);
         to_ids(&r.other, REF_LEVELS, true, Times::Once, &mut steps);
@@ -422,7 +426,8 @@ pub fn svg_cost(doc: &roxmltree::Document) -> Cost {
 
     // A depth-first walk, keeping the deepest each node leads to, and how
     // many elements converting it converts, once all it leads to is known;
-    // and for each element, how many elements and vertices are below it.
+    // and for each node, how many elements and vertices are drawn as its
+    // content, which inherit its paint and markers.
     #[derive(Clone, Copy, PartialEq)]
     enum State {
         New,
@@ -432,7 +437,7 @@ pub fn svg_cost(doc: &roxmltree::Document) -> Cost {
     let mut state = vec![State::New; id + having.len()];
     let mut depth = vec![0usize; state.len()];
     let mut work = vec![0usize; state.len()];
-    let (mut below, mut vertices) = (vec![0usize; count], vec![0usize; count]);
+    let (mut below, mut vertices) = (vec![0usize; state.len()], vec![0usize; state.len()]);
     // A node, what it leads to and how far through that the walk is.
     let mut stack: Vec<(usize, Vec<Step>, usize)> = Vec::new();
     let mut deepest = 0;
@@ -445,15 +450,25 @@ pub fn svg_cost(doc: &roxmltree::Document) -> Cost {
         while let Some((node, leads_to, at)) = stack.last_mut() {
             let node = *node;
             let Some(&Step { to, .. }) = leads_to.get(*at) else {
-                let e = node % count;
                 let element = node < followed;
                 if element {
-                    below[e] = 1;
-                    vertices[e] = refs[e].vertices;
-                    for s in leads_to.iter().filter(|s| s.times == Times::Child) {
-                        below[e] = below[e].saturating_add(below[s.to]);
-                        vertices[e] = vertices[e].saturating_add(vertices[s.to]);
+                    below[node] = 1;
+                    vertices[node] = refs[node].vertices;
+                }
+                for s in leads_to.iter() {
+                    if !matches!(s.times, Times::Child | Times::Content) {
+                        continue;
                     }
+                    // Only one element with an id is the one followed.
+                    let add = |a: usize, b| {
+                        if node >= id {
+                            a.max(b)
+                        } else {
+                            a.saturating_add(b)
+                        }
+                    };
+                    below[node] = add(below[node], below[s.to]);
+                    vertices[node] = add(vertices[node], vertices[s.to]);
                 }
                 let (mut down, mut across) = (usize::from(element), 0usize);
                 let mut w = usize::from(element);
@@ -465,9 +480,9 @@ pub fn svg_cost(doc: &roxmltree::Document) -> Cost {
                         down = down.max(d);
                     }
                     let times = match s.times {
-                        Times::Child | Times::Once => 1,
-                        Times::Each => below[e],
-                        Times::Vertex => vertices[e],
+                        Times::Child | Times::Content | Times::Once => 1,
+                        Times::Each => below[node],
+                        Times::Vertex => vertices[node],
                     };
                     let converts = times.saturating_mul(work[s.to]);
                     // Only one element with an id is the one followed.
@@ -1019,6 +1034,12 @@ mod tests {
             format!(r##"{SVG}<defs>{first}{links}</defs><use href="#x{n}"/></svg>"##)
         };
         let marker = r#"<marker id="x0"><rect width="1" height="1"/></marker>"#;
+        let path = format!(
+            r#"<path id="P" d="M0 0{}" stroke="black"/>"#,
+            (1..=20)
+                .map(|i| format!(" L{i} {}", i % 2))
+                .collect::<String>()
+        );
         let svgs = [
             levels(
                 6,
@@ -1059,6 +1080,36 @@ mod tests {
                 marker,
                 r#"<ellipse rx="1" ry="2" stroke="black" marker-mid="url(#xPREV)"/>"#,
                 r#"<marker id="xID">CONTENT</marker>"#,
+            ),
+            // What a `<use>` clones inherits from it, as markers on a path
+            // of 20 vertices ...
+            levels(
+                6,
+                1,
+                &format!(r#"{path}{marker}"#),
+                r##"<g marker-mid="url(#xPREV)"><use href="#P"/></g>"##,
+                r#"<marker id="xID">CONTENT</marker>"#,
+            ),
+            levels(
+                6,
+                1,
+                &format!(r#"{path}{marker}"#),
+                r##"<use href="#P" marker-mid="url(#xPREV)"/>"##,
+                r#"<marker id="xID">CONTENT</marker>"#,
+            ),
+            // ... or a fill for each of ten rects, cloned ten times.
+            levels(
+                4,
+                1,
+                &format!(
+                    r#"<g id="R">{}</g><pattern id="x0" width="1" height="1" patternContentUnits="objectBoundingBox"><rect width="1" height="1"/></pattern>"#,
+                    r#"<rect width="1" height="1"/>"#.repeat(10)
+                ),
+                &format!(
+                    r#"<g fill="url(#xPREV)">{}</g>"#,
+                    r##"<use href="#R"/>"##.repeat(10)
+                ),
+                r#"<pattern id="xID" width="1" height="1" patternContentUnits="objectBoundingBox">CONTENT</pattern>"#,
             ),
             levels(
                 6,
