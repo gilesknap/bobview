@@ -194,37 +194,55 @@ enum Func {
     Abs,
     /// JavaScript's `Math.round`: halves round up.
     Round,
-    /// Python's `round`: halves round to even.
+    /// Python's `round`, to whole numbers or to as many decimal places as
+    /// its second argument: halves round to even.
     RoundEven,
     Floor,
     Ceil,
     Sqrt,
     Pow,
+    /// JavaScript's `Math.log`: the natural logarithm.
+    Ln,
+    /// Python's `math.log`, to base e or to its second argument.
     Log,
     Exp,
 }
 
 impl Func {
-    fn named(name: &str) -> Option<Func> {
+    /// The function `name` called with `args` arguments, if it can be: a
+    /// Python one with as many as it takes, a JavaScript one with at least
+    /// as many as it uses (JavaScript ignores more).
+    fn named(name: &str, args: usize) -> Option<Func> {
         let (module, f) = match name.split_once('.') {
             Some((m, f)) => (Some(m), f),
             None => (None, name),
         };
-        Some(match (module, f) {
-            (Some("Math" | "math") | None, "min") => Func::Min,
-            (Some("Math" | "math") | None, "max") => Func::Max,
-            (Some("Math" | "math") | None, "abs") => Func::Abs,
-            (Some("math"), "fabs") => Func::Abs,
-            (Some("Math"), "round") => Func::Round,
-            (None, "round") => Func::RoundEven,
-            (Some("Math" | "math"), "floor") => Func::Floor,
-            (Some("Math" | "math"), "ceil") => Func::Ceil,
-            (Some("Math" | "math"), "sqrt") => Func::Sqrt,
-            (Some("Math" | "math"), "pow") | (None, "pow") => Func::Pow,
-            (Some("Math" | "math"), "log") => Func::Log,
-            (Some("Math" | "math"), "exp") => Func::Exp,
+        let js = module == Some("Math");
+        let (func, takes) = match (module, f) {
+            (Some("Math"), "min") => (Func::Min, 0..=0),
+            (Some("Math"), "max") => (Func::Max, 0..=0),
+            // Python's need two numbers; one would be a list.
+            (Some("math") | None, "min") => (Func::Min, 2..=usize::MAX),
+            (Some("math") | None, "max") => (Func::Max, 2..=usize::MAX),
+            (Some("Math" | "math") | None, "abs") => (Func::Abs, 1..=1),
+            (Some("math"), "fabs") => (Func::Abs, 1..=1),
+            (Some("Math"), "round") => (Func::Round, 1..=1),
+            (None, "round") => (Func::RoundEven, 1..=2),
+            (Some("Math" | "math"), "floor") => (Func::Floor, 1..=1),
+            (Some("Math" | "math"), "ceil") => (Func::Ceil, 1..=1),
+            (Some("Math" | "math"), "sqrt") => (Func::Sqrt, 1..=1),
+            (Some("Math" | "math") | None, "pow") => (Func::Pow, 2..=2),
+            (Some("Math"), "log") => (Func::Ln, 1..=1),
+            (Some("math"), "log") => (Func::Log, 1..=2),
+            (Some("Math" | "math"), "exp") => (Func::Exp, 1..=1),
             _ => return None,
-        })
+        };
+        let fits = if js {
+            args >= *takes.start()
+        } else {
+            takes.contains(&args)
+        };
+        fits.then_some(func)
     }
 
     fn call(self, args: &[f64]) -> f64 {
@@ -247,15 +265,39 @@ impl Func {
             }),
             Func::Abs => arg(0).abs(),
             Func::Round => (arg(0) + 0.5).floor(),
-            Func::RoundEven => arg(0).round_ties_even(),
+            Func::RoundEven => match args.get(1) {
+                None => arg(0).round_ties_even(),
+                Some(&digits) => round_to(arg(0), digits),
+            },
             Func::Floor => arg(0).floor(),
             Func::Ceil => arg(0).ceil(),
             Func::Sqrt => arg(0).sqrt(),
             Func::Pow => arg(0).powf(arg(1)),
-            Func::Log => arg(0).ln(),
+            Func::Ln => arg(0).ln(),
+            Func::Log => match args.get(1) {
+                None => arg(0).ln(),
+                Some(base) => arg(0).ln() / base.ln(),
+            },
             Func::Exp => arg(0).exp(),
         }
     }
+}
+
+/// Python's `round(x, digits)`: `x` to `digits` decimal places (tens,
+/// hundreds and so on when negative), halves to even. As Python, `digits`
+/// must be a whole number; Rust's formatting rounds as Python does.
+fn round_to(x: f64, digits: f64) -> f64 {
+    if digits.fract() != 0.0 || digits.is_nan() {
+        return f64::NAN;
+    }
+    if !x.is_finite() || digits > 400.0 {
+        return x;
+    }
+    if digits >= 0.0 {
+        return format!("{x:.*}", digits as usize).parse().unwrap_or(x);
+    }
+    let unit = 10f64.powf(-digits);
+    (x / unit).round_ties_even() * unit
 }
 
 struct Env<'a> {
@@ -475,9 +517,9 @@ impl Parser {
                 "Math.PI" | "math.pi" => Expr::Lit(Val::Num(std::f64::consts::PI)),
                 "Math.E" | "math.e" => Expr::Lit(Val::Num(std::f64::consts::E)),
                 _ if self.toks.get(self.pos) == Some(&Tok::Open) => {
-                    let f = Func::named(&w)?;
                     self.pos += 1;
-                    Expr::Call(f, self.args()?)
+                    let args = self.args()?;
+                    Expr::Call(Func::named(&w, args.len())?, args)
                 }
                 _ if w.contains('.') => return None,
                 _ => Expr::Var(w),
@@ -648,6 +690,29 @@ mod tests {
         assert_eq!(run("Math.floor(1.7) + Math.ceil(1.2)", &[]), Val::Num(3.0));
         assert_eq!(run("Math.sqrt(Math.pow(3, 2) + 16)", &[]), Val::Num(5.0));
         assert_eq!(run("Math.log(Math.exp(2))", &[]), Val::Num(2.0));
+        // Python's second arguments; JavaScript ignores them.
+        assert_eq!(run("round(2.675, 2)", &[]), Val::Num(2.67));
+        assert_eq!(run("round(0.125, 2)", &[]), Val::Num(0.12));
+        assert_eq!(run("round(1250, -2)", &[]), Val::Num(1200.0));
+        assert!(run("round(1, 0.5)", &[]).num().is_nan());
+        assert_eq!(run("math.log(8, 2)", &[]), Val::Num(3.0));
+        assert_eq!(run("math.log(Math.E)", &[]), Val::Num(1.0));
+        assert_eq!(run("Math.log(Math.E, 2)", &[]), Val::Num(1.0));
+        assert_eq!(run("Math.round(2.4, 3)", &[]), Val::Num(2.0));
+        assert_eq!(run("Math.max()", &[]), Val::Num(f64::NEG_INFINITY));
+        // Too few or too many arguments are not run, as unknown functions.
+        for bad in [
+            "round(1, 2, 3)",
+            "math.log()",
+            "math.log(1, 2, 3)",
+            "math.sqrt(4, 2)",
+            "pow(2)",
+            "max(1)",
+            "Math.pow(2)",
+            "Math.abs()",
+        ] {
+            assert!(parse(bad).is_none(), "{bad}");
+        }
         assert!(run("Math.min(pv0, 1) == 1 && max(1, 2) > 1", &both).truthy());
         assert!(parse("Math.nope(1)").is_none());
         assert!(parse("Math.min(1,").is_none());
