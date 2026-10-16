@@ -522,6 +522,11 @@ impl PvManager {
         if let Some(entry) = entries.map.get(&key).and_then(Weak::upgrade) {
             return Pv(entry);
         }
+        // A macro left unexpanded makes a name that is not what was meant,
+        // and a local one would share its state with every other such PV.
+        if name.pv.contains("$(") || name.pv.contains("${") {
+            log::warn!("{}: PV name has an undefined macro", name.pv);
+        }
 
         let (shared, task) = match name.scheme {
             Scheme::Loc => (self.local(&name), None),
