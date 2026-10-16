@@ -5,14 +5,14 @@ use std::sync::Arc;
 use epics_base_rs::server::snapshot::{DbrClass, Snapshot};
 use epics_ca_rs::EpicsValue;
 use epics_ca_rs::client::{CaChannel, CaClient, ConnectionEvent};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 
 use crate::{Severity, Shared, Value, Writer};
 
 pub(crate) async fn run(client: &CaClient, pv: &str, shared: Arc<Shared>) {
     let channel = client.create_channel(pv);
     let mut events = channel.connection_events();
-    let (tx, mut writes) = mpsc::unbounded_channel();
+    let (tx, mut writes) = crate::write_queue();
     shared.set_writer(Writer::Channel(tx));
 
     let mut retry = std::time::Duration::from_millis(500);
@@ -52,6 +52,9 @@ pub(crate) async fn run(client: &CaClient, pv: &str, shared: Arc<Shared>) {
                 None => return,
             },
             Some(text) = writes.recv() => {
+                if !shared.can_write(&text) {
+                    continue;
+                }
                 // Arrays are typed as they are shown, `[1, 2]` or `["a", "b"]`;
                 // the server converts each string element to the field type.
                 let items: Option<Vec<String>> = match shared.snapshot().value {

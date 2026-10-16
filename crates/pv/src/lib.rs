@@ -19,6 +19,7 @@
 mod ca;
 mod local;
 mod name;
+mod origin;
 #[cfg(not(target_arch = "wasm32"))]
 mod pva;
 #[cfg(target_arch = "wasm32")]
@@ -34,6 +35,7 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 use tokio::sync::mpsc;
 
 pub use name::{PvName, Scheme};
+pub use origin::{same_origin, url_origin};
 #[cfg(target_arch = "wasm32")]
 pub use pvws::{set_pvws, set_write_token};
 pub use value::{Image, ImageData, PvState, Severity, Value, split_array, split_strings};
@@ -50,7 +52,7 @@ pub type ListenFn = dyn Fn(&PvState) + Send + Sync;
 pub(crate) enum Writer {
     /// To the backend task, which converts and sends them.
     #[cfg(not(target_arch = "wasm32"))]
-    Channel(mpsc::UnboundedSender<String>),
+    Channel(mpsc::Sender<String>),
     /// Straight into the local value.
     Local,
     /// Over the PV Web Socket, which converts them.
@@ -74,6 +76,17 @@ impl Control {
         let mut n = self.notice.lock().unwrap();
         *n = (n.0 + 1, text);
     }
+}
+
+/// Writes to one PV that may wait for the backend at once; more are
+/// refused, rather than queued to be applied late.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const WRITE_QUEUE: usize = 16;
+
+/// The queue of a backend's writes, for [`Writer::Channel`].
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn write_queue() -> (mpsc::Sender<String>, mpsc::Receiver<String>) {
+    mpsc::channel(WRITE_QUEUE)
 }
 
 /// State shared between a [`Pv`] handle and the task serving it.
@@ -130,6 +143,16 @@ impl Shared {
                 .notify(format!("{}: write '{text}' failed: {e}", self.name));
         }
         self.update(|s| s.write_error = error);
+    }
+
+    /// Whether a write taken from the queue can go now; if not, say why.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn can_write(&self, text: &str) -> bool {
+        let connected = self.state.lock().unwrap().connected;
+        if !connected {
+            self.write_result(text, Some("not connected".into()));
+        }
+        connected
     }
 
     pub(crate) fn set_writer(&self, writer: Writer) {
@@ -212,7 +235,26 @@ impl Pv {
         match shared.writer.lock().unwrap().as_ref() {
             #[cfg(not(target_arch = "wasm32"))]
             Some(Writer::Channel(tx)) => {
-                let _ = tx.send(value);
+                // A write to a PV that is not there would wait for it, and
+                // land late, perhaps long after the user moved on.
+                if !shared.state.lock().unwrap().connected {
+                    shared.ctl.notify(format!(
+                        "{}: not writing '{value}', not connected",
+                        shared.name
+                    ));
+                    return;
+                }
+                match tx.try_send(value) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(value)) => shared.ctl.notify(format!(
+                        "{}: not writing '{value}', {WRITE_QUEUE} writes still waiting",
+                        shared.name
+                    )),
+                    Err(mpsc::error::TrySendError::Closed(value)) => shared.ctl.notify(format!(
+                        "{}: not writing '{value}', the PV is closed",
+                        shared.name
+                    )),
+                }
             }
             Some(Writer::Local) => {
                 shared.update(|s| s.value = local::apply(&s.value, &s.labels, &value));
@@ -475,6 +517,56 @@ mod tests {
         assert!(text.contains("write '3' failed: no write access"), "{text}");
         shared.write_result("4", None);
         assert_eq!(pv.state().write_error, None);
+    }
+
+    /// A PV whose writes go to a queue no backend reads.
+    fn queued(pvs: &PvManager, connected: bool) -> (Pv, mpsc::Receiver<String>) {
+        let name = PvName::parse("ca://QUEUED");
+        let shared = Shared::new(&name, pvs.inner.notify.clone(), pvs.inner.ctl.clone());
+        let (tx, rx) = write_queue();
+        shared.set_writer(Writer::Channel(tx));
+        shared.update(|s| s.connected = connected);
+        let entry = Entry {
+            name,
+            shared,
+            task: None,
+        };
+        (Pv(Arc::new(entry)), rx)
+    }
+
+    #[test]
+    fn writes_to_a_disconnected_pv_fail_at_once() {
+        let pvs = PvManager::new();
+        let (pv, mut rx) = queued(&pvs, false);
+        pv.write("1");
+        assert!(rx.try_recv().is_err());
+        let (n, text) = pvs.notice();
+        assert_eq!(n, 1);
+        assert!(text.contains("not connected"), "{text}");
+        // And one that disconnects while a write waits reports it.
+        assert!(!pv.0.shared.can_write("1"));
+        assert_eq!(pv.state().write_error.as_deref(), Some("not connected"));
+    }
+
+    #[test]
+    fn the_write_queue_is_bounded() {
+        let pvs = PvManager::new();
+        let (pv, mut rx) = queued(&pvs, true);
+        for i in 0..WRITE_QUEUE + 3 {
+            pv.write(i.to_string());
+        }
+        let (n, text) = pvs.notice();
+        assert_eq!(n, 3);
+        assert!(text.contains("writes still waiting"), "{text}");
+        let mut got = Vec::new();
+        while let Ok(v) = rx.try_recv() {
+            got.push(v);
+        }
+        assert_eq!(got.len(), WRITE_QUEUE);
+        assert_eq!(got[0], "0");
+        drop(rx);
+        pv.write("x");
+        assert!(pvs.notice().1.contains("closed"));
     }
 
     #[test]

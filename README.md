@@ -121,7 +121,9 @@ action says in the status line why it did nothing. `loc://` PVs are exempt,
 as they live inside bobview and cannot reach a control system. PV Access
 does not report access rights, so such a PV is assumed writable (the PV
 details say "unknown") and a put the server refuses is shown as a write
-error in the status line and the PV details. A `write_pv` action (or the
+error in the status line and the PV details. A write to a CA or PVA PV that
+is not connected is refused at once, as is one while 16 earlier writes to it
+still wait, rather than applied late; the status line says so. A `write_pv` action (or the
 toggle script) of a display loaded from an `http://` or `https://` URL asks
 for confirmation before it writes; displays from local files write at once.
 
@@ -391,15 +393,22 @@ and open `http://localhost:8080/?display=index.bob` (on this machine; from anoth
 a checkout, `./scripts/build-web.sh` writes `dist/web` (it needs the
 `wasm-bindgen` CLI matching `Cargo.lock`) and `--web DIR` picks another. Files
 in `--opi` take precedence over same-named files in the web build (which has
-the test displays); dot-files such as `.git` are never served. The server
+the test displays); dot-files such as `.git` are never served, nor files
+reached through a symbolic link that leads out of `--opi` or `--web` (unless
+`--follow-symlinks`). Other sites cannot frame the pages (`X-Frame-Options`,
+`frame-ancestors 'self'`). The server
 listens on `--bind 127.0.0.1 --port 8080` by default, so only this machine can
 reach it; use `--bind 0.0.0.0` (every interface) or a specific address to serve
 others, ideally behind a firewall or an authenticating reverse proxy, since
 reading PVs needs no login. The server holds at most 100 clients and 50,000
 subscribed PVs, and refuses PV names over 256 characters or with spaces or
-non-ASCII characters (so `loc://s("hello world")` is refused). One address
-may hold 10 clients (`--max-per-ip N`), and a client that stops answering
-websocket pings is dropped. Behind a reverse proxy every client has the
+non-ASCII characters. It serves no `loc://` or `sim://` PVs: the page makes
+those itself. One address (or one IPv6 /64) may hold 10 clients
+(`--max-per-ip N`); a client subscribing to more than 1,000 new PVs a second,
+after its first 10,000, is slowed down; and a client that stops answering
+websocket pings, or takes over 10 s to take one message, is dropped. Each
+client gets the PVs that changed at most every `--throttle-ms` (100 ms),
+each with its latest state. Behind a reverse proxy every client has the
 proxy's address, so raise `--max-per-ip` and expect the logs to show the proxy;
 the `Host` the proxy passes on must also be one of the server's names, so give
 a public name with `--host NAME` (the Origin/Host check now applies to read-only
@@ -409,17 +418,24 @@ The page also takes `&macros=P=X,R=Y`, `&zoom=F`, `&keypad` and, to use
 another PVWS server, `&pvws=host[:port]` (meaning `wss://host[:port]/pvws/pv`,
 or `ws://` when the page is plain `http:` and the port isn't 443) or a full
 `ws://` or `wss://` URL; `display` may be a URL on another server that allows
-cross-origin requests. Writes are off unless the server has `--write`, since
+cross-origin requests, unless the page has a write token (below). Writes are off unless the server has `--write`, since
 they go out as the server's user, and then each write must carry a token:
 `--write-token TOKEN` (arguments show in `ps`, so prefer the
 `BOBVIEW_WRITE_TOKEN` environment variable), or a random one that the server
-prints to stderr at startup; open the page with `&token=TOKEN`. The page removes
-the token from its address after reading it, so a reload needs it again. Browsers let any page open a websocket, so the
+prints to stderr at startup; open the page with `&token=TOKEN`. An empty
+`BOBVIEW_WRITE_TOKEN` counts as unset. The page removes
+the token from its address after reading it, so a reload needs it again. A page
+with a token loads displays only from its own server, and sends the token only
+to a PVWS on its own server, so a link naming someone else's display or
+`&pvws=` cannot write with it. Writes to a PV that is not connected fail at
+once, and at most 16 may wait for one PV. Browsers let any page open a websocket, so the
 server always accepts only pages from itself (by `Origin`), plus
 any named with `--allow-origin https://host.example.com` (repeatable). Those
 pages must also call the server by an IP address, `localhost`, this machine's
-name, the host of an `--allow-origin` or a name given with `--host NAME`
-(repeatable), so a page cannot reach it through a DNS name of its own.
+name (as the kernel has it, without its domain, or in a domain of
+`/etc/resolv.conf`), the host of an `--allow-origin` or a name given with
+`--host NAME` (repeatable), so a page cannot reach it through a DNS name of its
+own.
 Images from PVA are not sent over PVWS yet.
 
 ## Build

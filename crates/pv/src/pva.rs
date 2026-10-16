@@ -12,12 +12,11 @@ use epics_pva_rs::PvaError;
 use epics_pva_rs::client::PvaClient;
 use epics_pva_rs::client_native::ops_v2::{MonitorConnEvent, MonitorTermination};
 use epics_pva_rs::pvdata::{PvField, PvStructure, ScalarValue, TypedScalarArray};
-use tokio::sync::mpsc;
 
 use crate::{Image, ImageData, PvState, Severity, Shared, Value, Writer};
 
 pub(crate) async fn run(client: &PvaClient, pv: &str, shared: Arc<Shared>) {
-    let (tx, mut writes) = mpsc::unbounded_channel::<String>();
+    let (tx, mut writes) = crate::write_queue();
     shared.set_writer(Writer::Channel(tx));
 
     // Writes run beside the monitor, each as its own put. Weak: the state
@@ -28,6 +27,10 @@ pub(crate) async fn run(client: &PvaClient, pv: &str, shared: Arc<Shared>) {
     let put_shared = Arc::downgrade(&shared);
     tokio::spawn(async move {
         while let Some(text) = writes.recv().await {
+            // One that disconnected since the write was queued.
+            if !put_shared.upgrade().is_some_and(|s| s.can_write(&text)) {
+                continue;
+            }
             let result = put_client.pvput(&put_pv, &text).await;
             if let Some(shared) = put_shared.upgrade() {
                 shared.write_result(&text, result.err().map(|e| e.to_string()));

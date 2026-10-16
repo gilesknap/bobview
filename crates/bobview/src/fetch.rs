@@ -63,7 +63,7 @@ use native::get;
 #[cfg(target_arch = "wasm32")]
 use web::get;
 #[cfg(target_arch = "wasm32")]
-pub use web::{LOADING, bytes_async, pending};
+pub use web::{LOADING, bytes_async, pending, same_origin_only};
 
 #[cfg(target_arch = "wasm32")]
 fn no_files(path: &std::path::Path) -> Error {
@@ -172,6 +172,7 @@ mod native {
 #[cfg(target_arch = "wasm32")]
 mod web {
     use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{LazyLock, Mutex};
 
     use bob::{Error, Source};
@@ -193,7 +194,28 @@ mod web {
         !PENDING.lock().unwrap().is_empty()
     }
 
+    /// Load displays only from the page's own server: a display from
+    /// another, opened by a link, could write PVs with the page's token.
+    static SAME_ORIGIN: AtomicBool = AtomicBool::new(false);
+
+    pub fn same_origin_only() {
+        SAME_ORIGIN.store(true, Ordering::Relaxed);
+    }
+
+    /// Why `url` may not be loaded, if it may not.
+    fn refused(url: &str) -> Option<String> {
+        if !SAME_ORIGIN.load(Ordering::Relaxed) {
+            return None;
+        }
+        let page = web_sys::window()?.location().href().ok()?;
+        (!pv::same_origin(&page, url))
+            .then(|| "not loading displays from other servers while writes are on".into())
+    }
+
     pub(super) fn get(url: &str) -> Result<Fetched, Error> {
+        if let Some(why) = refused(url) {
+            return Err(Error::Fetch(url.to_string(), why));
+        }
         if let Some(fetched) = CACHE.lock().unwrap().get(url).cloned() {
             return Ok(fetched);
         }
@@ -203,7 +225,14 @@ mod web {
         if PENDING.lock().unwrap().insert(url.to_string()) {
             let url = url.to_string();
             wasm_bindgen_futures::spawn_local(async move {
-                match fetch(&url).await {
+                // A redirect may lead elsewhere.
+                let result = fetch(&url)
+                    .await
+                    .and_then(|(served, data)| match refused(&served) {
+                        Some(why) => Err(why),
+                        None => Ok((served, data)),
+                    });
+                match result {
                     Ok((served, data)) => {
                         let text = String::from_utf8_lossy(&data).into();
                         let fetched = Fetched { url: served, text };

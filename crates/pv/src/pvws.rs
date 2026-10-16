@@ -41,8 +41,23 @@ pub fn set_pvws(url: &str) {
 static TOKEN: Mutex<Option<String>> = Mutex::new(None);
 
 /// Send `token` with every write, for a server that needs one (`--write`).
+/// It goes only to a socket on the page's own server: another, named by
+/// a link's `&pvws=`, could keep it.
 pub fn set_write_token(token: &str) {
     *TOKEN.lock().unwrap() = Some(token.to_string());
+}
+
+/// The write token, if there is one and the socket is the page's server's.
+fn token() -> Option<String> {
+    let token = TOKEN.lock().unwrap().clone()?;
+    let page = web_sys::window()?.location().href().ok()?;
+    let socket = url();
+    if crate::same_origin(&page, &socket) {
+        Some(token)
+    } else {
+        log::warn!("not sending the write token to {socket}, another server than the page's");
+        None
+    }
 }
 
 fn url() -> String {
@@ -109,7 +124,7 @@ pub(crate) fn write(name: &str, state: &PvState, text: String) {
         _ => json!(text),
     };
     let mut msg = json!({"type": "write", "pv": name, "value": value});
-    if let Some(token) = TOKEN.lock().unwrap().as_ref() {
+    if let Some(token) = token() {
         msg["token"] = json!(token);
     }
     SOCKET.with_borrow_mut(|s| {
