@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["SEARCH_TIME","STUB","TIMEOUT"],"fn":["allowed","command_target","contains","defaults","in_project","numbers","others_may_write","parent","parse_macros","private_dir","roots","run","run_dirs","run_in","target","without_cur_dir","write_executable"]};

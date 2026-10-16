@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["FETCH_TIME","MAX_REDIRECTS"],"fn":["addresses","bob_instead","bytes","call","call_within","describe","downgrade","get","named_by","origin_private","private_ip","refused","scheme","target_private","user_named"],"static":["AGENT","FROM_PUBLIC","PUBLIC","REFUSED","USER"]};

@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["add_to_trend","civil_from_days","cli_command","details_rows","details_ui","format_time","full_line","menu","protocol","severity_name","shell_quote","trend_names","value_type","widget_label","writable_text"],"struct":["Details"]};

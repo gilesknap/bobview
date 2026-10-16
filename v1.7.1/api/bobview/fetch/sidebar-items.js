@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["MAX_SIZE"],"fn":["forget","load","refused","resolve","user_named"],"mod":["native"],"static":["CACHE","GENERATION"],"struct":["Fetched"]};

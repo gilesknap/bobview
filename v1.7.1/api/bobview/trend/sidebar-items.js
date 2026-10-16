@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["COLORS","DEFAULT_SPAN","MAX_AGE","MAX_SAMPLES","MIN_SCROLL_REPAINT","SPANS","TIME_STEPS"],"fn":["common_units","draw_plot","draw_stripchart","line_color","local_offset","now","parse_span","sample","scroll_repaint","span_name","time_label","time_ticks"],"struct":["Column","Line","Look","Samples","Series","Thinned","Trend"]};

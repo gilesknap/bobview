@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["DEADLINE","MONITOR"],"fn":["apply_texture","run","sample","to_points"],"struct":["Canvas","Options"]};

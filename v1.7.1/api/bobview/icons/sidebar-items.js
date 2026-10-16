@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["GROUP_MARGIN"],"enum":["Icon"],"fn":["button","group","group_height","height"]};

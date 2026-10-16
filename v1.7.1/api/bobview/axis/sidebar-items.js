@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["exponent","label","log_ticks","nice_range","nice_step","ticks"],"struct":["Scale"]};

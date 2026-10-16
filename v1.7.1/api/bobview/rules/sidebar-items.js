@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["COMPARISONS","JAVASCRIPT","MAX_DEPTH","MAX_TOKENS","PYTHON"],"enum":["Expr","Func","Lang","Outcome","Tok","Val"],"fn":["apply","binary","bitwise","eval","floor_div","legacy_severity","list_item","parse","round_to","shift","tokenize"],"struct":["CompiledRule","Env","Parser"]};

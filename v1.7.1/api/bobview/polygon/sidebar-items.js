@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["CACHE_SIZE","MAX_POINTS"],"fn":["area2","cross","fill","in_triangle","triangulate"],"struct":["Cache"],"type":["Triangles"]};

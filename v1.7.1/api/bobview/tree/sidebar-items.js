@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["THREADS"],"enum":["Done","Job","Target"],"fn":["describe","embed","file_name","key","label","links","name","one_line","resolve","run","target","target_key","walk"],"struct":["Clicked","Link","Links","Navigator"],"type":["Finished"]};

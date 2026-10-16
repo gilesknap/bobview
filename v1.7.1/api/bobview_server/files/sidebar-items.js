@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["CHUNK"],"enum":["Found","Part"],"fn":["part","respond","secs","serve","stream"],"struct":["Roots","Validators"]};

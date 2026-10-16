@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["MAX_ARRAY"],"fn":["array","entry_value","exponential","format_value","number","parse","parse_sexagesimal","sexagesimal","significant"],"mod":["option"]};
