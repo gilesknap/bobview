@@ -275,6 +275,16 @@ impl View {
         defaults(cur).same_display(&defaults(loc))
     }
 
+    /// The display to keep in a layout: the one shown, unless it was refused
+    /// for a display from a public address naming it (which the user did
+    /// not choose), when it is the last one shown before it.
+    pub fn saved_location(&self) -> Option<&Location> {
+        self.current
+            .iter()
+            .chain(self.back.iter().rev())
+            .find(|l| !crate::fetch::refused(&l.source))
+    }
+
     /// Navigate to a display, recording where we came from.
     pub fn open(&mut self, loc: Location) {
         if let Some(cur) = self.current.take() {
@@ -469,13 +479,12 @@ impl View {
 /// How many of the distinct PVs that widgets, plots and rules use are
 /// connected, and how many there are.
 fn count_pvs(nodes: &[Node]) -> (usize, usize) {
-    fn walk(nodes: &[Node], seen: &mut std::collections::HashMap<String, bool>) {
+    fn walk<'a>(nodes: &'a [Node], seen: &mut std::collections::HashMap<&'a pv::PvName, bool>) {
         for n in nodes {
             let traces = n.traces.iter().flat_map(|t| t.x.iter().chain(&t.y));
             let rules = n.rules.iter().flat_map(|r| r.pvs());
             for pv in n.pv.iter().chain(traces).chain(rules) {
-                seen.entry(pv.name().to_string())
-                    .or_insert_with(|| pv.state().connected);
+                seen.entry(pv.name()).or_insert_with(|| pv.connected());
             }
             walk(&n.children, seen);
             n.tabs.iter().for_each(|t| walk(t, seen));
@@ -550,5 +559,29 @@ mod tests {
             view.error.as_deref(),
             Some("cannot read /x/a.bob: the build failed (see the log)")
         );
+    }
+
+    #[test]
+    fn a_refused_display_is_not_kept_in_a_layout() {
+        use crate::fetch::{self, tests};
+        let (private, _) = tests::serve();
+        let (public, _) = tests::serve_public("/opi/a.bob");
+        let at = |source: bob::Source| Location {
+            source,
+            macros: Default::default(),
+        };
+        let mut view = View::new(&PvManager::new(), Some(1.0));
+        assert_eq!(view.saved_location(), None);
+        let page = fetch::user_named(&format!("{public}/opi/a.bob"));
+        let d = fetch::load(&page).unwrap();
+        // A link on the public display to a private one, refused.
+        let link = fetch::resolve(d.source.as_ref(), &format!("{private}/opi/a.bob"));
+        assert!(fetch::load(&link).is_err());
+        view.current = Some(at(link.clone()));
+        view.back = vec![at(page.clone())];
+        assert_eq!(view.saved_location(), Some(&at(page)));
+        // Once the user names it, it is theirs.
+        fetch::user_named(&link.to_string());
+        assert_eq!(view.saved_location(), Some(&at(link)));
     }
 }

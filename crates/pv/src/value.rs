@@ -163,7 +163,7 @@ impl Severity {
 }
 
 /// Everything known about a PV at one moment.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct PvState {
     pub connected: bool,
     pub value: Value,

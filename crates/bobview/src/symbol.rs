@@ -276,13 +276,7 @@ fn texture<'a>(
             return None;
         }
         Image::Raster(r) => r.size,
-        Image::Svg(_) => {
-            let px = (size * ctx.pixels_per_point())
-                .round()
-                .max(Vec2::splat(1.0));
-            let px = px * (MAX_SIDE.min(max_side) / px.max_elem()).min(1.0);
-            [px.x as usize, px.y as usize]
-        }
+        Image::Svg(_) => svg_pixels(size * ctx.pixels_per_point(), MAX_SIDE.min(max_side)),
     };
     let key = (source.clone(), px);
     if slot.as_ref().is_none_or(|t| t.key != key) {
@@ -305,6 +299,19 @@ fn texture<'a>(
         }
     }
     slot.as_ref().map(|t| &t.handle)
+}
+
+/// The pixels to draw an SVG in to show it `size` pixels big, at most
+/// `max_side` on a side. The size goes up in steps of a fourth of an octave
+/// (19%), so that resizing it smoothly, as a pinch zoom does, draws it again
+/// a few times rather than on every frame; the texture is drawn scaled.
+fn svg_pixels(size: Vec2, max_side: f32) -> [usize; 2] {
+    let size = size.max(Vec2::splat(1.0));
+    let longest = size.max_elem();
+    let step = (longest.log2() * 4.0).ceil() / 4.0;
+    let scale = (step.exp2() / longest).min(max_side / longest);
+    let px = (size * scale).round().max(Vec2::splat(1.0));
+    [px.x as usize, px.y as usize]
 }
 
 fn render_svg(tree: &usvg::Tree, [w, h]: [usize; 2]) -> ColorImage {
@@ -613,6 +620,27 @@ fn picture_size(w: &bob::Widget, native: Vec2, room: Vec2, angle: f32) -> Vec2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn svgs_are_redrawn_in_steps_as_they_grow() {
+        // A pinch zoom from 100 to 400 pixels, a pixel a frame.
+        let mut sizes: Vec<[usize; 2]> = (100..=400)
+            .map(|w| svg_pixels(Vec2::new(w as f32, w as f32 / 2.0), 4096.0))
+            .collect();
+        for (i, [w, h]) in sizes.iter().enumerate() {
+            let want = 100 + i;
+            assert!(
+                *w >= want && (*w as f32) < want as f32 * 1.2,
+                "{w} for {want}"
+            );
+            assert!(h.abs_diff(w / 2) <= 1, "the shape is kept: {w} x {h}");
+        }
+        sizes.dedup();
+        assert!(sizes.len() <= 9, "{} renders", sizes.len());
+        // Never more than the most a texture can be.
+        assert_eq!(svg_pixels(Vec2::new(9000.0, 3000.0), 4096.0), [4096, 1365]);
+        assert_eq!(svg_pixels(Vec2::ZERO, 4096.0), [1, 1]);
+    }
 
     fn widget(xml: &str) -> bob::Widget {
         let d = bob::Display::parse(&format!("<display>{xml}</display>")).unwrap();

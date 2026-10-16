@@ -1,5 +1,6 @@
 //! The application window: navigation bar, display area and status line.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -96,8 +97,9 @@ pub struct BobApp {
     touch: bool,
     /// The PV details dialog, and the window it was asked for in.
     details: Option<(WindowKey, pvmenu::Details)>,
-    /// A write from a display from the web, waiting for the user's say-so.
-    confirm: Option<Confirm>,
+    /// Writes from a display from the web, waiting for the user's say-so,
+    /// asked about one at a time (see [`MAX_CONFIRMS`]).
+    confirm: VecDeque<Confirm>,
     /// The saved layouts, for the toolbar's menus.
     layouts: LayoutList,
     /// Open trend windows, and the id the next one gets.
@@ -124,7 +126,15 @@ struct Confirm {
     window: WindowKey,
     pv: pv::Pv,
     value: String,
+    /// Whether Cancel has been given the focus, which happens once, as the
+    /// dialog first shows this write.
+    focused: bool,
 }
+
+/// Writes that may wait for confirmation at once. One click can ask for
+/// several (an action list run together), but a display must not be able
+/// to pile up writes behind the dialog; more are refused.
+const MAX_CONFIRMS: usize = 16;
 
 /// The saved layouts' names, read when a menu listing them opens and after
 /// a save or delete, not on every frame it is open.
@@ -397,7 +407,7 @@ impl BobApp {
             tree_toggled: false,
             touch: false,
             details: None,
-            confirm: None,
+            confirm: VecDeque::new(),
             layouts: LayoutList::default(),
             trends: Vec::new(),
             next_trend: 0,
@@ -759,6 +769,8 @@ impl BobApp {
         let was_pinned = self.main_pinned;
         let mut action = None;
         let mut actual_size = false;
+        let mut all_windows = None;
+        let others = !self.windows.is_empty() || !self.trends.is_empty();
         ui.spacing_mut().button_padding = Vec2::new(10.0, 6.0);
         ui.spacing_mut().item_spacing.x = 8.0;
         // Every item is as tall as a framed group (single buttons in an
@@ -878,6 +890,8 @@ impl BobApp {
                     {
                         toggle_auto_size(&mut self.chrome);
                     }
+                    ui.separator();
+                    all_windows = window_items(ui, others);
                     if windows {
                         ui.separator();
                         if compact {
@@ -927,6 +941,14 @@ impl BobApp {
                 }
             });
         });
+        if let Some(req) = all_windows {
+            let origin = Origin {
+                window: WindowKey::Main,
+                ctrl: false,
+                shift: false,
+            };
+            self.request(ui.ctx(), origin, req);
+        }
         // Actual size: 100%, and the window (with the navigator) sized to it.
         if actual_size {
             self.main.fit = false;
@@ -977,7 +999,7 @@ impl BobApp {
     /// The open windows as a layout.
     fn layout(&self) -> Layout {
         let mut windows = Vec::new();
-        if let Some(loc) = &self.main.current {
+        if let Some(loc) = self.main.saved_location() {
             let mut w = WindowLayout::new(loc, self.geometry);
             w.main = true;
             w.pinned = Some(self.main_pinned);
@@ -986,7 +1008,7 @@ impl BobApp {
             windows.push(w);
         }
         for dw in self.windows.iter().filter(|w| !w.close) {
-            if let Some(loc) = &dw.view.current {
+            if let Some(loc) = dw.view.saved_location() {
                 let mut w = WindowLayout::new(loc, dw.geometry);
                 w.toolbar = dw.toolbar;
                 w.pinned = Some(dw.pinned);
@@ -1174,7 +1196,7 @@ impl BobApp {
             ui.label("File or URL:");
             let edit = ui.add(egui::TextEdit::singleline(&mut *path).desired_width(f32::INFINITY));
             if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                chosen = Some(Source::parse(path));
+                chosen = Some(crate::fetch::user_named(path));
             }
         });
         // Nothing to list for a URL (an empty path lists nothing).
@@ -1526,9 +1548,7 @@ impl BobApp {
         if self.details.as_ref().is_some_and(|(w, _)| closed(*w)) {
             self.details = None;
         }
-        if self.confirm.as_ref().is_some_and(|c| closed(c.window)) {
-            self.confirm = None;
-        }
+        self.confirm.retain(|c| !closed(c.window));
         dialogs(
             ui.ctx(),
             WindowKey::Main,
@@ -1612,11 +1632,21 @@ impl BobApp {
                 target,
             } => self.follow(ctx, origin, Location { source, macros }, &target),
             // Shown in the window asked from, which may have been drawn
-            // already this frame.
-            // A second one replaces a pending one: the dialog is modal in
-            // spirit, and a display cannot make writes pile up behind it.
+            // already this frame, after any asked for before it.
             Request::ConfirmWrite { pv, value } => {
-                self.confirm = Some(Confirm { window, pv, value });
+                if self.confirm.len() < MAX_CONFIRMS {
+                    self.confirm.push_back(Confirm {
+                        window,
+                        pv,
+                        value,
+                        focused: false,
+                    });
+                } else {
+                    log::warn!(
+                        "not writing '{value}' to {}: {MAX_CONFIRMS} writes already wait to be confirmed",
+                        pv.name()
+                    );
+                }
                 ctx.request_repaint();
             }
             Request::Details(details) => {
@@ -1652,6 +1682,26 @@ impl BobApp {
                     }
                 }
             },
+            Request::RaiseAll => {
+                for w in &self.windows {
+                    raise(ctx, WindowKey::Child(w.id));
+                }
+                for t in &self.trends {
+                    raise_trend(ctx, t.id);
+                }
+                raise(ctx, WindowKey::Main);
+                // The window asking stays on top.
+                if window != WindowKey::Main {
+                    raise(ctx, window);
+                }
+            }
+            Request::CloseOthers => {
+                log::info!("close all other windows");
+                for w in &mut self.windows {
+                    w.close |= WindowKey::Child(w.id) != window;
+                }
+                self.trends.clear();
+            }
             Request::Webpage(url) => open_webpage(&url),
         }
     }
@@ -1780,9 +1830,9 @@ fn dialogs(
     ctx: &egui::Context,
     window: WindowKey,
     details: &mut Option<(WindowKey, pvmenu::Details)>,
-    confirm: &mut Option<Confirm>,
+    confirm: &mut VecDeque<Confirm>,
 ) {
-    if confirm.as_ref().is_some_and(|c| c.window == window) {
+    if confirm.front().is_some_and(|c| c.window == window) {
         confirm_window(ctx, confirm);
     }
     if details.as_ref().is_some_and(|(w, _)| *w == window) {
@@ -1790,9 +1840,10 @@ fn dialogs(
     }
 }
 
-/// Ask whether to write the value a display from the web asked for.
-fn confirm_window(ctx: &egui::Context, confirm: &mut Option<Confirm>) {
-    let Some(c) = confirm.as_ref() else {
+/// Ask whether to write the first value a display from the web asked for.
+fn confirm_window(ctx: &egui::Context, confirm: &mut VecDeque<Confirm>) {
+    let waiting = confirm.len().saturating_sub(1);
+    let Some(c) = confirm.front_mut() else {
         return;
     };
     let mut answer = None;
@@ -1803,12 +1854,18 @@ fn confirm_window(ctx: &egui::Context, confirm: &mut Option<Confirm>) {
         .show(ctx, |ui| {
             ui.label("A display loaded from the web asks to write");
             ui.monospace(format!("{} = {}", plain_name(c.pv.name()), c.value));
+            if waiting > 0 {
+                ui.label(format!("{waiting} more to ask about after this one"));
+            }
             ui.horizontal(|ui| {
                 let write = ui.button("Write").clicked();
                 let cancel = ui.button("Cancel");
-                // Cancel has the focus, so Enter cancels; only a click writes.
-                if !ui.memory(|m| m.focused().is_some()) {
+                // Cancel takes the focus from whatever had it (the button
+                // that asked for the write, perhaps), so Enter cancels; only
+                // a click writes. Once: the user may then tab to Write.
+                if !c.focused {
                     cancel.request_focus();
+                    c.focused = true;
                 }
                 answer = if write {
                     Some(true)
@@ -1826,7 +1883,9 @@ fn confirm_window(ctx: &egui::Context, confirm: &mut Option<Confirm>) {
         if yes {
             c.pv.write(c.value.clone());
         }
-        *confirm = None;
+        confirm.pop_front();
+        // The next one, if any, is shown next frame.
+        ctx.request_repaint();
     }
 }
 
@@ -1871,6 +1930,25 @@ fn viewport(window: WindowKey) -> egui::ViewportId {
 /// The display window `id` inside the main one, where windows are embedded.
 fn display_window_id(id: egui::ViewportId) -> Id {
     Id::new(("display window", id))
+}
+
+/// The menu items acting on all of bobview's windows, enabled when there
+/// are `others` than the main one; the request of the one clicked.
+fn window_items(ui: &mut egui::Ui, others: bool) -> Option<Request> {
+    let raise = ui
+        .add_enabled(others, egui::Button::new("Bring all windows to front"))
+        .clicked();
+    let close = ui
+        .add_enabled(others, egui::Button::new("Close all other windows"))
+        .on_hover_text("Close every display and trend window but the main one and this one")
+        .clicked();
+    if raise {
+        Some(Request::RaiseAll)
+    } else if close {
+        Some(Request::CloseOthers)
+    } else {
+        None
+    }
 }
 
 /// Bring `window` to the front, as a link to its display is followed.
@@ -1975,7 +2053,7 @@ fn child_ui(
             .rect
             .height();
     }
-    let drawn = w.view.draw(ui, vcx);
+    let mut drawn = w.view.draw(ui, vcx);
     panels += drawn.status;
     if let Some(background) = &drawn.background {
         background.context_menu(|ui| {
@@ -1989,6 +2067,15 @@ fn child_ui(
             }
             if ui.button("Close").clicked() {
                 w.close = true;
+            }
+            ui.separator();
+            if let Some(req) = window_items(ui, true) {
+                let origin = Origin {
+                    window: WindowKey::Child(w.id),
+                    ctrl: false,
+                    shift: false,
+                };
+                drawn.requests.push((origin, req));
             }
         });
     }
@@ -2204,8 +2291,62 @@ pub(crate) fn plain_name(name: &pv::PvName) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::plain_name;
+    use super::{Confirm, WindowKey, confirm_window, plain_name};
+    use eframe::egui;
     use pv::PvName;
+    use std::collections::VecDeque;
+
+    #[test]
+    fn writes_are_confirmed_one_at_a_time_and_enter_cancels() {
+        let pvs = pv::PvManager::new();
+        let pv = pvs.subscribe("loc://confirm_test(0)");
+        let ctx = egui::Context::default();
+        let mut confirm: VecDeque<Confirm> = ["1", "2"]
+            .map(|value| Confirm {
+                window: WindowKey::Main,
+                pv: pv.clone(),
+                value: value.into(),
+                focused: false,
+            })
+            .into();
+        // One frame; the display's button, which asked for the writes, has
+        // the focus to begin with, as one pressed with the keyboard keeps it.
+        let frame = |enter: bool, first: bool, confirm: &mut VecDeque<Confirm>| {
+            let mut input = egui::RawInput::default();
+            if enter {
+                input.events.push(egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            let out = ctx.run_ui(input, |ui| {
+                let asked = ui.button("Ask");
+                if first {
+                    asked.request_focus();
+                }
+                confirm_window(ui.ctx(), confirm);
+            });
+            out.drop_without_applying_deltas();
+        };
+        frame(false, true, &mut confirm);
+        frame(false, false, &mut confirm);
+        assert_eq!(confirm.len(), 2);
+        assert!(confirm[0].focused);
+        // Enter cancels the first write, not presses the display's button.
+        frame(true, false, &mut confirm);
+        assert_eq!(confirm.len(), 1);
+        assert_eq!(confirm[0].value, "2");
+        // The second gets Cancel focused in its turn.
+        frame(false, false, &mut confirm);
+        frame(false, false, &mut confirm);
+        assert!(confirm[0].focused);
+        frame(true, false, &mut confirm);
+        assert!(confirm.is_empty());
+        assert_eq!(pv.state().value.as_f64(), Some(0.0));
+    }
 
     #[test]
     fn lists_displays_and_project_links() {
@@ -2574,6 +2715,16 @@ mod tests {
         // The main window still goes back first.
         app.request(&ctx, plain(main), Request::Close);
         assert_eq!(app.main.current, Some(display("a")));
+
+        // Closing all other windows keeps the main one and the one asking.
+        let open_windows = |app: &BobApp| app.windows.iter().filter(|w| !w.close).count();
+        assert_eq!(open_windows(&app), 2);
+        app.request(&ctx, plain(first), Request::CloseOthers);
+        assert_eq!(open_windows(&app), 1);
+        assert!(app.view_mut(first).is_some());
+        app.request(&ctx, plain(main), Request::CloseOthers);
+        assert_eq!(open_windows(&app), 0);
+        assert_eq!(app.main.current, Some(display("a")));
     }
 
     #[test]
@@ -2581,6 +2732,9 @@ mod tests {
         use super::{BobApp, Location, Origin, WindowKey};
         use crate::tree::{Clicked, Target};
         use crate::widgets::Request;
+        // Following a link to the display shown reloads it, clearing the
+        // fetch cache.
+        let _cache = crate::fetch::tests::CACHE_USERS.lock();
         let ctx = eframe::egui::Context::default();
         let mut app = BobApp::new(&ctx, None, Some(1.0), crate::chrome::UiScale::Auto);
         let display = |name: &str| Location {
@@ -2654,6 +2808,9 @@ mod tests {
             source: bob::Source::File(file.clone()),
             macros: bob::Macros::from_pairs(pairs.iter().copied()),
         };
+        // Following a link to the display shown reloads it, clearing the
+        // fetch cache.
+        let _cache = crate::fetch::tests::CACHE_USERS.lock();
         let ctx = eframe::egui::Context::default();
         let mut app = BobApp::new(&ctx, None, Some(1.0), crate::chrome::UiScale::Auto);
         let open = |app: &mut BobApp, ctrl, loc: Location| {

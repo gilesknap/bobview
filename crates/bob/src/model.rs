@@ -267,6 +267,26 @@ impl Action {
         }
     }
 
+    /// What Phoebus calls the action: its description, or without one its
+    /// kind's default (Phoebus' `Messages.Action*`).
+    pub fn label(&self) -> &str {
+        let description = self.description();
+        if !description.is_empty() {
+            return description;
+        }
+        match self {
+            Action::OpenDisplay { .. } => "Open Display",
+            Action::WritePv { .. } => "Write PV",
+            Action::OpenWebpage { .. } => "Open Web Page",
+            Action::Execute { .. } => "Execute Script",
+            Action::Command { .. } => "Execute Command",
+            Action::CloseDisplay { .. } => "Close Display",
+            Action::Trend { .. } => "Open Data Browser",
+            Action::Unsupported { kind, .. } if kind == "open_file" => "Open File",
+            Action::Unsupported { kind, .. } => kind,
+        }
+    }
+
     pub fn description(&self) -> &str {
         match self {
             Action::OpenDisplay { description, .. }
@@ -290,6 +310,10 @@ pub struct Rule {
     pub out_exp: bool,
     pub exprs: Vec<RuleExpr>,
     pub pv_names: Vec<String>,
+    /// Whether to wait for every PV to connect before evaluating. BOY
+    /// evaluates regardless, reading a disconnected PV as INVALID, and an
+    /// `.opi` rule carries `check_connections="false"` to say so.
+    pub check_connections: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -306,6 +330,7 @@ impl Rule {
             name: el.attr("name").unwrap_or("").to_string(),
             prop_id: el.attr("prop_id").unwrap_or("").to_string(),
             out_exp: el.attr("out_exp") == Some("true"),
+            check_connections: el.attr("check_connections") != Some("false"),
             exprs: el
                 .children
                 .iter()

@@ -47,6 +47,8 @@ pub struct Node {
     /// Properties before any rule changed them, and the last rule outcomes.
     pub orig_props: Option<bob::Element>,
     pub rule_outcomes: Vec<(String, crate::rules::Outcome)>,
+    /// The rule PVs' versions when the rules were last evaluated.
+    pub rule_versions: Option<Vec<u64>>,
     /// PVs written by this widget's actions, connected in advance.
     pub action_pvs: Vec<Pv>,
     /// Text being typed into a text entry, while it has focus.
@@ -303,10 +305,7 @@ impl Node {
 
     /// Resolve a file named by this widget against the display it is in.
     pub fn resolve(&self, file: &str) -> Source {
-        match &self.base {
-            Some(base) => base.resolve(file),
-            None => Source::parse(file),
-        }
+        crate::fetch::resolve(self.base.as_ref(), file)
     }
 
     /// Show an embedded display once built from `source`, or why it was not.
@@ -448,6 +447,13 @@ pub fn group_inset(w: &Widget) -> (f64, f64) {
     }
 }
 
+/// A fresh `DID_<n>`, BOY's id for an opened display.
+fn display_id() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("DID_{n}")
+}
+
 impl Builder<'_> {
     pub fn screen(
         &self,
@@ -457,7 +463,13 @@ impl Builder<'_> {
         depth: u32,
     ) -> Screen {
         // Macros passed in override the display's own defaults.
-        let macros = display.macros.with(macros);
+        let mut macros = display.macros.with(macros);
+        // BOY gives each display it opens a `$(DID)`, which screens use to
+        // keep their `loc://$(DID)…` PVs apart. Widgets of an embedded
+        // display become the host's, so they share the host's id.
+        if display.legacy && (depth == 0 || macros.get("DID").is_none()) {
+            macros = macros.with(&Macros::from_pairs([("DID", display_id())]));
+        }
         let base = display.source.clone();
         let (widgets, width, height) = match group.filter(|g| !g.is_empty()) {
             Some(name) => match find_group(&display.widgets, name) {
@@ -537,7 +549,7 @@ impl Builder<'_> {
             .collect();
 
         let link = crate::group_link::Link::new(w, &|t| expand_for(w, &macros, t), self.pvs);
-        let action_pvs = w
+        let mut action_pvs: Vec<Pv> = w
             .actions()
             .iter()
             .filter_map(|a| match a {
@@ -547,6 +559,21 @@ impl Builder<'_> {
                 _ => None,
             })
             .collect();
+        // A menu mux's targets, which a pick writes, and the values of its
+        // initial item, which BOY writes as the display opens.
+        if let Some(mux) = w.menu_mux() {
+            let initial = mux.initial.map(|i| mux.writes(i)).unwrap_or_default();
+            for set in &mux.sets {
+                let target = self.pvs.subscribe(&expand_for(w, &macros, &set.target));
+                if let Some((_, value)) = initial.iter().find(|(t, _)| *t == set.target) {
+                    target.write(expand_for(w, &macros, value));
+                }
+                action_pvs.push(target);
+            }
+            if let (true, Some(i), Some(pv)) = (mux.index, mux.initial, &pv) {
+                pv.write(i.to_string());
+            }
+        }
 
         let mut node = Node {
             w: w.clone(),
@@ -561,6 +588,7 @@ impl Builder<'_> {
             rules,
             orig_props: None,
             rule_outcomes: Vec::new(),
+            rule_versions: None,
             action_pvs,
             edit: None,
             error: None,
@@ -892,6 +920,33 @@ mod tests {
         let pvs = PvManager::new();
         let s = Builder::new(&pvs).screen(d, &Macros::from_pairs([("P", "B")]), None, 0);
         assert_eq!(s.nodes[0].pv_name, "loc://Bq");
+    }
+
+    #[test]
+    fn opi_displays_get_their_own_did() {
+        let opi = r#"<display typeId="org.csstudio.opibuilder.Display" version="1.0.0">
+            <widget typeId="org.csstudio.opibuilder.widgets.TextUpdate" version="1.0.0">
+            <pv_name>loc://$(DID)ll</pv_name></widget></display>"#;
+        let pvs = PvManager::new();
+        let b = Builder::new(&pvs);
+        let open = |macros: &Macros, depth| {
+            let d = Display::parse(opi).unwrap();
+            b.screen(d, macros, None, depth).nodes[0].pv_name.clone()
+        };
+        let (one, two) = (open(&Macros::default(), 0), open(&Macros::default(), 0));
+        assert!(
+            one.starts_with("loc://DID_") && one.ends_with("ll"),
+            "{one}"
+        );
+        assert_ne!(one, two);
+        // An embedded display shares its host's id; a new one does not.
+        let host = Macros::from_pairs([("DID", "DID_host")]);
+        assert_eq!(open(&host, 1), "loc://DID_hostll");
+        assert_ne!(open(&host, 0), "loc://DID_hostll");
+        // DID is a BOY built-in, so a .bob has none.
+        let bob = "<display><widget type='led'><pv_name>loc://$(DID)x</pv_name></widget></display>";
+        let s = b.screen(Display::parse(bob).unwrap(), &Macros::default(), None, 0);
+        assert_eq!(s.nodes[0].pv_name, "loc://$(DID)x");
     }
 
     /// Serve a display at every path but /missing.bob (a 404), holding each
