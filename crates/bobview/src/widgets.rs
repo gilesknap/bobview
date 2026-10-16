@@ -2555,7 +2555,7 @@ pv.setValue(pv_value);
             let pvs = PvManager::new();
             let mut display = bob::Display::parse(xml).unwrap();
             display.source = Some(Source::parse(source));
-            let screen = Builder { pvs: &pvs }.screen(display, &Macros::default(), None, 0);
+            let screen = Builder::new(&pvs).screen(display, &Macros::default(), None, 0);
             let node = &screen.nodes[0];
             let pv = node.pv.clone().unwrap();
             let mut requests = Vec::new();

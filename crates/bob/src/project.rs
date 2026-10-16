@@ -177,13 +177,17 @@ pub fn forget() {
 /// The most of a `.project` file that is read.
 const MAX_PROJECT_SIZE: u64 = 1 << 20;
 
-/// The first [`MAX_PROJECT_SIZE`] bytes of the text file `path`.
+/// The text file `path`, unless it is over [`MAX_PROJECT_SIZE`] bytes or not UTF-8.
 fn read_capped(path: &Path) -> std::io::Result<String> {
-    let mut text = String::new();
+    let mut bytes = Vec::new();
     std::fs::File::open(path)?
-        .take(MAX_PROJECT_SIZE)
-        .read_to_string(&mut text)?;
-    Ok(text)
+        .take(MAX_PROJECT_SIZE + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_PROJECT_SIZE {
+        log::warn!("{}: larger than 1 MiB, ignored", path.display());
+        return Err(std::io::Error::other("file too large"));
+    }
+    String::from_utf8(bytes).map_err(std::io::Error::other)
 }
 
 /// Linked folders of `dir`'s project, by name, when `dir` holds a `.project`
@@ -784,5 +788,18 @@ $CSS_RUN_SCRIPT -o "${launch_opi}" -s -l "$links" "$@"
             PathBuf::from("/a/c/d")
         );
         assert_eq!(normalize(Path::new("../x")), PathBuf::from("../x"));
+    }
+
+    #[test]
+    fn oversized_project_files_are_ignored_not_cached_empty() {
+        let dir = std::env::temp_dir().join(format!("bobview-bigproj-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let link = "<link><name>a</name><location>/tmp</location></link>";
+        let pad = " ".repeat(MAX_PROJECT_SIZE as usize);
+        std::fs::write(dir.join(".project"), format!("<p>{pad}{link}</p>")).unwrap();
+        assert!(links(&dir).is_none());
+        std::fs::write(dir.join(".project"), format!("<p>{link}</p>")).unwrap();
+        assert_eq!(links(&dir).map(|l| l.len()), Some(1));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
