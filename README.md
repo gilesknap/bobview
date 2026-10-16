@@ -105,10 +105,15 @@ full screen, `--snapshot out.png` renders headless and exits (with `--size WxH`
 or `--size auto`, `--scale-factor F` to render as on a high-DPI screen,
 `--wait SECONDS`, and `--click X,Y` or `--right-click X,Y` to interact
 first, with `--settle SECONDS` after the last click), `BOBVIEW_LOG=debug` gives more output. The window opens at the size
-of the first display (when the screen has room). With Auto-size (🗖 in the
-toolbar, on by default) it is resized to each display you open, unless it
-is maximised or full screen; turn it off to keep the window's size and scale
-each display to fit. The toolbar, menus and keypad are scaled down on a
+of the first display (when the screen has room). With Auto-size (in the
+toolbar's ☰ menu, on by default) it is resized to each display you open,
+unless it is maximised or full screen; turn it off to keep the window's size
+and scale each display to fit. The toolbar has Back, Forward, Home and
+Reload; zoom out, the zoom, zoom in and Fit; the navigator and Open; the
+display's name; and on the right the window's pin, the layout list and ☰,
+a menu of the rest (Auto-size and the layout actions). Clicking the zoom shows the display at 100% and sizes the window
+to it (and the navigator, when shown). A narrow window keeps Back, Home,
+the zoom and Fit, and moves the rest into ☰. The toolbar and menus are scaled down on a
 small high-DPI screen so that they take a small share of it; `--ui-scale F`
 (or `BOBVIEW_UI_SCALE=F`) fixes their size, 1 being the desktop's own scale. Hover over a widget to see its
 PV and value; right-click it (long-press on a touch screen) to copy the PV
@@ -321,8 +326,8 @@ The main window starts pinned, so it stays where it is while the displays
 it links to come and go in one other window; pin that one too to keep it,
 and the next link opens a new viewer. Unpinned, the main window navigates in
 place as one window does. Holding shift opens every display in a window of
-its own, as the old multi-window mode did. The main window's pin is 📌 on
-its toolbar; a display window's is in the corner of its display (below).
+its own, as the old multi-window mode did. The main window's pin is on its
+toolbar; a display window's is in the corner of its display (below).
 Pinned windows have 📌 before their title. In a browser, and on a touch or
 small screen, displays have no windows of their own: every link navigates
 in place, and the pin and layout controls are not shown. BOY Exit buttons
@@ -341,25 +346,55 @@ placed so again for each display a pinned window's link opens in it. The
 display fits the window as you resize it. It has the native title
 bar only: its toolbar (Back, Forward, Reload, zoom and Home) is hidden until
 you show it. While the pointer is over the window, small buttons appear in
-the top-right corner of the display: ◀ Back (while the toolbar is hidden),
-📌 the window's pin, and a chevron that shows or hides the toolbar, as
+the top-right corner of the display: Back (while the toolbar is hidden),
+the window's pin, and a chevron that shows or hides the toolbar, as
 **Ctrl+T** and Show toolbar in the right-click menu on the display's
 background (which also has Close) do. In
 every window Ctrl+R reloads, Alt+← and Alt+→ go back and forward, and
 Ctrl+W closes the window. Closing the main window quits bobview and closes
 its windows.
 
+### Navigator
+
+The navigator button on the main toolbar shows the navigator beside the
+main window's display:
+a tree of the displays the home display links to, the displays those link
+to, and so on. A display's links are its widgets' Open display actions,
+including those in groups, tabs and embedded displays, each display and
+macros once, named by its button's text (or, in a menu, the action's
+description). Clicking a node opens its display as a link in the main
+window would, so with the main window pinned it goes to the viewer, and
+shift and ctrl work as for a link. The displays open in a window are in
+bold. Showing or hiding the navigator widens or narrows the window by its
+width (unless the window is maximized or full screen), so the display keeps
+its size and zoom.
+
+A link with no text of its own, or the same text as another link on its
+display (a row of identical device symbols), is named by the display it
+opens once that has been read: by the words of its title that macros fill
+in, such as `LB-VA-IONP-04` from `Ion Pump Controller - $(device)`, else by
+its whole title. The tooltip gives the title, file and macros.
+
+Displays are read from their files, without connecting their PVs, as their
+nodes are shown, so the tree is read one level ahead of what is open. A
+display that links back to one above it is marked ↻ and not opened again;
+one that can't be read is marked ⚠. A command action's display (a DLS
+launcher script) is found by running its script, so only when its node is
+opened or clicked. The filter box lists the displays read so far whose name
+or file matches; ⟳ reads them all again.
+
 A layout records the open windows: each one's display, Eclipse project and
-effective macros, its position and size, whether it is pinned, the main
+effective macros, its position and size, whether it is pinned, whether the
+main window shows the navigator, the main
 window's zoom and whether a display window shows its toolbar (a layout from
 before windows were pinned pins them all if it was saved in multi-window
 mode, and none if not). It records the trend windows too: each
 one's PVs, time span, log scale, position and size. Layouts are JSON files in
 `$XDG_CONFIG_HOME/bobview/layouts` (by default `~/.config/bobview/layouts`).
 The main toolbar's layout list loads one (closing the display and trend
-windows open now), and the ▾ menu next to it has Save (to the layout last loaded or
-saved), Save as default, Save as… (asking before replacing a layout),
-Delete, and Save default on exit (off unless ticked).
+windows open now), and its ☰ menu has Save layout (to the layout last
+loaded or saved), Save layout as… (asking before replacing a layout), Save
+as default, Delete layout, and Save default on exit (off unless ticked).
 
 ```bash
 bobview                     # restores the default layout if there is one
@@ -409,7 +444,7 @@ the `Host` the proxy passes on must also be one of the server's names, so give
 a public name with `--host NAME` (the Origin/Host check now applies to read-only
 servers too).
 
-The page also takes `&macros=P=X,R=Y`, `&zoom=F`, `&keypad` and, to use
+The page also takes `&macros=P=X,R=Y`, `&zoom=F` and, to use
 another PVWS server, `&pvws=host[:port]` (meaning `wss://host[:port]/pvws/pv`,
 or `ws://` when the page is plain `http:` and the port isn't 443) or a full
 `ws://` or `wss://` URL; `display` may be a URL on another server that allows

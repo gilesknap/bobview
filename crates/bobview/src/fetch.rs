@@ -10,9 +10,10 @@
 //! [`pending`].
 
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock};
 
 use bob::{Display, Error, Source};
+use parking_lot::Mutex;
 
 /// Largest display file we will read.
 const MAX_SIZE: u64 = 16 << 20;
@@ -51,9 +52,9 @@ pub fn load(source: &Source) -> Result<Display, Error> {
 
 /// Drop every cached display, so the next load fetches it again.
 pub fn forget() {
-    CACHE.lock().unwrap().clear();
+    CACHE.lock().clear();
     #[cfg(target_arch = "wasm32")]
-    web::FAILED.lock().unwrap().clear();
+    web::FAILED.lock().clear();
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -138,7 +139,7 @@ mod native {
     }
 
     pub(super) fn get(url: &str) -> Result<Fetched, Error> {
-        if let Some(fetched) = CACHE.lock().unwrap().get(url).cloned() {
+        if let Some(fetched) = CACHE.lock().get(url).cloned() {
             return Ok(fetched);
         }
         log::info!("fetching {url}");
@@ -153,10 +154,7 @@ mod native {
             .map_err(|e| fail(describe(e)))?
             .into();
         let fetched = Fetched { url: served, text };
-        CACHE
-            .lock()
-            .unwrap()
-            .insert(url.to_string(), fetched.clone());
+        CACHE.lock().insert(url.to_string(), fetched.clone());
         Ok(fetched)
     }
 
@@ -172,9 +170,10 @@ mod native {
 #[cfg(target_arch = "wasm32")]
 mod web {
     use std::collections::{HashMap, HashSet};
-    use std::sync::{LazyLock, Mutex};
+    use std::sync::LazyLock;
 
     use bob::{Error, Source};
+    use parking_lot::Mutex;
     use wasm_bindgen::JsCast;
     use wasm_bindgen_futures::JsFuture;
 
@@ -190,31 +189,31 @@ mod web {
 
     /// Whether any display is still being fetched.
     pub fn pending() -> bool {
-        !PENDING.lock().unwrap().is_empty()
+        !PENDING.lock().is_empty()
     }
 
     pub(super) fn get(url: &str) -> Result<Fetched, Error> {
-        if let Some(fetched) = CACHE.lock().unwrap().get(url).cloned() {
+        if let Some(fetched) = CACHE.lock().get(url).cloned() {
             return Ok(fetched);
         }
-        if let Some(why) = FAILED.lock().unwrap().get(url) {
+        if let Some(why) = FAILED.lock().get(url) {
             return Err(Error::Fetch(url.to_string(), why.clone()));
         }
-        if PENDING.lock().unwrap().insert(url.to_string()) {
+        if PENDING.lock().insert(url.to_string()) {
             let url = url.to_string();
             wasm_bindgen_futures::spawn_local(async move {
                 match fetch(&url).await {
                     Ok((served, data)) => {
                         let text = String::from_utf8_lossy(&data).into();
                         let fetched = Fetched { url: served, text };
-                        CACHE.lock().unwrap().insert(url.clone(), fetched);
+                        CACHE.lock().insert(url.clone(), fetched);
                     }
                     Err(why) => {
                         log::warn!("cannot fetch {url}: {why}");
-                        FAILED.lock().unwrap().insert(url.clone(), why);
+                        FAILED.lock().insert(url.clone(), why);
                     }
                 }
-                PENDING.lock().unwrap().remove(&url);
+                PENDING.lock().remove(&url);
             });
         }
         Err(Error::Fetch(url.to_string(), LOADING.into()))
@@ -283,7 +282,7 @@ mod tests {
                 while reader.read_line(&mut line).unwrap() > 2 {
                     line.clear();
                 }
-                *count.lock().unwrap() += 1;
+                *count.lock() += 1;
                 let (status, body) = if first.starts_with("GET /opi/a.bob ") {
                     ("200 OK", DISPLAY)
                 } else if first.starts_with("GET /old/a.bob ") {
@@ -311,7 +310,7 @@ mod tests {
         let d = load(&src).unwrap();
         assert_eq!(d.name, "Served");
         assert_eq!(d.source.as_ref(), Some(&src));
-        assert_eq!(*hits.lock().unwrap(), 1, "second load came from the cache");
+        assert_eq!(*hits.lock(), 1, "second load came from the cache");
 
         let missing = src.resolve("../missing.bob");
         let err = load(&missing).unwrap_err().to_string();

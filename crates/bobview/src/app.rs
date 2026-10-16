@@ -10,9 +10,11 @@ use eframe::egui::{self, Id, Pos2, Rect, Vec2};
 use pv::PvManager;
 
 use crate::chrome::{self, Chrome, UiScale};
+use crate::icons::{self, Icon};
 use crate::layout::{self, Geometry, Layout, TrendLayout, WindowLayout, Zoom};
 use crate::pvmenu;
 use crate::style;
+use crate::tree::{self, Navigator};
 use crate::trend::Trend;
 use crate::view::{LaunchKey, Origin, View, ViewCx, WindowKey, window_title};
 use crate::widgets::{self, Request};
@@ -73,14 +75,24 @@ pub struct BobApp {
     monitors_at: Option<f64>,
     /// Where the main window is on the desktop, to open windows beside it.
     main_frame: Option<Frame>,
+    /// The main window's place and size from a layout, until it has them:
+    /// a window manager that sized it before moving it may have cut it to
+    /// the monitor it was on.
+    restoring: Option<Geometry>,
     settings: layout::Settings,
     /// The Save as… dialog, when open.
     save_as: Option<SaveAs>,
     home: Option<Location>,
     show_open: bool,
-    /// Use the on-screen keypad for text entries (switched on by the first touch).
-    keypad_mode: bool,
-    keypad: Option<Keypad>,
+    /// The tree of the displays the main window's links to, its width as
+    /// last drawn (0 when hidden), and whether its toolbar button has just
+    /// shown or hidden it.
+    tree: Navigator,
+    tree_width: f32,
+    tree_toggled: bool,
+    /// Touch mode: finger-sized controls and no windows of their own
+    /// (switched on by the first touch).
+    touch: bool,
     /// The PV details dialog, and the window it was asked for in.
     details: Option<(WindowKey, pvmenu::Details)>,
     /// A write from a display from the web, waiting for the user's say-so.
@@ -111,13 +123,6 @@ struct Confirm {
     window: WindowKey,
     pv: pv::Pv,
     value: String,
-}
-
-struct Keypad {
-    /// The window it was asked for in, which it is drawn in.
-    window: WindowKey,
-    pv: pv::Pv,
-    text: String,
 }
 
 /// The saved layouts' names, read when a menu listing them opens and after
@@ -378,12 +383,15 @@ impl BobApp {
             monitors: Vec::new(),
             monitors_at: None,
             main_frame: None,
+            restoring: None,
             settings: layout::Settings::load(),
             save_as: None,
             home: start.clone(),
             show_open: start.is_none(),
-            keypad_mode: false,
-            keypad: None,
+            tree: Navigator::default(),
+            tree_width: 0.0,
+            tree_toggled: false,
+            touch: false,
             details: None,
             confirm: None,
             layouts: LayoutList::default(),
@@ -405,10 +413,6 @@ impl BobApp {
     )]
     pub fn set_read_only(&mut self, on: bool) {
         self.pvs.set_read_only(on);
-    }
-
-    pub fn set_keypad(&mut self, on: bool) {
-        self.keypad_mode = on;
     }
 
     /// Restore `layout` (saved as `name`) once the window is up.
@@ -723,129 +727,191 @@ impl BobApp {
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
-        // One row whatever the width, so a window sized to the display shows it
-        // near 100%; the display name is elided when there is no room. A narrow
-        // window (a phone) keeps the navigation and Fit, and moves the rest
-        // into a menu.
+        // One row whatever the width, so a window sized to the display shows
+        // it near 100%: navigation, zoom and the panels on the left, the
+        // display's name in the middle (elided when there is no room), the
+        // window's pin, layouts and a menu of the rest on the right. A narrow
+        // window (a phone) keeps Back, Home, the zoom and Fit, and moves the
+        // rest into the menu.
         let compact = ui.available_width() < chrome::FULL_TOOLBAR_WIDTH;
         let windows = self.can_windows;
         let was_pinned = self.main_pinned;
         let mut action = None;
-        let view = &mut self.main;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().button_padding = Vec2::new(10.0, 6.0);
-            let back = ui
-                .add_enabled(!view.back.is_empty(), egui::Button::new("◀"))
-                .on_hover_text("Back");
-            self.chrome.button = back.rect.height();
-            if back.clicked() {
-                view.go_back();
-            }
-            if ui
-                .add_enabled(!view.forward.is_empty(), egui::Button::new("▶"))
-                .on_hover_text("Forward")
-                .clicked()
-            {
-                view.go_forward();
-            }
-            if ui
-                .add_enabled(self.home.is_some(), egui::Button::new("⌂"))
-                .on_hover_text("Home")
-                .clicked()
-                && let Some(home) = self.home.clone()
-            {
-                view.open(home);
-            }
-            if compact {
-                ui.separator();
-                if ui.selectable_label(view.fit, "Fit").clicked() {
+        let mut actual_size = false;
+        ui.spacing_mut().button_padding = Vec2::new(10.0, 6.0);
+        ui.spacing_mut().item_spacing.x = 8.0;
+        // Every item is as tall as a framed group (single buttons in an
+        // invisible frame), all along the top of the row, so they line up.
+        let button = icons::height(ui);
+        ui.spacing_mut().interact_size.y = button;
+        let row = Vec2::new(ui.available_width(), icons::group_height(ui));
+        let along = egui::Layout::left_to_right(egui::Align::Min);
+        ui.allocate_ui_with_layout(row, along, |ui| {
+            let view = &mut self.main;
+            icons::group(ui, true, |ui| {
+                let back = icons::button(ui, Icon::Back, false, !view.back.is_empty())
+                    .on_hover_text("Back (Alt+←)");
+                self.chrome.button = back.rect.height();
+                if back.clicked() {
+                    view.go_back();
+                }
+                if !compact
+                    && icons::button(ui, Icon::Forward, false, !view.forward.is_empty())
+                        .on_hover_text("Forward (Alt+→)")
+                        .clicked()
+                {
+                    view.go_forward();
+                }
+                if icons::button(ui, Icon::Home, false, self.home.is_some())
+                    .on_hover_text("Home")
+                    .clicked()
+                    && let Some(home) = self.home.clone()
+                {
+                    view.open(home);
+                }
+                if !compact
+                    && icons::button(ui, Icon::Reload, false, true)
+                        .on_hover_text("Reload (Ctrl+R)")
+                        .clicked()
+                {
+                    view.reload();
+                }
+            });
+            icons::group(ui, true, |ui| {
+                if !compact
+                    && icons::button(ui, Icon::ZoomOut, false, true)
+                        .on_hover_text("Zoom out")
+                        .clicked()
+                {
+                    view.zoom_by(1.0 / 1.25);
+                }
+                let readout = egui::Button::new(format!("{:.0}%", view.zoom * 100.0))
+                    .min_size(Vec2::new(56.0, button));
+                actual_size = ui
+                    .add(readout)
+                    .on_hover_text("Actual size: 100%, and the window sized to fit the display")
+                    .clicked();
+                if !compact
+                    && icons::button(ui, Icon::ZoomIn, false, true)
+                        .on_hover_text("Zoom in")
+                        .clicked()
+                {
+                    view.zoom_by(1.25);
+                }
+                if ui
+                    .add(egui::Button::selectable(view.fit, "Fit").min_size(Vec2::new(0.0, button)))
+                    .on_hover_text("Fit the display to the window")
+                    .clicked()
+                {
                     view.fit = !view.fit;
                 }
-                ui.label(format!("{:.0}%", view.zoom * 100.0));
-                ui.menu_button("☰", |ui| {
-                    if ui.button("⟳ Reload").clicked() {
-                        view.reload();
-                    }
-                    if ui.button("+ Zoom in").clicked() {
-                        view.zoom_by(1.25);
-                    }
-                    if ui.button("− Zoom out").clicked() {
-                        view.zoom_by(1.0 / 1.25);
-                    }
-                    if ui
-                        .selectable_label(self.chrome.auto_size, "🗖 Auto-size window")
+            });
+            if !compact {
+                icons::group(ui, false, |ui| {
+                    if icons::button(ui, Icon::Navigator, self.tree.open, true)
+                        .on_hover_text(NAVIGATOR_HELP)
                         .clicked()
+                    {
+                        self.tree.open = !self.tree.open;
+                        self.tree_toggled = true;
+                    }
+                    if icons::button(ui, Icon::Open, self.show_open, true)
+                        .on_hover_text("Open a display file")
+                        .clicked()
+                    {
+                        self.show_open = !self.show_open;
+                    }
+                });
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                let menu = icons::group(ui, false, |ui| icons::button(ui, Icon::Menu, false, true))
+                    .on_hover_text("More");
+                egui::Popup::menu(&menu).show(|ui| {
+                    if compact {
+                        if ui
+                            .add_enabled(!view.forward.is_empty(), egui::Button::new("Forward"))
+                            .clicked()
+                        {
+                            view.go_forward();
+                        }
+                        if ui.button("Reload").clicked() {
+                            view.reload();
+                        }
+                        if ui.button("Zoom in").clicked() {
+                            view.zoom_by(1.25);
+                        }
+                        if ui.button("Zoom out").clicked() {
+                            view.zoom_by(1.0 / 1.25);
+                        }
+                        ui.separator();
+                        if ui.checkbox(&mut self.tree.open, "Navigator").changed() {
+                            self.tree_toggled = true;
+                        }
+                        ui.checkbox(&mut self.show_open, "Open…");
+                    }
+                    let mut auto_size = self.chrome.auto_size;
+                    if ui
+                        .checkbox(&mut auto_size, "Auto-size window")
+                        .on_hover_text("Resize the window to fit each display opened")
+                        .changed()
                     {
                         toggle_auto_size(&mut self.chrome);
                     }
-                    if ui.selectable_label(self.keypad_mode, "⌨ Keypad").clicked() {
-                        self.keypad_mode = !self.keypad_mode;
-                    }
-                    if ui.selectable_label(self.show_open, "Open…").clicked() {
-                        self.show_open = !self.show_open;
-                    }
                     if windows {
                         ui.separator();
-                        action = layout_controls(
+                        if compact {
+                            ui.checkbox(&mut self.main_pinned, "Pinned")
+                                .on_hover_text(PIN_HELP);
+                            ui.menu_button("Load layout", |ui| {
+                                action =
+                                    layout_list(ui, self.layout_name.as_deref(), &mut self.layouts);
+                            });
+                        }
+                        action = layout_menu(
                             ui,
-                            &mut self.main_pinned,
                             self.layout_name.as_deref(),
                             &mut self.settings,
                             &mut self.layouts,
-                            true,
-                        );
+                        )
+                        .or(action.take());
                     }
                 });
-            } else {
-                if ui.button("⟳").on_hover_text("Reload").clicked() {
-                    view.reload();
+                if windows && !compact {
+                    icons::group(ui, false, |ui| {
+                        egui::ComboBox::from_id_salt("layout")
+                            .selected_text(self.layout_name.as_deref().unwrap_or("Layout"))
+                            .show_ui(ui, |ui| {
+                                action =
+                                    layout_list(ui, self.layout_name.as_deref(), &mut self.layouts);
+                            })
+                            .response
+                            .on_hover_text("Load a saved layout");
+                    });
+                    let pin = icons::group(ui, false, |ui| {
+                        icons::button(ui, Icon::Pin, self.main_pinned, true)
+                    });
+                    if pin.on_hover_text(PIN_HELP).clicked() {
+                        self.main_pinned = !self.main_pinned;
+                    }
                 }
-                ui.separator();
-                if ui.button("−").clicked() {
-                    view.zoom_by(1.0 / 1.25);
+                if let Some(s) = &view.screen {
+                    // The rest of the row, the name centred in it.
+                    let rest = Vec2::new(ui.available_width(), icons::group_height(ui));
+                    let centred =
+                        egui::Layout::centered_and_justified(egui::Direction::LeftToRight);
+                    ui.allocate_ui_with_layout(rest, centred, |ui| {
+                        ui.add(egui::Label::new(egui::RichText::new(&s.title).strong()).truncate())
+                            .on_hover_text(&s.title);
+                    });
                 }
-                if ui.selectable_label(view.fit, "Fit").clicked() {
-                    view.fit = !view.fit;
-                }
-                if ui.button("+").clicked() {
-                    view.zoom_by(1.25);
-                }
-                ui.label(format!("{:.0}%", view.zoom * 100.0));
-                if ui
-                    .selectable_label(self.chrome.auto_size, "🗖")
-                    .on_hover_text("Auto-size: resize the window to fit each display opened")
-                    .clicked()
-                {
-                    toggle_auto_size(&mut self.chrome);
-                }
-                ui.separator();
-                if ui
-                    .selectable_label(self.keypad_mode, "⌨")
-                    .on_hover_text("Edit values with an on-screen keypad")
-                    .clicked()
-                {
-                    self.keypad_mode = !self.keypad_mode;
-                }
-                if ui.selectable_label(self.show_open, "Open…").clicked() {
-                    self.show_open = !self.show_open;
-                }
-                if windows {
-                    ui.separator();
-                    action = layout_controls(
-                        ui,
-                        &mut self.main_pinned,
-                        self.layout_name.as_deref(),
-                        &mut self.settings,
-                        &mut self.layouts,
-                        false,
-                    );
-                }
-            }
-            if let Some(s) = &view.screen {
-                ui.add(egui::Label::new(egui::RichText::new(&s.title).strong()).truncate())
-                    .on_hover_text(&s.title);
-            }
+            });
         });
+        // Actual size: 100%, and the window (with the navigator) sized to it.
+        if actual_size {
+            self.main.fit = false;
+            self.main.zoom = 1.0;
+            self.chrome.fit_window();
+        }
         if was_pinned && !self.main_pinned {
             self.main_used.touch(&mut self.clock);
         }
@@ -894,6 +960,7 @@ impl BobApp {
             let mut w = WindowLayout::new(loc, self.geometry);
             w.main = true;
             w.pinned = Some(self.main_pinned);
+            w.tree = self.tree.open;
             w.zoom = Some(Zoom::new(self.main.fit, self.main.zoom));
             windows.push(w);
         }
@@ -926,6 +993,32 @@ impl BobApp {
         Ok(())
     }
 
+    /// Once the main window is where a layout put it, ask again for the
+    /// layout's size if it hasn't that: a window manager may have cut it to
+    /// fit the monitor the window started on.
+    fn finish_restoring(&mut self, ctx: &egui::Context) {
+        let Some(want) = self.restoring else {
+            return;
+        };
+        let (Some(size), Some(now)) = (want.size, self.geometry.size) else {
+            return;
+        };
+        let near = |a: Vec2, b: Vec2| (a - b).length() < 2.0;
+        let there = match (want.position, self.geometry.position) {
+            (Some(p), Some(q)) => near(p.to_vec2(), q.to_vec2()),
+            // The window system doesn't say (Wayland): once it has moved.
+            _ => true,
+        };
+        if !there {
+            return;
+        }
+        self.restoring = None;
+        if !near(size, now) {
+            log::info!("the main window is {now:?}, not {size:?}: resizing it");
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size / ctx.zoom_factor()));
+        }
+    }
+
     /// Close the display windows and open those of `layout`; the main
     /// window moves, takes the layout's size and shows its display.
     fn apply_layout(&mut self, ctx: &egui::Context, layout: Layout, name: Option<String>) {
@@ -944,14 +1037,24 @@ impl BobApp {
                 self.open_window(ctx, loc, geometry, w.toolbar, layout.pinned(w));
                 continue;
             }
-            if let Some(size) = geometry.size {
-                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size / zoom));
-                self.chrome.hold_size();
-            }
+            log::debug!(
+                "restore the main window: size {:?}, position {:?}, navigator {}",
+                geometry.size,
+                geometry.position,
+                if w.tree { "shown" } else { "hidden" }
+            );
+            // Moved before it is sized: a window manager keeps a window
+            // within the monitor it is on, and a new window starts on the
+            // first, which may be smaller than the one it is going to.
             if let Some(pos) = geometry.position {
                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(
                     Pos2::ZERO + pos.to_vec2() / zoom,
                 ));
+            }
+            if let Some(size) = geometry.size {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size / zoom));
+                self.chrome.hold_size();
+                self.restoring = Some(geometry);
             }
             if let Some(z) = &w.zoom {
                 self.main.fit = z.factor().is_none();
@@ -962,6 +1065,7 @@ impl BobApp {
             }
             self.show_open = false;
             self.main_pinned = layout.pinned(w);
+            self.tree.open = w.tree;
             self.main.open(loc);
         }
         self.trends.clear();
@@ -1111,6 +1215,10 @@ fn can_multi_window(ctx: &egui::Context, touch: bool) -> bool {
     !cfg!(target_arch = "wasm32") && !ctx.embed_viewports() && !touch && !small
 }
 
+/// What the navigator shows.
+const NAVIGATOR_HELP: &str = "Navigator: a tree of the displays the home display links to, \
+     and those they link to. Click one to open it as a link would (shift and ctrl too).";
+
 /// What a window's pin does.
 const PIN_HELP: &str = "Pinned: links open their displays in the unpinned window used last, \
      or a new one (shift+click: a new window, ctrl+click: in place). \
@@ -1124,82 +1232,71 @@ enum LayoutAction {
     Delete(String),
 }
 
-/// The main window's pin, the layout list and the layout menu; in the
-/// `compact` toolbar's menu, the list is a submenu.
-fn layout_controls(
+/// The saved layouts, to load one.
+fn layout_list(
     ui: &mut egui::Ui,
-    pinned: &mut bool,
+    current: Option<&str>,
+    layouts: &mut LayoutList,
+) -> Option<LayoutAction> {
+    let names = layouts.get(ui.ctx());
+    if names.is_empty() {
+        ui.weak("No saved layouts");
+    }
+    let mut action = None;
+    for name in names {
+        if ui
+            .selectable_label(current == Some(name.as_str()), &name)
+            .clicked()
+        {
+            action = Some(LayoutAction::Load(name));
+        }
+    }
+    action
+}
+
+/// The menu's layout items: save, save as, delete, and saving the default
+/// on exit.
+fn layout_menu(
+    ui: &mut egui::Ui,
     current: Option<&str>,
     settings: &mut layout::Settings,
     layouts: &mut LayoutList,
-    compact: bool,
 ) -> Option<LayoutAction> {
     let mut action = None;
-    let toggle = if compact { "📌 Pinned" } else { "📌" };
+    let save = match current {
+        Some(name) => format!("Save layout {name}"),
+        None => "Save layout".to_string(),
+    };
     if ui
-        .selectable_label(*pinned, toggle)
-        .on_hover_text(PIN_HELP)
+        .add_enabled(current.is_some(), egui::Button::new(save))
         .clicked()
+        && let Some(name) = current
     {
-        *pinned = !*pinned;
+        action = Some(LayoutAction::Save(name.to_string()));
     }
-    let mut load = |ui: &mut egui::Ui| {
+    if ui.button("Save layout as…").clicked() {
+        action = Some(LayoutAction::SaveAs);
+    }
+    if ui.button("Save as default").clicked() {
+        action = Some(LayoutAction::Save(layout::DEFAULT.to_string()));
+    }
+    ui.menu_button("Delete layout", |ui| {
         let names = layouts.get(ui.ctx());
         if names.is_empty() {
             ui.weak("No saved layouts");
         }
         for name in names {
-            if ui
-                .selectable_label(current == Some(name.as_str()), &name)
-                .clicked()
-            {
-                action = Some(LayoutAction::Load(name));
+            if ui.button(&name).clicked() {
+                action = Some(LayoutAction::Delete(name));
             }
         }
-    };
-    if compact {
-        ui.menu_button("Load layout", load);
-    } else {
-        egui::ComboBox::from_id_salt("layout")
-            .selected_text(current.unwrap_or("Layout"))
-            .show_ui(ui, &mut load);
+    });
+    if ui
+        .checkbox(&mut settings.save_default_on_exit, "Save default on exit")
+        .changed()
+    {
+        settings.save();
     }
-    let menu = if compact { "Layout" } else { "▾" };
-    ui.menu_button(menu, |ui| {
-        if ui
-            .add_enabled(current.is_some(), egui::Button::new("Save"))
-            .clicked()
-            && let Some(name) = current
-        {
-            action = Some(LayoutAction::Save(name.to_string()));
-        }
-        if ui.button("Save as default").clicked() {
-            action = Some(LayoutAction::Save(layout::DEFAULT.to_string()));
-        }
-        if ui.button("Save as…").clicked() {
-            action = Some(LayoutAction::SaveAs);
-        }
-        ui.menu_button("Delete", |ui| {
-            let names = layouts.get(ui.ctx());
-            if names.is_empty() {
-                ui.weak("No saved layouts");
-            }
-            for name in names {
-                if ui.button(&name).clicked() {
-                    action = Some(LayoutAction::Delete(name));
-                }
-            }
-        });
-        ui.separator();
-        if ui
-            .checkbox(&mut settings.save_default_on_exit, "Save default on exit")
-            .changed()
-        {
-            settings.save();
-        }
-    })
-    .response
-    .on_hover_text("Save, save as or delete layouts");
     action
 }
 
@@ -1287,9 +1384,19 @@ impl eframe::App for BobApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        if self.settings.save_default_on_exit
-            && let Err(e) = layout::save(layout::DEFAULT, &self.layout())
-        {
+        if !self.settings.save_default_on_exit {
+            return;
+        }
+        let layout = self.layout();
+        if let Some(main) = layout.windows.iter().find(|w| w.main) {
+            log::debug!(
+                "save the default layout: main window size {:?}, position {:?}, navigator {}",
+                main.size,
+                main.position,
+                if main.tree { "shown" } else { "hidden" }
+            );
+        }
+        if let Err(e) = layout::save(layout::DEFAULT, &layout) {
             log::error!("{e}");
         }
     }
@@ -1303,11 +1410,11 @@ impl BobApp {
             w.view.poll_loading(&ctx);
         }
         self.poll_launched(&ctx);
-        if !self.keypad_mode && ui.input(|i| i.any_touches()) {
-            self.keypad_mode = true;
+        if !self.touch && ui.input(|i| i.any_touches()) {
+            self.touch = true;
         }
-        widgets::touch_targets(ui.ctx(), self.keypad_mode);
-        self.can_windows = can_multi_window(&ctx, self.keypad_mode);
+        widgets::touch_targets(ui.ctx(), self.touch);
+        self.can_windows = can_multi_window(&ctx, self.touch);
         self.main_used
             .focus(ui.input(|i| i.focused), &mut self.clock);
         self.chrome.begin(ui.ctx());
@@ -1322,6 +1429,7 @@ impl BobApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         self.geometry = geometry(ui);
+        self.finish_restoring(&ctx);
         self.main_frame = frame(ui);
         self.main
             .update_title(ui.ctx(), self.main_pinned && self.can_windows);
@@ -1336,10 +1444,18 @@ impl BobApp {
                 .height();
         }
 
+        let (side, clicked) = self.navigator(ui);
+        // Shown or hidden from the toolbar, the navigator widens or narrows
+        // the window, so the display keeps its size and zoom.
+        let grow = side - std::mem::replace(&mut self.tree_width, side);
+        if std::mem::take(&mut self.tree_toggled) && grow != 0.0 {
+            self.resize_main_by(&ctx, Vec2::new(grow, 0.0));
+        }
+
         let trends: Vec<(u64, String)> = self.trends.iter().map(|t| (t.id, t.title())).collect();
         let vcx = ViewCx {
             window: WindowKey::Main,
-            keypad: self.keypad_mode,
+            touch: self.touch,
             trends: &trends,
         };
         let drawn = self.main.draw(ui, &vcx);
@@ -1351,7 +1467,11 @@ impl BobApp {
             self.chrome.display_changed();
         }
         let display = self.main.natural_size(ui.ctx().zoom_factor());
-        self.chrome.end(ui.ctx(), display);
+        self.chrome
+            .end(ui.ctx(), display.map(|d| d + Vec2::new(side, 0.0)));
+        if let Some(clicked) = clicked {
+            self.open_from_tree(&ctx, clicked);
+        }
 
         let mut requests = drawn.requests;
         requests.extend(self.display_windows(ui, &trends));
@@ -1363,9 +1483,6 @@ impl BobApp {
             WindowKey::Main => false,
             WindowKey::Child(id) => !self.windows.iter().any(|dw| dw.id == id),
         };
-        if self.keypad.as_ref().is_some_and(|k| closed(k.window)) {
-            self.keypad = None;
-        }
         if self.details.as_ref().is_some_and(|(w, _)| closed(*w)) {
             self.details = None;
         }
@@ -1375,12 +1492,67 @@ impl BobApp {
         dialogs(
             ui.ctx(),
             WindowKey::Main,
-            &mut self.keypad,
             &mut self.details,
             &mut self.confirm,
         );
         self.save_as_window(ui);
         self.trend_windows(ui);
+    }
+
+    /// Make the main window `by` points bigger (or smaller), within its
+    /// monitor, unless it is maximized or full screen.
+    fn resize_main_by(&self, ctx: &egui::Context, by: Vec2) {
+        let info = ctx.input(|i| i.viewport().clone());
+        if !chrome::can_resize(&info, ctx.zoom_factor()) {
+            return;
+        }
+        let Some(inner) = info.inner_rect else {
+            return;
+        };
+        let mut size = inner.size() + by;
+        if let Some(monitor) = info.monitor_size {
+            size = size.min(monitor);
+        }
+        log::debug!(
+            "resize the window from {:?} to {size:?} for the navigator",
+            inner.size()
+        );
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+    }
+
+    /// The navigator beside the main window's display, when shown: its
+    /// width, and the node clicked. Its root is the home display.
+    fn navigator(&mut self, ui: &mut egui::Ui) -> (f32, Option<tree::Clicked>) {
+        let root = self.home.clone().or_else(|| self.main.current.clone());
+        let Some(root) = root.filter(|_| self.tree.open) else {
+            return (0.0, None);
+        };
+        let here: Vec<Location> = std::iter::once(&self.main)
+            .chain(self.windows.iter().map(|w| &w.view))
+            .filter_map(|v| v.current.clone())
+            .collect();
+        let panel = egui::Panel::left("navigator")
+            .resizable(true)
+            .default_size(220.0)
+            .show(ui, |ui| self.tree.ui(ui, &root, &here));
+        (panel.response.rect.width(), panel.inner)
+    }
+
+    /// Open what a navigator node names, as a link in the main window would.
+    fn open_from_tree(&mut self, ctx: &egui::Context, clicked: tree::Clicked) {
+        let origin = Origin {
+            window: WindowKey::Main,
+            ctrl: clicked.ctrl,
+            shift: clicked.shift,
+        };
+        match clicked.target {
+            tree::Target::Display(loc) => self.follow(ctx, origin, loc, "navigator"),
+            tree::Target::Command {
+                base,
+                directory,
+                command,
+            } => self.launch(ctx, origin, base, directory, command),
+        }
     }
 
     /// Act on a request from a widget in `origin`'s window.
@@ -1394,10 +1566,6 @@ impl BobApp {
             } => self.follow(ctx, origin, Location { source, macros }, &target),
             // Shown in the window asked from, which may have been drawn
             // already this frame.
-            Request::Keypad { pv, text } => {
-                self.keypad = Some(Keypad { window, pv, text });
-                ctx.request_repaint();
-            }
             // A second one replaces a pending one: the dialog is modal in
             // spirit, and a display cannot make writes pile up behind it.
             Request::ConfirmWrite { pv, value } => {
@@ -1453,19 +1621,19 @@ impl BobApp {
         let mut requests = Vec::new();
         // Closed by Exit or Ctrl+W since they were last drawn.
         self.windows.retain(|w| !w.close);
-        let (home, keypad, auto_size) = (&self.home, self.keypad_mode, self.chrome.auto_size);
+        let (home, touch, auto_size) = (&self.home, self.touch, self.chrome.auto_size);
         let desk = Desk {
             monitors: self.monitors(&ctx),
             pinned: self.pinned_frames(),
         };
-        let (pad, details, confirm) = (&mut self.keypad, &mut self.details, &mut self.confirm);
+        let (details, confirm) = (&mut self.details, &mut self.confirm);
         let clock = &mut self.clock;
         let can_windows = self.can_windows;
         for w in &mut self.windows {
             let key = WindowKey::Child(w.id);
             let vcx = ViewCx {
                 window: key,
-                keypad,
+                touch,
                 trends,
             };
             let title = w.view.screen.as_ref().map_or_else(
@@ -1482,7 +1650,7 @@ impl BobApp {
                     .show(&ctx, |ui| {
                         requests.extend(child_ui(ui, w, home, &vcx, None, clock, &desk));
                     });
-                dialogs(&ctx, key, pad, details, confirm);
+                dialogs(&ctx, key, details, confirm);
                 w.close |= !open;
                 continue;
             }
@@ -1491,7 +1659,7 @@ impl BobApp {
                 // No native windows after all: a window in this one.
                 let native = (class != egui::ViewportClass::EmbeddedWindow).then_some(auto_size);
                 requests.extend(child_ui(ui, w, home, &vcx, native, clock, &desk));
-                dialogs(ui.ctx(), key, pad, details, confirm);
+                dialogs(ui.ctx(), key, details, confirm);
                 // Closing the window drops its view, and its PVs with it.
                 if ui.input(|i| i.viewport().close_requested()) {
                     w.close = true;
@@ -1559,20 +1727,16 @@ impl BobApp {
     }
 }
 
-/// The keypad and PV details dialogs, when asked for in `window`: drawn in
-/// that window.
+/// The write confirmation and PV details dialogs, when asked for in
+/// `window`: drawn in that window.
 fn dialogs(
     ctx: &egui::Context,
     window: WindowKey,
-    keypad: &mut Option<Keypad>,
     details: &mut Option<(WindowKey, pvmenu::Details)>,
     confirm: &mut Option<Confirm>,
 ) {
     if confirm.as_ref().is_some_and(|c| c.window == window) {
         confirm_window(ctx, confirm);
-    }
-    if keypad.as_ref().is_some_and(|k| k.window == window) {
-        keypad_window(ctx, keypad);
     }
     if details.as_ref().is_some_and(|(w, _)| *w == window) {
         details_window(ctx, details);
@@ -1630,75 +1794,6 @@ fn details_window(ctx: &egui::Context, details: &mut Option<(WindowKey, pvmenu::
     }
     if !open {
         *details = None;
-    }
-}
-
-fn keypad_window(ctx: &egui::Context, keypad: &mut Option<Keypad>) {
-    let Some(pad) = keypad.as_mut() else {
-        return;
-    };
-    let mut done = None;
-    let title = plain_name(pad.pv.name());
-    let state = pad.pv.state();
-    egui::Window::new(title)
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_BOTTOM, Vec2::new(0.0, -8.0))
-        .show(ctx, |ui| {
-            let size = Vec2::new(64.0, 48.0);
-            let font = egui::FontId::proportional(22.0);
-            ui.add(
-                egui::TextEdit::singleline(&mut pad.text)
-                    .font(font.clone())
-                    .desired_width(4.0 * size.x + 12.0),
-            );
-            // Enums get one button per state instead of digits.
-            if !state.labels.is_empty() {
-                for label in &state.labels {
-                    let b = egui::Button::new(egui::RichText::new(label).font(font.clone()));
-                    if ui
-                        .add_sized(Vec2::new(4.0 * size.x + 12.0, size.y), b)
-                        .clicked()
-                    {
-                        done = Some(Some(label.clone()));
-                    }
-                }
-            } else {
-                let rows = [
-                    ["7", "8", "9", "Del"],
-                    ["4", "5", "6", "-"],
-                    ["1", "2", "3", "e"],
-                    ["0", ".", "C", "OK"],
-                ];
-                for row in rows {
-                    ui.horizontal(|ui| {
-                        for key in row {
-                            let b = egui::Button::new(egui::RichText::new(key).font(font.clone()));
-                            if ui.add_sized(size, b).clicked() {
-                                match key {
-                                    "Del" => {
-                                        pad.text.pop();
-                                    }
-                                    "C" => pad.text.clear(),
-                                    "OK" => done = Some(Some(pad.text.clone())),
-                                    k => pad.text.push_str(k),
-                                }
-                            }
-                        }
-                    });
-                }
-            }
-            if ui.button("Cancel").clicked() {
-                done = Some(None);
-            }
-        });
-    match done {
-        Some(Some(value)) => {
-            pad.pv.write(value);
-            *keypad = None;
-        }
-        Some(None) => *keypad = None,
-        None => {}
     }
 }
 
@@ -1909,13 +2004,13 @@ fn corner(ui: &egui::Ui, w: &mut DisplayWindow, clock: &mut u64) {
                 if !w.toolbar {
                     let enabled = !w.view.back.is_empty();
                     let resp = corner_button(ui, false, enabled);
-                    corner_glyph(ui, &resp, "◀");
+                    corner_glyph(ui, &resp, Icon::Back);
                     if resp.on_hover_text("Back (Alt+←)").clicked() {
                         w.view.go_back();
                     }
                 }
                 let resp = corner_button(ui, w.pinned, true);
-                corner_glyph(ui, &resp, "📌");
+                corner_glyph(ui, &resp, Icon::Pin);
                 if resp.on_hover_text(PIN_HELP).clicked() {
                     w.pinned = !w.pinned;
                     // Unpinned, it is the viewer; pinned, new windows go
@@ -1970,20 +2065,14 @@ fn corner_button(ui: &mut egui::Ui, selected: bool, enabled: bool) -> egui::Resp
     resp
 }
 
-/// A `corner` button's symbol, faded when the button is disabled.
-fn corner_glyph(ui: &egui::Ui, resp: &egui::Response, glyph: &str) {
+/// A `corner` button's icon, faded when the button is disabled.
+fn corner_glyph(ui: &egui::Ui, resp: &egui::Response, icon: Icon) {
     let color = if resp.sense.senses_click() {
         ui.style().interact(resp).fg_stroke.color
     } else {
         ui.visuals().weak_text_color()
     };
-    ui.painter().text(
-        resp.rect.center(),
-        egui::Align2::CENTER_CENTER,
-        glyph,
-        egui::FontId::proportional(11.0),
-        color,
-    );
+    icon.paint(ui.painter(), resp.rect, 12.0, color);
 }
 
 /// A display window's toolbar: navigation, reload and zoom. The window and
@@ -2420,11 +2509,100 @@ mod tests {
     }
 
     #[test]
-    fn keypad_title_is_the_plain_name() {
+    fn plain_names_drop_the_ca_prefix_and_type() {
         let t = |n: &str| plain_name(&PvName::parse(n));
         assert_eq!(t("loc://t1<VDouble>(1.5)"), "loc://t1");
         assert_eq!(t("ca://BL01T:X"), "BL01T:X");
         assert_eq!(t("BL01T:X"), "BL01T:X");
         assert_eq!(t("pva://BL01T:Y"), "pva://BL01T:Y");
+    }
+
+    /// Draw `frames` frames of `app` in a window of `size` points, as a
+    /// window manager would: the window takes the sizes the app asks for.
+    fn run(
+        ctx: &eframe::egui::Context,
+        app: &mut super::BobApp,
+        size: &mut eframe::egui::Vec2,
+        frames: usize,
+    ) {
+        use eframe::egui::{self, Pos2, Rect, Vec2};
+        let monitor = Vec2::new(1920.0, 1080.0);
+        for _ in 0..frames {
+            let zoom = ctx.zoom_factor();
+            let screen = Rect::from_min_size(Pos2::ZERO, *size / zoom);
+            let mut input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            let info = input.viewports.entry(egui::ViewportId::ROOT).or_default();
+            info.native_pixels_per_point = Some(1.0);
+            info.inner_rect = Some(screen);
+            info.outer_rect = Some(screen);
+            info.monitor_size = Some(monitor / zoom);
+            let mut output = ctx.run_ui(input, |ui| app.draw(ui));
+            output.textures_delta.clear();
+            if let Some(vp) = output.viewport_output.get(&egui::ViewportId::ROOT) {
+                for cmd in &vp.commands {
+                    if let egui::ViewportCommand::InnerSize(s) = cmd {
+                        *size = (*s * zoom).round().min(monitor);
+                    }
+                }
+            }
+            // Displays load, and the navigator reads them, on threads.
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn a_saved_navigator_is_restored_with_its_room() {
+        use super::{BobApp, Location};
+        use crate::chrome::UiScale;
+        let display = Location {
+            source: bob::Source::File(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../tests/displays/index.bob"),
+            ),
+            macros: bob::Macros::default(),
+        };
+        // Open the display: the window takes its size.
+        let ctx = eframe::egui::Context::default();
+        let mut app = BobApp::new(&ctx, Some(display), None, UiScale::Fixed(1.0));
+        let mut size = crate::chrome::DEFAULT_WINDOW;
+        run(&ctx, &mut app, &mut size, 40);
+        let alone = size;
+        // Show the navigator: the window widens by it.
+        app.tree.open = true;
+        app.tree_toggled = true;
+        run(&ctx, &mut app, &mut size, 20);
+        let with_tree = size;
+        assert!(with_tree.x > alone.x + 100.0, "{alone:?} -> {with_tree:?}");
+        // Saved and restored: the same size, the navigator shown.
+        let layout = app.layout();
+        let ctx = eframe::egui::Context::default();
+        let mut app = BobApp::new(&ctx, None, None, UiScale::Fixed(1.0));
+        app.restore_layout(layout, Some("default".into()));
+        let mut size = crate::chrome::DEFAULT_WINDOW;
+        run(&ctx, &mut app, &mut size, 60);
+        assert!(app.tree.open);
+        assert_eq!(size, with_tree);
+    }
+
+    #[test]
+    fn a_restored_window_cut_to_its_first_monitor_is_sized_again() {
+        use super::BobApp;
+        use crate::layout::Geometry;
+        use eframe::egui::{Pos2, Vec2};
+        let ctx = eframe::egui::Context::default();
+        let mut app = BobApp::new(&ctx, None, None, crate::chrome::UiScale::Fixed(1.0));
+        // The layout's place reached, but the width cut to a 1200 wide
+        // monitor the window started on.
+        app.restoring = Some(Geometry {
+            position: Some(Pos2::ZERO),
+            size: Some(Vec2::new(1471.0, 900.0)),
+        });
+        let mut size = Vec2::new(1200.0, 900.0);
+        run(&ctx, &mut app, &mut size, 3);
+        assert_eq!(size, Vec2::new(1471.0, 900.0));
+        assert!(app.restoring.is_none());
     }
 }
