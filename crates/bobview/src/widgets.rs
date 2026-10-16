@@ -1248,16 +1248,8 @@ pub(crate) fn run_action(node: &Node, action: &Action, cx: &mut Cx) {
             });
         }
         Action::WritePv { pv_name, value, .. } => {
-            let name = node.expand(pv_name);
+            let pv = action_pv(node, cx.pvs, &node.expand(pv_name));
             let value = node.expand(value);
-            let pv = match node
-                .action_pvs
-                .iter()
-                .find(|p| p.name().to_string() == pv::PvName::parse(&name).to_string())
-            {
-                Some(pv) => pv.clone(),
-                None => cx.pvs.subscribe(&name),
-            };
             if write_needs_confirmation(node.base.as_ref()) && !cx.pvs.read_only() {
                 cx.requests.push(Request::ConfirmWrite { pv, value });
             } else {
@@ -1569,11 +1561,16 @@ fn combo(
     id: Id,
 ) -> Response {
     let w = node.w.clone();
-    let (items, _) = choices(&w, s);
+    let (items, current) = choices(&w, s);
+    let mux = w.menu_mux();
     // Like Phoebus, show the PV's value whatever the items are; the items
-    // only fill the dropdown.
+    // only fill the dropdown. A menu mux shows the item the value is for.
     let text = match s {
-        Some(s) if s.connected => s.format(None, false),
+        Some(s) if s.connected => mux
+            .as_ref()
+            .and_then(|m| m.current(current, &s.format(None, false)))
+            .and_then(|i| items.get(i).cloned())
+            .unwrap_or_else(|| s.format(None, false)),
         _ => format!("<{}>", node.pv_name),
     };
     let resp = ui.interact(rect.intersect(cx.clip), id, Sense::click());
@@ -1618,16 +1615,44 @@ fn combo(
     let row_h = if cx.touch { TOUCH_TARGET } else { 0.0 };
     egui::Popup::menu(&resp).width(rect.width()).show(|ui| {
         ui.set_min_width(rect.width() - ui.spacing().menu_margin.sum().x);
-        for item in &items {
+        for (i, item) in items.iter().enumerate() {
             let label = egui::RichText::new(item).font(item_font.clone());
             let button = egui::Button::selectable(*item == text, label)
                 .min_size(Vec2::new(ui.available_width(), row_h));
             if ui.add(button).clicked() {
-                write(node, item.clone());
+                match &mux {
+                    Some(mux) => mux_pick(node, cx.pvs, mux, i),
+                    None => write(node, item.clone()),
+                }
             }
         }
     });
     resp
+}
+
+/// Pick item `i` of a menu mux: write its value to each target, and its
+/// index to the mux's own PV.
+fn mux_pick(node: &Node, pvs: &pv::PvManager, mux: &bob::MenuMux, i: usize) {
+    for (target, value) in mux.writes(i) {
+        action_pv(node, pvs, &node.expand(target)).write(node.expand(value));
+    }
+    if mux.index {
+        write(node, i.to_string());
+    }
+}
+
+/// The PV `name` that an action of `node` writes: the one connected in
+/// advance, or else a new one.
+fn action_pv(node: &Node, pvs: &pv::PvManager, name: &str) -> pv::Pv {
+    let parsed = pv::PvName::parse(name).to_string();
+    match node
+        .action_pvs
+        .iter()
+        .find(|p| p.name().to_string() == parsed)
+    {
+        Some(pv) => pv.clone(),
+        None => pvs.subscribe(name),
+    }
 }
 
 /// The font for a combo's dropdown rows: the widget's, unless that is

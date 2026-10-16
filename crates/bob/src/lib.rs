@@ -9,6 +9,7 @@
 mod element;
 mod group_link;
 mod macros;
+mod menu_mux;
 mod model;
 mod opi;
 pub mod project;
@@ -20,6 +21,7 @@ use std::path::{Path, PathBuf};
 pub use element::Element;
 pub use group_link::{GroupLink, LinkSets, group_device, group_frame};
 pub use macros::{Macros, expand};
+pub use menu_mux::{MenuMux, MuxSet};
 pub use model::{Action, Color, Font, FontStyle, Rule, RuleExpr, named_color};
 pub use source::Source;
 pub use trend::{databrowser_pvs, strip_tool_pvs};

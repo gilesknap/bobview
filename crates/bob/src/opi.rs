@@ -810,11 +810,16 @@ fn items(el: &mut Element) {
 }
 
 /// An EDM menu mux, a drop-down that sets local PVs that stand in for
-/// macros: a combo on the first target. It writes the item's label, not the
-/// mux's value for it.
+/// macros: a combo on its own PV or, without one, its first target, with
+/// the sets kept in a `<menu_mux>` (see [`crate::menu_mux`]).
 fn menu_mux(el: &mut Element) {
+    let mux = crate::menu_mux::from_opi(el);
     if text(el, "pv_name").is_none_or(str::is_empty)
-        && let Some(target) = text(el, "target0").map(str::to_string)
+        && let Some(target) = mux
+            .children
+            .iter()
+            .find_map(|s| s.child_text("target"))
+            .map(str::to_string)
     {
         set(el, "pv_name", target);
     }
@@ -824,6 +829,7 @@ fn menu_mux(el: &mut Element) {
         !(c.name.starts_with("target") || c.name.starts_with("values"))
             && !["initial", "num_sets"].contains(&c.name.as_str())
     });
+    el.children.push(mux);
 }
 
 /// A DLS detail panel's rows: each child is a row's (already placed)
@@ -2157,6 +2163,52 @@ ScriptUtil.executeEclipseCommand(command_id, ['pvnames', '$(dom)-VA-GAUGE-01:PLO
         assert_eq!(w.list("items", "item"), ["NORMAL", "BL"]);
         assert_eq!(w.bool("items_from_pv"), Some(false));
         assert!(w.get("values0").is_none());
+        // The sets are kept: picking an item writes its value to each target.
+        let mux = w.menu_mux().unwrap();
+        assert!(!mux.index);
+        assert_eq!(mux.writes(1), [("loc://$(DID)CON<VString>", "BLCON")]);
+        assert_eq!(mux.current(None, "BLCON"), Some(1));
+    }
+
+    #[test]
+    fn menu_muxes_write_every_target_and_their_initial_item() {
+        let w = one(
+            "edm.menumux",
+            r#"<pv_name></pv_name><initial>1</initial><num_sets>2</num_sets>
+            <items><s>Rate 1s</s><s>Log Rate 1s</s></items>
+            <target0>loc://$(DID)ll&lt;VString&gt;</target0><target1>loc://$(DID)lld&lt;VString&gt;</target1>
+            <target2></target2>
+            <values0><s>RATE</s><s>LOG</s></values0><values1><s>LOG</s><s>LOG</s></values1><values2 />"#,
+        );
+        let mux = w.menu_mux().unwrap();
+        assert_eq!(mux.initial, Some(1));
+        assert_eq!(
+            mux.writes(0),
+            [
+                ("loc://$(DID)ll<VString>", "RATE"),
+                ("loc://$(DID)lld<VString>", "LOG")
+            ]
+        );
+        assert_eq!(mux.current(None, "LOG"), Some(1));
+        assert_eq!(mux.current(None, "DID"), None);
+    }
+
+    #[test]
+    fn menu_muxes_with_their_own_pv_write_the_index() {
+        let w = one(
+            "edm.menumux",
+            r#"<initial></initial><num_sets>1</num_sets>
+            <items><s>Hide Required BPMs</s><s>Show Required BPMs</s></items>
+            <pv_name>loc://show-required&lt;VEnum&gt;(0, "hide", "show")</pv_name>
+            <target0></target0><values0><s>0</s><s>1</s></values0>"#,
+        );
+        assert_eq!(
+            w.text("pv_name"),
+            Some(r#"loc://show-required<VEnum>(0, "hide", "show")"#)
+        );
+        let mux = w.menu_mux().unwrap();
+        assert!(mux.index && mux.sets.is_empty() && mux.initial.is_none());
+        assert_eq!(mux.current(Some(1), "show"), Some(1));
     }
 
     #[test]

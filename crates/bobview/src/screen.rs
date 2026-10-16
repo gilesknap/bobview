@@ -549,7 +549,7 @@ impl Builder<'_> {
             .collect();
 
         let link = crate::group_link::Link::new(w, &|t| expand_for(w, &macros, t), self.pvs);
-        let action_pvs = w
+        let mut action_pvs: Vec<Pv> = w
             .actions()
             .iter()
             .filter_map(|a| match a {
@@ -559,6 +559,21 @@ impl Builder<'_> {
                 _ => None,
             })
             .collect();
+        // A menu mux's targets, which a pick writes, and the values of its
+        // initial item, which BOY writes as the display opens.
+        if let Some(mux) = w.menu_mux() {
+            let initial = mux.initial.map(|i| mux.writes(i)).unwrap_or_default();
+            for set in &mux.sets {
+                let target = self.pvs.subscribe(&expand_for(w, &macros, &set.target));
+                if let Some((_, value)) = initial.iter().find(|(t, _)| *t == set.target) {
+                    target.write(expand_for(w, &macros, value));
+                }
+                action_pvs.push(target);
+            }
+            if let (true, Some(i), Some(pv)) = (mux.index, mux.initial, &pv) {
+                pv.write(i.to_string());
+            }
+        }
 
         let mut node = Node {
             w: w.clone(),
