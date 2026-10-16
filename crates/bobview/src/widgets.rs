@@ -34,6 +34,11 @@ pub enum Request {
     },
     /// Close the display: go back to the one before, or close the window.
     Close,
+    /// Bring every window to the front, the one asking last.
+    RaiseAll,
+    /// Close every display and trend window but the main one and the one
+    /// asking.
+    CloseOthers,
     /// Run a command action of the display at `base` (see
     /// [`crate::launch::command_target`]) and open the display it names.
     Command {
