@@ -116,6 +116,11 @@ pub(crate) fn write_queue() -> (mpsc::Sender<Put>, mpsc::Receiver<Put>) {
     mpsc::channel(WRITE_QUEUE)
 }
 
+thread_local! {
+    /// The PVs whose listeners this thread is calling, under their locks.
+    static UPDATING: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// State shared between a [`Pv`] handle and the task serving it.
 pub(crate) struct Shared {
     ctl: Arc<Control>,
@@ -126,6 +131,9 @@ pub(crate) struct Shared {
     writer: Mutex<Option<Writer>>,
     notify: Arc<RwLock<Option<Notifier>>>,
     listeners: Mutex<Vec<Weak<ListenFn>>>,
+    /// Listeners added by a listener of an update in progress, which joins
+    /// them as it finishes.
+    joining: Mutex<Vec<Weak<ListenFn>>>,
     /// Set (under the state lock) once the PV has first connected.
     was_connected: AtomicBool,
 }
@@ -140,6 +148,7 @@ impl Shared {
             writer: Mutex::new(None),
             notify,
             listeners: Mutex::new(Vec::new()),
+            joining: Mutex::new(Vec::new()),
             was_connected: AtomicBool::new(false),
         })
     }
@@ -157,8 +166,7 @@ impl Shared {
             // A listener that panics is dropped, so it cannot stop the PV's
             // task (or the UI thread writing a local PV) for good. Release
             // builds abort on any panic instead (`panic = "abort"`).
-            let mut listeners = self.listeners.lock();
-            listeners.retain(|l| match l.upgrade() {
+            let call = |l: &Weak<ListenFn>| match l.upgrade() {
                 Some(l) => {
                     let call = std::panic::AssertUnwindSafe(|| l(&state));
                     let ok = std::panic::catch_unwind(call).is_ok();
@@ -168,7 +176,20 @@ impl Shared {
                     ok
                 }
                 None => false,
-            });
+            };
+            let me = self as *const Self as usize;
+            UPDATING.with(|u| u.borrow_mut().push(me));
+            let mut listeners = self.listeners.lock();
+            listeners.retain(call);
+            // Listeners those listeners added: called now, in turn.
+            loop {
+                let joining = std::mem::take(&mut *self.joining.lock());
+                if joining.is_empty() {
+                    break;
+                }
+                listeners.extend(joining.into_iter().filter(call));
+            }
+            UPDATING.with(|u| u.borrow_mut().pop());
         }
         if let Some(n) = self.notify.read().as_ref() {
             n();
@@ -304,6 +325,13 @@ impl Pv {
     /// frame, this sees every monitor update.
     pub fn listen(&self, listener: &Listener) {
         let shared = &self.0.shared;
+        // From a listener of this PV's update, whose lock this thread holds:
+        // the update calls it as it finishes.
+        let me = Arc::as_ptr(shared) as usize;
+        if UPDATING.with(|u| u.borrow().contains(&me)) {
+            shared.joining.lock().push(Arc::downgrade(listener));
+            return;
+        }
         let state = shared.state.lock();
         listener(&state);
         let mut listeners = shared.listeners.lock();
