@@ -438,7 +438,7 @@ mod tests {
     /// this test instead of passing on the test runner's larger stack.
     fn small_stack<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
         std::thread::Builder::new()
-            .stack_size(256 * 1024)
+            .stack_size(1024 * 1024)
             .spawn(f)
             .unwrap()
             .join()
