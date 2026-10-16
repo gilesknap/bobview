@@ -37,6 +37,14 @@ pub fn set_pvws(url: &str) {
     *URL.lock().unwrap() = Some(url);
 }
 
+/// The token a server started with `--write` wants in every write.
+static TOKEN: Mutex<Option<String>> = Mutex::new(None);
+
+/// Send `token` with every write, for a server that needs one (`--write`).
+pub fn set_write_token(token: &str) {
+    *TOKEN.lock().unwrap() = Some(token.to_string());
+}
+
 fn url() -> String {
     if let Some(url) = URL.lock().unwrap().clone() {
         return url;
@@ -100,7 +108,10 @@ pub(crate) fn write(name: &str, state: &PvState, text: String) {
         Ok(x) if numeric && x.is_finite() => json!(x),
         _ => json!(text),
     };
-    let msg = json!({"type": "write", "pv": name, "value": value});
+    let mut msg = json!({"type": "write", "pv": name, "value": value});
+    if let Some(token) = TOKEN.lock().unwrap().as_ref() {
+        msg["token"] = json!(token);
+    }
     SOCKET.with_borrow_mut(|s| {
         if !s.send(&msg) {
             log::warn!("{name}: not connected, cannot write '{text}'");
@@ -299,6 +310,7 @@ fn apply(s: &mut PvState, vtype: &str, msg: &Map<String, Json>) {
     }
     if let Some(readonly) = msg.get("readonly").and_then(Json::as_bool) {
         s.writable = !readonly;
+        s.writable_known = true;
     }
     if let Some(units) = msg.get("units").and_then(Json::as_str) {
         s.units = units.to_string();

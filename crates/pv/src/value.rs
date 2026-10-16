@@ -148,7 +148,15 @@ pub struct PvState {
     /// Alarm (LOLO, HIHI) and warning (LOW, HIGH) limits.
     pub alarm_range: Option<(f64, f64)>,
     pub warning_range: Option<(f64, f64)>,
+    /// Whether a write is expected to be accepted. Only meaningful as a
+    /// fact when `writable_known`; otherwise it is an optimistic guess.
     pub writable: bool,
+    /// Whether the server told us `writable`. PV Access has no per-channel
+    /// access rights, so for it this stays false: writes are allowed but may
+    /// be refused by the server, and `write_error` then says so.
+    pub writable_known: bool,
+    /// Why the last write failed, until one succeeds.
+    pub write_error: Option<String>,
     /// Why the PV cannot connect, if the backend knows.
     pub error: Option<String>,
 }

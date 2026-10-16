@@ -38,7 +38,7 @@ pub(crate) async fn run(client: &CaClient, pv: &str, shared: Arc<Shared>) {
                     shared.update(|s| s.connected = false);
                 }
                 Ok(ConnectionEvent::AccessRightsChanged { write, .. }) => {
-                    shared.update(|s| s.writable = write);
+                    shared.update(|s| { s.writable = write; s.writable_known = true; });
                 }
                 Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(broadcast::error::RecvError::Closed) => return,
@@ -71,9 +71,7 @@ pub(crate) async fn run(client: &CaClient, pv: &str, shared: Arc<Shared>) {
                 } else {
                     channel.put_string_nowait(&text).await
                 };
-                if let Err(e) = result {
-                    log::warn!("{pv}: write '{text}' failed: {e}");
-                }
+                shared.write_result(&text, result.err().map(|e| e.to_string()));
             }
         }
     }
