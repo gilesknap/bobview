@@ -1750,7 +1750,7 @@ impl BobApp {
         // A dialog goes with its window.
         let closed = |w: WindowKey| match w {
             WindowKey::Main => false,
-            WindowKey::Child(id) => !self.windows.iter().any(|dw| dw.id == id),
+            WindowKey::Child(id) => !self.windows.iter().any(|dw| dw.id == id && !dw.close),
         };
         if self.details.as_ref().is_some_and(|(w, _)| closed(*w)) {
             self.details = None;
