@@ -164,8 +164,24 @@ impl WindowLayout {
     /// The display and macros to show.
     pub fn location(&self) -> Location {
         let mut source = Source::parse(&self.display);
+        let mut project = self.project.clone();
+        // A DLS launcher's project is named after the module's version, so
+        // after the version changes take the launcher's project as it is now.
+        if let Some(dir) = &project
+            && bob::project::links(dir).is_none()
+            && let Some(script) = dir.parent()
+            && bob::project::through_launcher(dir)
+            && let Some(now) = bob::project::project_dir(script)
+        {
+            if let Source::File(path) = &source
+                && let Ok(rest) = path.strip_prefix(dir)
+            {
+                source = Source::File(now.join(rest));
+            }
+            project = Some(now);
+        }
         // A real path saved with its project goes back through the project.
-        if let (Some(dir), Source::File(path)) = (&self.project, &source)
+        if let (Some(dir), Source::File(path)) = (&project, &source)
             && !path.starts_with(dir)
             && let Some(p) = bob::project::virtual_path(dir, path)
         {
@@ -229,14 +245,15 @@ fn on_screen(pos: Pos2, size: Option<Vec2>, monitors: &[Rect]) -> bool {
 }
 
 /// The project directory that `path` reaches its file through: the nearest
-/// directory above it holding a `.project`, when `path` itself doesn't exist.
+/// directory above it holding a `.project` (or the virtual project of a DLS
+/// launcher), when `path` itself doesn't exist.
 fn project_of(path: &Path) -> Option<PathBuf> {
     if path.exists() {
         return None;
     }
     path.ancestors()
         .skip(1)
-        .find(|d| d.join(".project").is_file())
+        .find(|d| bob::project::is_project(d))
         .map(Path::to_path_buf)
 }
 
@@ -595,6 +612,46 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "two");
         // No temporary file is left behind.
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn round_trips_a_display_through_a_launcher_project() {
+        let dir =
+            std::env::temp_dir().join(format!("bobview-layout-runcss-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("runcss.sh"),
+            "project=m_${version}\nmodule=m\nlinks=\"${SCRIPT_DIR}=${project}/${module}\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("x.opi"), "<display/>").unwrap();
+        let project = dir.join("runcss.sh/m_dev");
+        let virt = bob::project::launcher_path(&dir.join("x.opi")).unwrap();
+        assert_eq!(virt, project.join("m/x.opi"));
+        let loc = Location {
+            source: Source::File(virt.clone()),
+            macros: Macros::default(),
+        };
+        let saved = WindowLayout::new(&loc, Geometry::default());
+        assert_eq!(saved.project.as_ref(), Some(&project));
+        let text = serde_json::to_string(&saved).unwrap();
+        let back: WindowLayout = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.location().source, Source::File(virt.clone()));
+        // A real path saved with the launcher's project goes back through it.
+        let real = WindowLayout {
+            display: dir.join("x.opi").display().to_string(),
+            ..back
+        };
+        assert_eq!(real.location().source, Source::File(virt.clone()));
+        // One saved before the module's version changed.
+        let old = dir.join("runcss.sh/m_1-0");
+        let before = WindowLayout {
+            display: old.join("m/x.opi").display().to_string(),
+            project: Some(old),
+            ..real
+        };
+        assert_eq!(before.location().source, Source::File(virt));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
