@@ -1,0 +1,58 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docs:
+    # The mdBook in docs/, with rustdoc for the workspace under api/, built
+    # into a folder per version on the gh-pages branch (main and each v*
+    # tag), as in python-copier-template. switcher.json lists the versions
+    # for the menu in the docs' top bar; the root redirects to main/.
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: mdbook@0.4.40
+
+      - name: Sanitize ref name for docs version
+        run: echo "DOCS_VERSION=${GITHUB_REF_NAME//[^A-Za-z0-9._-]/_}" >> "$GITHUB_ENV"
+
+      - name: Build the book and the API docs
+        env:
+          MDBOOK_OUTPUT__HTML__SITE_URL: /${{ github.event.repository.name }}/${{ env.DOCS_VERSION }}/
+        run: |
+          mdbook build docs
+          cargo doc --workspace --no-deps
+
+      - name: Move to versioned directory
+        run: |
+          mv docs/book ".github/pages/${DOCS_VERSION}"
+          cp -r target/doc ".github/pages/${DOCS_VERSION}/api"
+
+      - name: Write switcher.json
+        if: github.event_name == 'push'
+        run: python3 .github/pages/make_switcher.py --add "${DOCS_VERSION}" "${{ github.repository }}" .github/pages/switcher.json
+
+      - name: Publish docs to gh-pages
+        if: github.event_name == 'push'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: .github/pages
+          keep_files: true

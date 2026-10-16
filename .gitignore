@@ -2,3 +2,5 @@
 *.tar.gz
 /.claude/
 /dist
+/docs/book
+__pycache__/
