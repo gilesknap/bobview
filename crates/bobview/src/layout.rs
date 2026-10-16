@@ -23,6 +23,8 @@ const VERSION: u32 = 1;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Layout {
     pub version: u32,
+    /// Multi-window mode, before windows were pinned: their pin when they
+    /// don't say. Written as the main window's pin, for older bobviews.
     #[serde(default)]
     pub multi_window: bool,
     pub windows: Vec<WindowLayout>,
@@ -73,6 +75,10 @@ pub struct WindowLayout {
     /// Whether a display window shows its toolbar.
     #[serde(default, skip_serializing_if = "is_false")]
     pub toolbar: bool,
+    /// Whether the window is pinned; None in a layout from before windows
+    /// were pinned (see `Layout::pinned`).
+    #[serde(default)]
+    pub pinned: Option<bool>,
 }
 
 /// A number, or the string "fit".
@@ -158,6 +164,7 @@ impl WindowLayout {
             size: geometry.size.map(|s| [s.x, s.y]),
             zoom: None,
             toolbar: false,
+            pinned: None,
         }
     }
 
@@ -258,13 +265,20 @@ fn project_of(path: &Path) -> Option<PathBuf> {
 }
 
 impl Layout {
-    pub fn new(multi_window: bool, windows: Vec<WindowLayout>, trends: Vec<TrendLayout>) -> Self {
+    pub fn new(windows: Vec<WindowLayout>, trends: Vec<TrendLayout>) -> Self {
+        let multi_window = windows.iter().any(|w| w.main && w.pinned == Some(true));
         Self {
             version: VERSION,
             multi_window,
             windows,
             trends,
         }
+    }
+
+    /// Whether `window` is pinned: as it says, else as multi-window mode
+    /// was, which opened every link in a window of its own.
+    pub fn pinned(&self, window: &WindowLayout) -> bool {
+        window.pinned.unwrap_or(self.multi_window)
     }
 }
 
@@ -442,6 +456,7 @@ mod tests {
             },
         );
         first.main = true;
+        first.pinned = Some(true);
         first.zoom = Some(Zoom::new(true, 1.0));
         let mut second = WindowLayout::new(
             &cell,
@@ -451,8 +466,8 @@ mod tests {
             },
         );
         second.toolbar = true;
+        second.pinned = Some(false);
         let layout = Layout::new(
-            true,
             vec![first, second],
             vec![TrendLayout::new(
                 vec![
@@ -470,6 +485,9 @@ mod tests {
         assert!(text.contains("\"position\": null"), "{text}");
         assert!(text.contains("\"zoom\": \"fit\""), "{text}");
         assert!(text.contains("\"span\": 3600.0"), "{text}");
+        // Older bobviews read the main window's pin as multi-window mode.
+        assert!(text.contains("\"multi_window\": true"), "{text}");
+        assert!(text.contains("\"pinned\": false"), "{text}");
         let back: Layout = serde_json::from_str(&text).unwrap();
         assert_eq!(back, layout);
 
@@ -497,6 +515,11 @@ mod tests {
         }"#;
         let layout: Layout = serde_json::from_str(text).unwrap();
         assert!(layout.multi_window && layout.windows[0].main && !layout.windows[1].main);
+        // From before windows were pinned: as multi-window mode was.
+        assert!(layout.windows.iter().all(|w| layout.pinned(w)));
+        let single: Layout = serde_json::from_str(&text.replace("true,\n", "false,\n")).unwrap();
+        assert!(!single.multi_window);
+        assert!(!single.windows.iter().any(|w| single.pinned(w)));
         assert_eq!(layout.windows[1].position, Some([1050.0, 0.0]));
         // A layout from before trends were saved has none.
         assert!(layout.trends.is_empty());
@@ -545,6 +568,7 @@ mod tests {
             size: Some([800.0, 600.0]),
             zoom: None,
             toolbar: false,
+            pinned: None,
         };
         let laptop = [Rect::from_min_size(Pos2::ZERO, Vec2::new(1920.0, 1080.0))];
         let docked = [
@@ -585,7 +609,7 @@ mod tests {
 
     #[test]
     fn only_a_named_layout_must_load() {
-        let layout = Layout::new(false, Vec::new(), Vec::new());
+        let layout = Layout::new(Vec::new(), Vec::new());
         let good = |_: &str| Ok(layout.clone());
         let bad = |_: &str| Err::<Layout, _>("newer".to_string());
         // --layout: loaded, or an error.

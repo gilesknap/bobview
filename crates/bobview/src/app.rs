@@ -12,7 +12,7 @@ use crate::layout::{self, Geometry, Layout, TrendLayout, WindowLayout, Zoom};
 use crate::pvmenu;
 use crate::style;
 use crate::trend::Trend;
-use crate::view::{LaunchKey, Origin, View, ViewCx, WindowKey};
+use crate::view::{LaunchKey, Origin, View, ViewCx, WindowKey, window_title};
 use crate::widgets::{self, Request};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -42,15 +42,32 @@ pub struct BobApp {
     /// next one's id is made from.
     windows: Vec<DisplayWindow>,
     next_window: u64,
-    /// Links open their displays in windows of their own.
-    multi_window: bool,
+    /// Pin mode: a link in a pinned window opens its display in the viewer
+    /// (the unpinned window used last) or a new window; one in an unpinned
+    /// window navigates in place.
+    main_pinned: bool,
+    main_used: Used,
+    /// When the main window was pinned, by `clock` (0: from the start).
+    main_pinned_at: u64,
+    /// Counts the windows' uses, to find the one used last.
+    clock: u64,
+    /// Displays can have native windows of their own (see `can_multi_window`).
+    can_windows: bool,
     /// The layout last loaded or saved, which Save saves to.
     layout_name: Option<String>,
     /// A layout to load once the controls' scale has settled (and the
     /// monitors are known).
     pending_layout: Option<(Layout, Option<String>)>,
-    /// The monitors, in desktop points, when the window system says.
+    /// The monitors, in desktop points, when the window system says, and
+    /// when they were last asked for (seconds since start).
     monitors: Vec<Rect>,
+    #[cfg_attr(
+        target_arch = "wasm32",
+        expect(dead_code, reason = "a browser has one window")
+    )]
+    monitors_at: Option<f64>,
+    /// Where the main window is on the desktop, to open windows beside it.
+    main_frame: Option<Frame>,
     settings: layout::Settings,
     /// The Save as… dialog, when open.
     save_as: Option<SaveAs>,
@@ -123,7 +140,7 @@ impl LayoutList {
     }
 }
 
-/// A display in a native window of its own, opened in multi-window mode or
+/// A display in a native window of its own, opened by a link or
 /// from a layout.
 struct DisplayWindow {
     /// Stable for the window's life: made from a counter, never reused.
@@ -138,7 +155,128 @@ struct DisplayWindow {
     toolbar: bool,
     /// Where the window is, for saving a layout.
     geometry: Geometry,
+    /// Where it is on the desktop, to open windows beside it.
+    frame: Option<Frame>,
+    /// The window it was opened from, to be placed beside again once it
+    /// has been sized to its display.
+    beside: Option<Frame>,
+    pinned: bool,
+    /// When it was pinned, by the application's clock.
+    pinned_at: u64,
+    used: Used,
     close: bool,
+}
+
+/// Where a window is on the desktop, in desktop points: its outer rectangle,
+/// and how much bigger that is than its inside (the title bar and borders).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Frame {
+    outer: Rect,
+    border: Vec2,
+}
+
+/// Where a window `size` inside (in desktop points) goes beside the window
+/// at `origin`, clear of it and of the `pinned` windows (the one pinned last
+/// first). The places tried are beside the window pinned last, so a row of
+/// small windows grows beside a big one, then beside `origin`, then beside
+/// each other pinned window: to its right (top edges level), below it (left
+/// edges level), to its left and above it, each slid along that side to
+/// stay on the monitor that window is most on.
+/// The first that fits on its monitor clear of them all wins; else the one
+/// that covers them least, or over `origin` on the side with more room.
+fn beside(origin: Frame, pinned: &[Rect], size: Vec2, monitors: &[Rect]) -> Option<Pos2> {
+    let monitor = |r: &Rect| {
+        monitors
+            .iter()
+            .max_by(|a, b| overlap(a, r).total_cmp(&overlap(b, r)))
+            .copied()
+    };
+    let o = origin.outer;
+    let m = monitor(&o)?;
+    let outer = size + origin.border;
+    let clear: Vec<Rect> = std::iter::once(o).chain(pinned.iter().copied()).collect();
+    let anchors = pinned.first().into_iter().chain(&clear);
+    let mut places = Vec::new();
+    for a in anchors {
+        let Some(m) = monitor(a) else { continue };
+        let x = a.min.x.min(m.max.x - outer.x).max(m.min.x);
+        let y = a.min.y.min(m.max.y - outer.y).max(m.min.y);
+        let sides = [
+            Pos2::new(a.max.x, y),
+            Pos2::new(x, a.max.y),
+            Pos2::new(a.min.x - outer.x, y),
+            Pos2::new(x, a.min.y - outer.y),
+        ];
+        places.extend(
+            sides
+                .into_iter()
+                .filter(|p| m.contains_rect(Rect::from_min_size(*p, outer))),
+        );
+    }
+    let covered = |p: &Pos2| {
+        let r = Rect::from_min_size(*p, outer);
+        clear.iter().map(|c| overlap(c, &r)).sum::<f32>()
+    };
+    if let Some(p) = places.iter().find(|p| covered(p) == 0.0) {
+        return Some(*p);
+    }
+    let over = if m.max.x - o.max.x >= o.min.x - m.min.x {
+        m.max.x - outer.x
+    } else {
+        m.min.x
+    };
+    let y = o.min.y.min(m.max.y - outer.y).max(m.min.y);
+    places.push(Pos2::new(over.max(m.min.x), y));
+    // The first of those that cover them least.
+    places
+        .into_iter()
+        .min_by(|a, b| covered(a).total_cmp(&covered(b)))
+}
+
+/// The monitors and the pinned windows, for placing a display window.
+struct Desk {
+    monitors: Vec<Rect>,
+    pinned: Vec<(WindowKey, Rect)>,
+}
+
+impl Desk {
+    /// The pinned windows other than `id`.
+    fn clear_of(&self, id: egui::ViewportId) -> Vec<Rect> {
+        self.pinned
+            .iter()
+            .filter(|(key, _)| *key != WindowKey::Child(id))
+            .map(|(_, r)| *r)
+            .collect()
+    }
+}
+
+/// The area two rectangles share.
+fn overlap(a: &Rect, b: &Rect) -> f32 {
+    let i = a.intersect(*b);
+    if i.is_positive() { i.area() } else { 0.0 }
+}
+
+/// When a window was last used (focused, opened or unpinned), by the
+/// application's clock, for the viewer to be the unpinned window used last.
+#[derive(Clone, Copy, Debug, Default)]
+struct Used {
+    focused: bool,
+    at: u64,
+}
+
+impl Used {
+    /// Whether the window has the focus: used when it gains it.
+    fn focus(&mut self, focused: bool, clock: &mut u64) {
+        if focused && !self.focused {
+            self.touch(clock);
+        }
+        self.focused = focused;
+    }
+
+    fn touch(&mut self, clock: &mut u64) {
+        *clock += 1;
+        self.at = *clock;
+    }
 }
 
 /// The Save as… dialog: the name typed, and whether replacing the layout
@@ -156,18 +294,35 @@ enum Route {
     InPlace,
     /// Raise the window already showing it.
     Raise(WindowKey),
+    /// In the viewer, which keeps its history, raised.
+    Viewer(WindowKey),
     /// A new window.
     NewWindow,
 }
 
-/// Where a link goes: in multi-window mode to a window of its own (raising
-/// one already `showing` the same display and macros), unless ctrl was held;
-/// otherwise in place, whatever its target, since most links are `replace`.
-fn route(multi_window: bool, ctrl: bool, showing: Option<WindowKey>) -> Route {
-    match showing {
-        _ if !multi_window || ctrl => Route::InPlace,
-        Some(window) => Route::Raise(window),
-        None => Route::NewWindow,
+/// Where a link from `origin` goes, whatever its target, since most links
+/// are `replace`. Ctrl+click navigates in place, as every link does where
+/// displays have no `windows` of their own. Otherwise a display already
+/// open with the same macros is raised (`showing`); shift+click opens a new
+/// window; a link in an unpinned window navigates in place, and one in a
+/// `pinned` window opens in the `viewer`, or a new window when every window
+/// is pinned.
+fn route(
+    windows: bool,
+    origin: Origin,
+    pinned: bool,
+    showing: Option<WindowKey>,
+    viewer: Option<WindowKey>,
+) -> Route {
+    if !windows || origin.ctrl {
+        return Route::InPlace;
+    }
+    match (showing, viewer) {
+        (Some(window), _) => Route::Raise(window),
+        _ if origin.shift => Route::NewWindow,
+        _ if !pinned => Route::InPlace,
+        (None, Some(window)) => Route::Viewer(window),
+        (None, None) => Route::NewWindow,
     }
 }
 
@@ -201,10 +356,16 @@ impl BobApp {
             geometry: Geometry::default(),
             windows: Vec::new(),
             next_window: 0,
-            multi_window: false,
+            main_pinned: true,
+            main_used: Used::default(),
+            main_pinned_at: 0,
+            clock: 0,
+            can_windows: !cfg!(target_arch = "wasm32"),
             layout_name: None,
             pending_layout: None,
             monitors: Vec::new(),
+            monitors_at: None,
+            main_frame: None,
             settings: layout::Settings::load(),
             save_as: None,
             home: start.clone(),
@@ -238,14 +399,6 @@ impl BobApp {
         self.keypad_mode = on;
     }
 
-    #[cfg_attr(
-        target_arch = "wasm32",
-        expect(dead_code, reason = "a browser has one window")
-    )]
-    pub fn set_multi_window(&mut self, on: bool) {
-        self.multi_window = on;
-    }
-
     /// Restore `layout` (saved as `name`) once the window is up.
     #[cfg_attr(
         target_arch = "wasm32",
@@ -270,6 +423,66 @@ impl BobApp {
         }
     }
 
+    /// Where `window` is on the desktop, when the window system says.
+    fn frame(&self, window: WindowKey) -> Option<Frame> {
+        match window {
+            WindowKey::Main => self.main_frame,
+            WindowKey::Child(id) => self.windows.iter().find(|w| w.id == id)?.frame,
+        }
+    }
+
+    /// Where the pinned windows are on the desktop, those the window system
+    /// says, the one pinned last first.
+    fn pinned_frames(&self) -> Vec<(WindowKey, Rect)> {
+        let main = self
+            .main_frame
+            .filter(|_| self.main_pinned)
+            .map(|f| (WindowKey::Main, f.outer, self.main_pinned_at));
+        let children = self
+            .windows
+            .iter()
+            .filter(|w| w.pinned && !w.close)
+            .filter_map(|w| Some((WindowKey::Child(w.id), w.frame?.outer, w.pinned_at)));
+        let mut pinned: Vec<_> = main.into_iter().chain(children).collect();
+        pinned.sort_by_key(|(_, _, at)| std::cmp::Reverse(*at));
+        pinned.into_iter().map(|(key, r, _)| (key, r)).collect()
+    }
+
+    /// The monitors, in desktop points: those the window system lists, else
+    /// the main window's.
+    fn monitors(&self, ctx: &egui::Context) -> Vec<Rect> {
+        if !self.monitors.is_empty() {
+            return self.monitors.clone();
+        }
+        let zoom = ctx.zoom_factor();
+        ctx.input(|i| i.viewport().monitor_size)
+            .map(|m| vec![Rect::from_min_size(Pos2::ZERO, m * zoom)])
+            .unwrap_or_default()
+    }
+
+    /// Whether `window` is pinned.
+    fn pinned(&self, window: WindowKey) -> bool {
+        match window {
+            WindowKey::Main => self.main_pinned,
+            WindowKey::Child(id) => self.windows.iter().any(|w| w.id == id && w.pinned),
+        }
+    }
+
+    /// The viewer: the unpinned window used last, if any.
+    fn viewer(&self) -> Option<WindowKey> {
+        let main = (!self.main_pinned).then_some((WindowKey::Main, self.main_used.at));
+        let children = self
+            .windows
+            .iter()
+            .filter(|w| !w.close && !w.pinned)
+            .map(|w| (WindowKey::Child(w.id), w.used.at));
+        // Of those used at once, the newest.
+        main.into_iter()
+            .chain(children)
+            .max_by_key(|(_, at)| *at)
+            .map(|(window, _)| window)
+    }
+
     /// The window showing `loc` (the same display and macros), if any.
     fn showing(&self, loc: &Location) -> Option<WindowKey> {
         let same = |cur: Option<&Location>| cur.is_some_and(|c| c.same_display(loc));
@@ -282,10 +495,12 @@ impl BobApp {
             .map(|w| WindowKey::Child(w.id))
     }
 
-    /// Show `loc`, from a link in `origin`'s window: in place, or in a
-    /// window of its own in multi-window mode.
+    /// Show `loc`, from a link in `origin`'s window: in place, in the
+    /// viewer or in a window of its own (see `route`).
     fn follow(&mut self, ctx: &egui::Context, origin: Origin, loc: Location, target: &str) {
-        match route(self.multi_window, origin.ctrl, self.showing(&loc)) {
+        let pinned = self.pinned(origin.window);
+        let (showing, viewer) = (self.showing(&loc), self.viewer());
+        match route(self.can_windows, origin, pinned, showing, viewer) {
             Route::InPlace => {
                 log::info!("open {} ({target})", loc.source);
                 if let Some(view) = self.view_mut(origin.window) {
@@ -296,21 +511,42 @@ impl BobApp {
                 log::info!("raise {}", loc.source);
                 raise(ctx, window);
             }
+            Route::Viewer(window) => {
+                log::info!("open {} (viewer)", loc.source);
+                if let Some(view) = self.view_mut(window) {
+                    view.open(loc);
+                }
+                // Sized to its new display and placed beside the link's
+                // window again, as a new window is (not the main window).
+                let frame = self.frame(origin.window).filter(|_| !on_wayland());
+                if let Some(w) = self
+                    .windows
+                    .iter_mut()
+                    .find(|w| WindowKey::Child(w.id) == window)
+                {
+                    w.fit_next = true;
+                    w.beside = frame;
+                }
+                raise(ctx, window);
+            }
             Route::NewWindow => {
                 log::info!("open {} (new window)", loc.source);
-                self.open_window(ctx, loc, Geometry::default(), false);
+                let window = self.open_window(ctx, loc, Geometry::default(), false, false);
+                self.place_beside(ctx, window, origin.window);
             }
         }
     }
 
     /// Open `loc` in a new display window, at `geometry` when known, else
-    /// sized to the display at 100% (within the monitor).
+    /// sized to the display at 100% (within the monitor). Unpinned, it is
+    /// the viewer, as the window used last.
     fn open_window(
         &mut self,
         ctx: &egui::Context,
         loc: Location,
         geometry: Geometry,
         toolbar: bool,
+        pinned: bool,
     ) -> WindowKey {
         let id = egui::ViewportId::from_hash_of(("display", self.next_window));
         self.next_window += 1;
@@ -330,6 +566,10 @@ impl BobApp {
         if let Some(pos) = geometry.position {
             builder = builder.with_position(Pos2::ZERO + pos.to_vec2() / zoom);
         }
+        let mut used = Used::default();
+        used.touch(&mut self.clock);
+        // From a layout, pinned in the order it lists them.
+        let pinned_at = if pinned { used.at } else { 0 };
         self.windows.push(DisplayWindow {
             id,
             view,
@@ -337,9 +577,50 @@ impl BobApp {
             fit_next: geometry.size.is_none(),
             toolbar,
             geometry,
+            frame: None,
+            beside: None,
+            pinned,
+            pinned_at,
+            used,
             close: false,
         });
         WindowKey::Child(id)
+    }
+
+    /// Place the new display `window` beside the `origin` window it was
+    /// opened from, and again once it has been sized to its display. Not on
+    /// Wayland, where the compositor places windows.
+    fn place_beside(&mut self, ctx: &egui::Context, window: WindowKey, origin: WindowKey) {
+        let Some(frame) = self.frame(origin).filter(|_| !on_wayland()) else {
+            return;
+        };
+        let monitors = self.monitors(ctx);
+        let pinned: Vec<Rect> = self
+            .pinned_frames()
+            .into_iter()
+            .filter(|(key, _)| *key != window)
+            .map(|(_, r)| r)
+            .collect();
+        let zoom = ctx.zoom_factor();
+        let Some(w) = self
+            .windows
+            .iter_mut()
+            .find(|w| WindowKey::Child(w.id) == window)
+        else {
+            return;
+        };
+        let size = w
+            .builder
+            .inner_size
+            .unwrap_or(chrome::DEFAULT_WINDOW / zoom)
+            * zoom;
+        if let Some(pos) = beside(frame, &pinned, size, &monitors) {
+            w.builder = w
+                .builder
+                .clone()
+                .with_position(Pos2::ZERO + pos.to_vec2() / zoom);
+        }
+        w.beside = Some(frame);
     }
 
     /// Whether a display, or one named by a command action, is still being
@@ -435,7 +716,8 @@ impl BobApp {
         // window (a phone) keeps the navigation and Fit, and moves the rest
         // into a menu.
         let compact = ui.available_width() < chrome::FULL_TOOLBAR_WIDTH;
-        let windows = can_multi_window(ui.ctx(), self.keypad_mode);
+        let windows = self.can_windows;
+        let was_pinned = self.main_pinned;
         let mut action = None;
         let view = &mut self.main;
         ui.horizontal(|ui| {
@@ -494,7 +776,7 @@ impl BobApp {
                         ui.separator();
                         action = layout_controls(
                             ui,
-                            &mut self.multi_window,
+                            &mut self.main_pinned,
                             self.layout_name.as_deref(),
                             &mut self.settings,
                             &mut self.layouts,
@@ -539,7 +821,7 @@ impl BobApp {
                     ui.separator();
                     action = layout_controls(
                         ui,
-                        &mut self.multi_window,
+                        &mut self.main_pinned,
                         self.layout_name.as_deref(),
                         &mut self.settings,
                         &mut self.layouts,
@@ -552,6 +834,13 @@ impl BobApp {
                     .on_hover_text(&s.title);
             }
         });
+        if was_pinned && !self.main_pinned {
+            self.main_used.touch(&mut self.clock);
+        }
+        if !was_pinned && self.main_pinned {
+            self.clock += 1;
+            self.main_pinned_at = self.clock;
+        }
         if let Some(action) = action {
             self.layout_action(action);
             // A layout loads on the next frame.
@@ -592,6 +881,7 @@ impl BobApp {
         if let Some(loc) = &self.main.current {
             let mut w = WindowLayout::new(loc, self.geometry);
             w.main = true;
+            w.pinned = Some(self.main_pinned);
             w.zoom = Some(Zoom::new(self.main.fit, self.main.zoom));
             windows.push(w);
         }
@@ -599,6 +889,7 @@ impl BobApp {
             if let Some(loc) = &dw.view.current {
                 let mut w = WindowLayout::new(loc, dw.geometry);
                 w.toolbar = dw.toolbar;
+                w.pinned = Some(dw.pinned);
                 windows.push(w);
             }
         }
@@ -613,7 +904,7 @@ impl BobApp {
         if on_wayland() && unplaced {
             positions_unknown();
         }
-        Layout::new(self.multi_window, windows, trends)
+        Layout::new(windows, trends)
     }
 
     fn save_layout(&mut self, name: &str) -> Result<(), String> {
@@ -629,15 +920,8 @@ impl BobApp {
         // Positions are kept when on a monitor: those the window system
         // lists, else the main window's.
         let zoom = ctx.zoom_factor();
-        let monitors = if self.monitors.is_empty() {
-            ctx.input(|i| i.viewport().monitor_size)
-                .map(|m| vec![Rect::from_min_size(Pos2::ZERO, m * zoom)])
-                .unwrap_or_default()
-        } else {
-            self.monitors.clone()
-        };
+        let monitors = self.monitors(ctx);
         self.windows.clear();
-        self.multi_window = layout.multi_window;
         for w in &layout.windows {
             let geometry = w.geometry(&monitors);
             if w.position.is_some() && geometry.position.is_none() {
@@ -645,7 +929,7 @@ impl BobApp {
             }
             let loc = w.location();
             if !w.main {
-                self.open_window(ctx, loc, geometry, w.toolbar);
+                self.open_window(ctx, loc, geometry, w.toolbar, layout.pinned(w));
                 continue;
             }
             if let Some(size) = geometry.size {
@@ -665,6 +949,7 @@ impl BobApp {
                 self.home = Some(loc.clone());
             }
             self.show_open = false;
+            self.main_pinned = layout.pinned(w);
             self.main.open(loc);
         }
         self.trends.clear();
@@ -814,6 +1099,11 @@ fn can_multi_window(ctx: &egui::Context, touch: bool) -> bool {
     !cfg!(target_arch = "wasm32") && !ctx.embed_viewports() && !touch && !small
 }
 
+/// What a window's pin does.
+const PIN_HELP: &str = "Pinned: links open their displays in the unpinned window used last, \
+     or a new one (shift+click: a new window, ctrl+click: in place). \
+     Unpinned: links open in place.";
+
 /// What the main toolbar's layout controls ask for.
 enum LayoutAction {
     Load(String),
@@ -822,24 +1112,24 @@ enum LayoutAction {
     Delete(String),
 }
 
-/// The multi-window toggle, the layout list and the layout menu; in the
+/// The main window's pin, the layout list and the layout menu; in the
 /// `compact` toolbar's menu, the list is a submenu.
 fn layout_controls(
     ui: &mut egui::Ui,
-    multi_window: &mut bool,
+    pinned: &mut bool,
     current: Option<&str>,
     settings: &mut layout::Settings,
     layouts: &mut LayoutList,
     compact: bool,
 ) -> Option<LayoutAction> {
     let mut action = None;
-    let toggle = if compact { "🗗 Multi-window" } else { "🗗" };
+    let toggle = if compact { "📌 Pinned" } else { "📌" };
     if ui
-        .selectable_label(*multi_window, toggle)
-        .on_hover_text("Multi-window: links open their displays in windows of their own (ctrl+click opens in place)")
+        .selectable_label(*pinned, toggle)
+        .on_hover_text(PIN_HELP)
         .clicked()
     {
-        *multi_window = !*multi_window;
+        *pinned = !*pinned;
     }
     let mut load = |ui: &mut egui::Ui| {
         let names = layouts.get(ui.ctx());
@@ -950,11 +1240,15 @@ fn list_dir(dir: &Path) -> Vec<(PathBuf, bool)> {
 impl eframe::App for BobApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // A layout's positions are checked against the monitors as they are
-        // when it is loaded.
+        // when it is loaded; new windows are placed within them, asked for
+        // every few seconds (a laptop is docked).
         #[cfg(not(target_arch = "wasm32"))]
-        if self.pending_layout.is_some()
+        let now = ui.input(|i| i.time);
+        #[cfg(not(target_arch = "wasm32"))]
+        if (self.pending_layout.is_some() || self.monitors_at.is_none_or(|t| now - t > 3.0))
             && let Some(window) = frame.winit_window()
         {
+            self.monitors_at = Some(now);
             // Desktop points, as egui's (times its zoom factor).
             let scale = window.scale_factor() as f32;
             self.monitors = window
@@ -994,6 +1288,9 @@ impl BobApp {
             self.keypad_mode = true;
         }
         widgets::touch_targets(ui.ctx(), self.keypad_mode);
+        self.can_windows = can_multi_window(&ctx, self.keypad_mode);
+        self.main_used
+            .focus(ui.input(|i| i.focused), &mut self.clock);
         self.chrome.begin(ui.ctx());
         // Once the controls' scale has settled, as positions and sizes
         // depend on it.
@@ -1006,7 +1303,9 @@ impl BobApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         self.geometry = geometry(ui);
-        self.main.update_title(ui.ctx());
+        self.main_frame = frame(ui);
+        self.main
+            .update_title(ui.ctx(), self.main_pinned && self.can_windows);
         let toolbar = egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
         self.chrome.toolbar = toolbar.response.rect.height();
         let mut panels = self.chrome.toolbar;
@@ -1136,7 +1435,13 @@ impl BobApp {
         // Closed by Exit or Ctrl+W since they were last drawn.
         self.windows.retain(|w| !w.close);
         let (home, keypad, auto_size) = (&self.home, self.keypad_mode, self.chrome.auto_size);
+        let desk = Desk {
+            monitors: self.monitors(&ctx),
+            pinned: self.pinned_frames(),
+        };
         let (pad, details, confirm) = (&mut self.keypad, &mut self.details, &mut self.confirm);
+        let clock = &mut self.clock;
+        let can_windows = self.can_windows;
         for w in &mut self.windows {
             let key = WindowKey::Child(w.id);
             let vcx = ViewCx {
@@ -1144,11 +1449,10 @@ impl BobApp {
                 keypad,
                 trends,
             };
-            let title = w
-                .view
-                .screen
-                .as_ref()
-                .map_or_else(|| "bobview".to_string(), |s| s.title.clone());
+            let title = w.view.screen.as_ref().map_or_else(
+                || "bobview".to_string(),
+                |s| window_title(&s.title, w.pinned && can_windows),
+            );
             if ctx.embed_viewports() {
                 let mut open = true;
                 egui::Window::new(&title)
@@ -1157,7 +1461,7 @@ impl BobApp {
                     .collapsible(false)
                     .default_size(Vec2::new(640.0, 420.0))
                     .show(&ctx, |ui| {
-                        requests.extend(child_ui(ui, w, home, &vcx, None));
+                        requests.extend(child_ui(ui, w, home, &vcx, None, clock, &desk));
                     });
                 dialogs(&ctx, key, pad, details, confirm);
                 w.close |= !open;
@@ -1167,7 +1471,7 @@ impl BobApp {
             ctx.show_viewport_immediate(w.id, builder, |ui, class| {
                 // No native windows after all: a window in this one.
                 let native = (class != egui::ViewportClass::EmbeddedWindow).then_some(auto_size);
-                requests.extend(child_ui(ui, w, home, &vcx, native));
+                requests.extend(child_ui(ui, w, home, &vcx, native, clock, &desk));
                 dialogs(ui.ctx(), key, pad, details, confirm);
                 // Closing the window drops its view, and its PVs with it.
                 if ui.input(|i| i.viewport().close_requested()) {
@@ -1432,6 +1736,23 @@ fn geometry(ui: &egui::Ui) -> Geometry {
     })
 }
 
+/// Where the window being drawn is on the desktop (see `Frame`); None where
+/// the window system doesn't say.
+fn frame(ui: &egui::Ui) -> Option<Frame> {
+    let zoom = ui.ctx().zoom_factor();
+    ui.input(|i| {
+        let info = i.viewport();
+        let (outer, inner) = (info.outer_rect?, info.inner_rect?);
+        Some(Frame {
+            outer: Rect::from_min_size(
+                Pos2::ZERO + outer.min.to_vec2() * zoom,
+                outer.size() * zoom,
+            ),
+            border: (outer.size() - inner.size()) * zoom,
+        })
+    })
+}
+
 /// What the keyboard shortcuts ask of the window beyond its view.
 #[derive(Default)]
 struct Shortcuts {
@@ -1476,8 +1797,11 @@ fn child_ui(
     home: &Option<Location>,
     vcx: &ViewCx,
     native: Option<bool>,
+    clock: &mut u64,
+    desk: &Desk,
 ) -> Vec<(Origin, Request)> {
     if native.is_some() {
+        w.used.focus(ui.input(|i| i.focused), clock);
         let keys = shortcuts(ui, &mut w.view);
         w.close |= keys.close;
         w.toolbar ^= keys.toolbar;
@@ -1511,8 +1835,9 @@ fn child_ui(
         w.view.new_display = false;
         return drawn.requests;
     };
-    chevron(ui, w);
+    corner(ui, w, clock);
     w.geometry = geometry(ui);
+    w.frame = frame(ui);
     // Sized to a new display at 100%, within the monitor, once the window
     // knows its monitor; then the display fits the window as it is resized.
     let info = ui.input(|i| i.viewport().clone());
@@ -1534,15 +1859,25 @@ fn child_ui(
                 ui.ctx()
                     .send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
             }
+            // Beside the window it was opened from, at its new size.
+            if let Some(origin) = w.beside.take()
+                && let Some(pos) = beside(origin, &desk.clear_of(w.id), size * zoom, &desk.monitors)
+            {
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::OuterPosition(
+                        Pos2::ZERO + pos.to_vec2() / zoom,
+                    ));
+            }
         }
     }
     drawn.requests
 }
 
-/// A small chevron in the top-right corner while the pointer is over the
-/// window, that shows or hides its toolbar: drawn over the display, so it
-/// takes no room.
-fn chevron(ui: &egui::Ui, w: &mut DisplayWindow) {
+/// Small buttons in the top-right corner while the pointer is over the
+/// window, drawn over the display so they take no room: Back (while the
+/// toolbar is hidden), the pin, and a chevron that shows or hides the
+/// toolbar.
+fn corner(ui: &egui::Ui, w: &mut DisplayWindow, clock: &mut u64) {
     if !ui.input(|i| i.pointer.has_pointer()) {
         return;
     }
@@ -1550,30 +1885,86 @@ fn chevron(ui: &egui::Ui, w: &mut DisplayWindow) {
         .order(egui::Order::Foreground)
         .anchor(egui::Align2::RIGHT_TOP, Vec2::new(-4.0, 4.0))
         .show(ui.ctx(), |ui| {
-            let (rect, resp) = ui.allocate_exact_size(Vec2::new(22.0, 14.0), egui::Sense::click());
-            let visuals = ui.style().interact(&resp);
-            let painter = ui.painter();
-            painter.rect_filled(rect, 3.0, visuals.weak_bg_fill);
-            // ⌄ to show the toolbar, ⌃ to hide it (drawn: the fonts have no ⌄).
-            let c = rect.center();
-            let (dx, dy) = (5.0, if w.toolbar { -2.5 } else { 2.5 });
-            painter.line(
-                vec![
-                    c + Vec2::new(-dx, -dy),
-                    c + Vec2::new(0.0, dy),
-                    c + Vec2::new(dx, -dy),
-                ],
-                visuals.fg_stroke,
-            );
-            let tip = if w.toolbar {
-                "Hide the toolbar (Ctrl+T)"
-            } else {
-                "Show the toolbar (Ctrl+T)"
-            };
-            if resp.on_hover_text(tip).clicked() {
-                w.toolbar = !w.toolbar;
-            }
+            ui.spacing_mut().item_spacing.x = 3.0;
+            ui.horizontal(|ui| {
+                if !w.toolbar {
+                    let enabled = !w.view.back.is_empty();
+                    let resp = corner_button(ui, false, enabled);
+                    corner_glyph(ui, &resp, "◀");
+                    if resp.on_hover_text("Back (Alt+←)").clicked() {
+                        w.view.go_back();
+                    }
+                }
+                let resp = corner_button(ui, w.pinned, true);
+                corner_glyph(ui, &resp, "📌");
+                if resp.on_hover_text(PIN_HELP).clicked() {
+                    w.pinned = !w.pinned;
+                    // Unpinned, it is the viewer; pinned, new windows go
+                    // beside it.
+                    if w.pinned {
+                        *clock += 1;
+                        w.pinned_at = *clock;
+                    } else {
+                        w.used.touch(clock);
+                    }
+                }
+                let resp = corner_button(ui, false, true);
+                let visuals = ui.style().interact(&resp);
+                // ⌄ to show the toolbar, ⌃ to hide it (drawn: the fonts have no ⌄).
+                let c = resp.rect.center();
+                let (dx, dy) = (5.0, if w.toolbar { -2.5 } else { 2.5 });
+                ui.painter().line(
+                    vec![
+                        c + Vec2::new(-dx, -dy),
+                        c + Vec2::new(0.0, dy),
+                        c + Vec2::new(dx, -dy),
+                    ],
+                    visuals.fg_stroke,
+                );
+                let tip = if w.toolbar {
+                    "Hide the toolbar (Ctrl+T)"
+                } else {
+                    "Show the toolbar (Ctrl+T)"
+                };
+                if resp.on_hover_text(tip).clicked() {
+                    w.toolbar = !w.toolbar;
+                }
+            });
         });
+}
+
+/// One of the `corner` buttons, its background drawn: highlighted when
+/// `selected`, inert unless `enabled`.
+fn corner_button(ui: &mut egui::Ui, selected: bool, enabled: bool) -> egui::Response {
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(22.0, 16.0), sense);
+    let fill = if selected {
+        ui.visuals().selection.bg_fill
+    } else {
+        ui.style().interact(&resp).weak_bg_fill
+    };
+    ui.painter().rect_filled(rect, 3.0, fill);
+    resp
+}
+
+/// A `corner` button's symbol, faded when the button is disabled.
+fn corner_glyph(ui: &egui::Ui, resp: &egui::Response, glyph: &str) {
+    let color = if resp.sense.senses_click() {
+        ui.style().interact(resp).fg_stroke.color
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    ui.painter().text(
+        resp.rect.center(),
+        egui::Align2::CENTER_CENTER,
+        glyph,
+        egui::FontId::proportional(11.0),
+        color,
+    );
 }
 
 /// A display window's toolbar: navigation, reload and zoom. The window and
@@ -1700,7 +2091,7 @@ mod tests {
         // A double click runs the command once, and counts as loading.
         let main = Origin {
             window: WindowKey::Main,
-            ctrl: false,
+            ..Origin::default()
         };
         app.launch(&ctx, main, None, None, "no-such-launcher".into());
         app.launch(&ctx, main, None, None, "no-such-launcher".into());
@@ -1730,9 +2121,8 @@ mod tests {
             .unwrap();
         app.poll_launched(&ctx);
         assert!(app.main.current.is_none() && !app.is_loading());
-        // In multi-window mode a ctrl+clicked command opens in place, as a
-        // ctrl+clicked link does.
-        app.set_multi_window(true);
+        // In the pinned main window a ctrl+clicked command opens in place,
+        // as a ctrl+clicked link does.
         app.launched
             .0
             .send(Launched {
@@ -1748,23 +2138,150 @@ mod tests {
     }
 
     #[test]
-    fn links_route_by_mode_modifier_and_open_windows() {
-        use super::{Route, WindowKey, route};
+    fn links_route_by_pin_modifier_and_open_windows() {
+        use super::{Origin, Route, WindowKey, route};
         let child = WindowKey::Child(eframe::egui::ViewportId::from_hash_of("x"));
-        // One window: always in place, whatever is open.
-        assert_eq!(route(false, false, None), Route::InPlace);
-        assert_eq!(route(false, false, Some(child)), Route::InPlace);
-        assert_eq!(route(false, true, None), Route::InPlace);
-        // Multi-window: a new window, or the one already showing it.
-        assert_eq!(route(true, false, None), Route::NewWindow);
-        assert_eq!(route(true, false, Some(child)), Route::Raise(child));
+        let viewer = WindowKey::Child(eframe::egui::ViewportId::from_hash_of("v"));
+        let plain = Origin::default();
+        let ctrl = Origin {
+            ctrl: true,
+            ..plain
+        };
+        let shift = Origin {
+            shift: true,
+            ..plain
+        };
+        // No windows of their own: always in place, whatever is open.
+        assert_eq!(route(false, plain, true, None, None), Route::InPlace);
+        assert_eq!(route(false, shift, true, Some(child), None), Route::InPlace);
+        // From a pinned window: the viewer, else a new window.
         assert_eq!(
-            route(true, false, Some(WindowKey::Main)),
+            route(true, plain, true, None, Some(viewer)),
+            Route::Viewer(viewer)
+        );
+        assert_eq!(route(true, plain, true, None, None), Route::NewWindow);
+        // From an unpinned window: in place.
+        assert_eq!(
+            route(true, plain, false, None, Some(viewer)),
+            Route::InPlace
+        );
+        // Shift+click: a new window, whatever the pin.
+        assert_eq!(
+            route(true, shift, false, None, Some(viewer)),
+            Route::NewWindow
+        );
+        assert_eq!(
+            route(true, shift, true, None, Some(viewer)),
+            Route::NewWindow
+        );
+        // A display already open is raised, with or without shift.
+        for (origin, pinned) in [(plain, true), (plain, false), (shift, true)] {
+            assert_eq!(
+                route(true, origin, pinned, Some(child), Some(viewer)),
+                Route::Raise(child)
+            );
+        }
+        assert_eq!(
+            route(true, plain, true, Some(WindowKey::Main), None),
             Route::Raise(WindowKey::Main)
         );
-        // Ctrl+click navigates in place.
-        assert_eq!(route(true, true, None), Route::InPlace);
-        assert_eq!(route(true, true, Some(child)), Route::InPlace);
+        // Ctrl+click navigates in place, even to a display already open.
+        assert_eq!(
+            route(true, ctrl, true, Some(child), Some(viewer)),
+            Route::InPlace
+        );
+    }
+
+    #[test]
+    fn new_windows_open_beside_their_origin_then_below() {
+        use super::{Frame, beside};
+        use eframe::egui::{Pos2, Rect, Vec2};
+        let beside_alone = |o, size, monitors: &[Rect]| beside(o, &[], size, monitors);
+        let left = Rect::from_min_size(Pos2::ZERO, Vec2::new(1920.0, 1080.0));
+        let right = Rect::from_min_size(Pos2::new(1920.0, 0.0), Vec2::new(1920.0, 1080.0));
+        let at = |x: f32, y: f32, w: f32| Frame {
+            outer: Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, 600.0)),
+            border: Vec2::new(0.0, 30.0),
+        };
+        let size = Vec2::new(800.0, 500.0);
+        // To the right, top edges level.
+        assert_eq!(
+            beside_alone(at(100.0, 50.0, 600.0), size, &[left]),
+            Some(Pos2::new(700.0, 50.0))
+        );
+        // No room on the right: to the left.
+        assert_eq!(
+            beside_alone(at(1000.0, 50.0, 600.0), size, &[left]),
+            Some(Pos2::new(200.0, 50.0))
+        );
+        // Room on neither side: on the side with more room (left), over it.
+        assert_eq!(
+            beside_alone(at(300.0, 50.0, 1400.0), size, &[left]),
+            Some(Pos2::new(0.0, 50.0))
+        );
+        // Kept on the monitor the window is on, and above its bottom.
+        assert_eq!(
+            beside_alone(at(2100.0, 900.0, 600.0), size, &[left, right]),
+            Some(Pos2::new(2700.0, 550.0))
+        );
+        assert_eq!(
+            beside_alone(at(3000.0, 0.0, 600.0), size, &[left, right]),
+            Some(Pos2::new(2200.0, 0.0))
+        );
+        // No room on the right: below, left edges level, slid back onto
+        // the monitor when it would go off it; above when only that fits.
+        let short = |x: f32, y: f32, w: f32| Frame {
+            outer: Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, 300.0)),
+            border: Vec2::new(0.0, 30.0),
+        };
+        assert_eq!(
+            beside_alone(short(1000.0, 0.0, 600.0), size, &[left]),
+            Some(Pos2::new(1000.0, 300.0))
+        );
+        assert_eq!(
+            beside_alone(short(1300.0, 0.0, 600.0), size, &[left]),
+            Some(Pos2::new(1120.0, 300.0))
+        );
+        assert_eq!(
+            beside_alone(short(300.0, 600.0, 1400.0), size, &[left]),
+            Some(Pos2::new(300.0, 70.0))
+        );
+        // No monitors known: no place.
+        assert_eq!(beside_alone(at(0.0, 0.0, 600.0), size, &[]), None);
+
+        // Beside the window pinned last, clear of the others: a row of
+        // small windows grows beside a big one.
+        let tall = Rect::from_min_size(Pos2::ZERO, Vec2::new(1920.0, 1200.0));
+        let main = at(0.0, 0.0, 600.0);
+        let small = Vec2::new(300.0, 270.0);
+        let first = Rect::from_min_size(Pos2::new(600.0, 0.0), Vec2::new(300.0, 300.0));
+        assert_eq!(
+            beside(main, &[first], small, &[tall]),
+            Some(Pos2::new(900.0, 0.0))
+        );
+        // No room beside it: below it, and failing that beside the others.
+        let right_of_main = Rect::from_min_size(Pos2::new(600.0, 0.0), Vec2::new(800.0, 600.0));
+        let below_main = Rect::from_min_size(Pos2::new(0.0, 600.0), Vec2::new(600.0, 600.0));
+        assert_eq!(
+            beside(main, &[right_of_main], size, &[tall]),
+            Some(Pos2::new(600.0, 600.0))
+        );
+        let bottom = Rect::from_min_size(Pos2::new(0.0, 600.0), Vec2::new(1920.0, 600.0));
+        assert_eq!(
+            beside(main, &[bottom], size, &[tall]),
+            Some(Pos2::new(600.0, 0.0))
+        );
+        assert_eq!(
+            beside(main, &[right_of_main, below_main], size, &[tall]),
+            Some(Pos2::new(600.0, 600.0))
+        );
+        // Nowhere clear: where it covers them least.
+        let rest = Rect::from_min_size(Pos2::new(600.0, 600.0), Vec2::new(1320.0, 600.0));
+        let far = Rect::from_min_size(Pos2::new(1400.0, 0.0), Vec2::new(520.0, 600.0));
+        let pos = beside(main, &[right_of_main, below_main, rest, far], size, &[tall]);
+        assert!(
+            pos.is_some_and(|p| tall.contains_rect(Rect::from_min_size(p, size + main.border)))
+        );
     }
 
     #[test]
@@ -1795,55 +2312,90 @@ mod tests {
             source: bob::Source::File(format!("/no/such/{name}.bob").into()),
             macros: bob::Macros::from_pairs([("P", name)]),
         };
-        let open = |app: &mut BobApp, window, ctrl, loc: Location| {
+        let open = |app: &mut BobApp, origin: Origin, loc: Location| {
             let req = Request::Open {
                 source: loc.source,
                 macros: loc.macros,
                 target: "replace".into(),
             };
-            app.request(&ctx, Origin { window, ctrl }, req);
+            app.request(&ctx, origin, req);
+        };
+        let plain = |window| Origin {
+            window,
+            ..Origin::default()
+        };
+        let ctrl = |window| Origin {
+            window,
+            ctrl: true,
+            shift: false,
+        };
+        let shift = |window| Origin {
+            window,
+            ctrl: false,
+            shift: true,
         };
         let main = WindowKey::Main;
-        open(&mut app, main, false, display("a"));
+        let current = |app: &BobApp, i: usize| app.windows[i].view.current.clone();
+        // Ctrl+click in the pinned main window navigates it.
+        open(&mut app, ctrl(main), display("a"));
         assert_eq!(app.main.current, Some(display("a")));
 
-        app.set_multi_window(true);
-        // A link opens a new window, and again raises it.
-        open(&mut app, main, false, display("b"));
+        // A link opens a new window, the viewer, and again raises it.
+        open(&mut app, plain(main), display("b"));
         assert_eq!(app.windows.len(), 1);
-        let child = WindowKey::Child(app.windows[0].id);
-        open(&mut app, main, false, display("b"));
+        let first = WindowKey::Child(app.windows[0].id);
+        open(&mut app, plain(main), display("b"));
         assert_eq!(app.windows.len(), 1);
-        // The same display with other macros is another window.
+        // The same display with other macros goes to the viewer, which keeps
+        // its history.
         let mut other = display("b");
         other.macros = bob::Macros::from_pairs([("P", "c")]);
-        open(&mut app, main, false, other);
-        assert_eq!(app.windows.len(), 2);
-        // Ctrl+click in a window navigates it, keeping its history.
-        open(&mut app, child, true, display("d"));
-        assert_eq!(app.windows[0].view.current, Some(display("d")));
+        open(&mut app, plain(main), other.clone());
+        assert_eq!(app.windows.len(), 1);
+        assert_eq!(current(&app, 0), Some(other.clone()));
         assert_eq!(app.windows[0].view.back, [display("b")]);
-        assert_eq!(app.main.current, Some(display("a")));
+        // Shift+click opens a new window, which becomes the viewer.
+        open(&mut app, shift(main), display("d"));
+        assert_eq!(app.windows.len(), 2);
+        let second = WindowKey::Child(app.windows[1].id);
+        open(&mut app, plain(main), display("e"));
+        assert_eq!(current(&app, 1), Some(display("e")));
+        assert_eq!(current(&app, 0), Some(other));
+        // A link in an unpinned window navigates it.
+        open(&mut app, plain(first), display("f"));
+        assert_eq!(current(&app, 0), Some(display("f")));
+        // Pinned, a window is no longer the viewer: the other one is.
+        app.windows[1].pinned = true;
+        open(&mut app, plain(main), display("g"));
+        assert_eq!(current(&app, 0), Some(display("g")));
+        // A link in a pinned window goes to the viewer too.
+        open(&mut app, plain(second), display("h"));
+        assert_eq!(current(&app, 0), Some(display("h")));
+        assert_eq!(current(&app, 1), Some(display("e")));
+        // Every window pinned: a link opens a new one.
+        app.windows[0].pinned = true;
+        open(&mut app, plain(main), display("i"));
+        assert_eq!(app.windows.len(), 3);
+        // Ctrl+click in a pinned window navigates it.
+        open(&mut app, ctrl(second), display("j"));
+        assert_eq!(current(&app, 1), Some(display("j")));
+        // The main window unpinned (in its toolbar) is the viewer, as the
+        // window used last.
+        app.main_pinned = false;
+        app.main_used.touch(&mut app.clock);
+        open(&mut app, plain(second), display("k"));
+        assert_eq!(app.main.current, Some(display("k")));
+        // Where displays have no windows of their own, every link is in place.
+        app.can_windows = false;
+        open(&mut app, shift(second), display("l"));
+        assert_eq!(current(&app, 1), Some(display("l")));
+        assert_eq!(app.windows.len(), 3);
+
         // Exit closes a display window even when it has history.
-        app.request(
-            &ctx,
-            Origin {
-                window: child,
-                ctrl: false,
-            },
-            Request::Close,
-        );
-        assert!(app.view_mut(child).is_none());
+        app.request(&ctx, plain(second), Request::Close);
+        assert!(app.view_mut(second).is_none());
         // The main window still goes back first.
-        open(&mut app, main, true, display("e"));
-        app.request(
-            &ctx,
-            Origin {
-                window: main,
-                ctrl: false,
-            },
-            Request::Close,
-        );
+        app.request(&ctx, plain(main), Request::Close);
         assert_eq!(app.main.current, Some(display("a")));
     }
 
