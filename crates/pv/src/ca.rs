@@ -41,6 +41,9 @@ fn is_number_list(text: &str) -> bool {
         .all(|x| x.trim().parse::<f64>().is_ok_and(f64::is_finite))
 }
 
+/// How long a write to a PV that has yet to connect waits for it.
+const WRITE_CONNECT: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub(crate) async fn run(client: &CaClient, pv: &str, shared: Arc<Shared>) {
     let channel = client.create_channel(pv);
     let mut events = channel.connection_events();
@@ -68,14 +71,28 @@ pub(crate) async fn run(client: &CaClient, pv: &str, shared: Arc<Shared>) {
     // When to read the value if no monitor update has come since the channel
     // connected; see `MONITOR_GRACE`.
     let mut fallback: Option<tokio::time::Instant> = None;
+    // Whether the channel is connected, though its value may not have come.
+    let mut linked = false;
+    // A write to a PV that has yet to connect, as a `write_pv` action to a
+    // PV not connected in advance makes, and when it gives up waiting. The
+    // writes behind it stay queued meanwhile, so they keep their order, and
+    // the PV's events are still served.
+    let mut waiting: Option<(Put, tokio::time::Instant)> = None;
     loop {
+        if let Some((put, _)) = waiting.take_if(|_| shared.connected())
+            && shared.can_write(&put.text)
+        {
+            write(&channel, &shared, &put).await;
+        }
         tokio::select! {
             event = events.recv() => match event {
                 Ok(ConnectionEvent::Connected) => {
+                    linked = true;
                     fetch_metadata(&channel, &shared).await;
                     fallback = Some(tokio::time::Instant::now() + MONITOR_GRACE);
                 }
                 Ok(ConnectionEvent::Disconnected) => {
+                    linked = false;
                     fallback = None;
                     shared.update(|s| s.connected = false);
                 }
@@ -89,7 +106,7 @@ pub(crate) async fn run(client: &CaClient, pv: &str, shared: Arc<Shared>) {
                 if fallback.is_some() =>
             {
                 fallback = None;
-                if !shared.snapshot().connected {
+                if !shared.connected() {
                     read_value(&channel, &shared).await;
                 }
             }
@@ -104,46 +121,75 @@ pub(crate) async fn run(client: &CaClient, pv: &str, shared: Arc<Shared>) {
                 }
                 None => return,
             },
-            Some(put) = writes.recv() => {
+            Some(put) = writes.recv(), if waiting.is_none() => {
+                // Refused at once if the PV has dropped.
                 if !shared.can_write(&put.text) {
                     continue;
                 }
-                let text = &put.text;
-                let value = shared.snapshot().value;
-                let native = channel.native_field_type().ok();
-                let count = channel.element_count().ok().map(|n| n as usize);
-                // Plain CA_PROTO_WRITE, as Phoebus does: a put-callback on a
-                // busy record (areaDetector Acquire) completes only when it
-                // returns to 0, and the IOC queues any later put-callback on
-                // that record behind it, so Stop could never reach it.
-                // Sent here, not on a spawned task, so writes keep their order.
-                let result = if as_long_string(&put, native, count) {
-                    let bytes = crate::long_string_bytes(text, count);
-                    channel
-                        .put_as_dbr_nowait(DBR_CHAR, &EpicsValue::CharArray(bytes.into()))
-                        .await
+                if shared.connected() {
+                    write(&channel, &shared, &put).await;
                 } else {
-                    // Arrays are typed as they are shown, `[1, 2]` or
-                    // `["a", "b"]`; the server converts each string element
-                    // to the field type.
-                    let items: Option<Vec<String>> = match value {
-                        Value::DoubleArray(_) | Value::LongArray(_) => Some(
-                            crate::split_array(text).into_iter().map(String::from).collect(),
-                        ),
-                        Value::StrArray(_) => Some(crate::split_strings(text)),
-                        _ => None,
-                    };
-                    if let Some(items) = items {
-                        channel.put_string_array_nowait(&items).await
-                    } else {
-                        channel.put_string_nowait(text).await
-                    }
-                };
-                // No reply comes to a plain write: `Ok` only says it was sent.
-                shared.write_sent(text, result.err().map(|e| e.to_string()));
+                    waiting = Some((put, tokio::time::Instant::now() + WRITE_CONNECT));
+                }
+            }
+            _ = tokio::time::sleep_until(
+                waiting.as_ref().map_or_else(tokio::time::Instant::now, |w| w.1)
+            ), if waiting.is_some() => {
+                let Some((put, _)) = waiting.take() else { continue };
+                if linked {
+                    // Connected, but no value has come yet: send it as text.
+                    write(&channel, &shared, &put).await;
+                    continue;
+                }
+                // Those queued behind it fail too, rather than each waiting
+                // in turn.
+                let why = format!("not connected after {}s", WRITE_CONNECT.as_secs());
+                shared.write_result(&put.text, Some(why.clone()));
+                while let Ok(put) = writes.try_recv() {
+                    shared.write_result(&put.text, Some(why.clone()));
+                }
             }
         }
     }
+}
+
+/// Send one write to a connected channel and report how it went.
+async fn write(channel: &CaChannel, shared: &Shared, put: &Put) {
+    let text = &put.text;
+    let value = shared.snapshot().value;
+    let native = channel.native_field_type().ok();
+    let count = channel.element_count().ok().map(|n| n as usize);
+    // Plain CA_PROTO_WRITE, as Phoebus does: a put-callback on a busy
+    // record (areaDetector Acquire) completes only when it returns to 0,
+    // and the IOC queues any later put-callback on that record behind it,
+    // so Stop could never reach it. Sent from the PV's task, not a spawned
+    // one, so writes keep their order.
+    let result = if as_long_string(put, native, count) {
+        let bytes = crate::long_string_bytes(text, count);
+        channel
+            .put_as_dbr_nowait(DBR_CHAR, &EpicsValue::CharArray(bytes.into()))
+            .await
+    } else {
+        // Arrays are typed as they are shown, `[1, 2]` or `["a", "b"]`; the
+        // server converts each string element to the field type.
+        let items: Option<Vec<String>> = match value {
+            Value::DoubleArray(_) | Value::LongArray(_) => Some(
+                crate::split_array(text)
+                    .into_iter()
+                    .map(String::from)
+                    .collect(),
+            ),
+            Value::StrArray(_) => Some(crate::split_strings(text)),
+            _ => None,
+        };
+        if let Some(items) = items {
+            channel.put_string_array_nowait(&items).await
+        } else {
+            channel.put_string_nowait(text).await
+        }
+    };
+    // No reply comes to a plain write: `Ok` only says it was sent.
+    shared.write_sent(text, result.err().map(|e| e.to_string()));
 }
 
 /// How long after a channel connects its monitor has to send the first

@@ -5,6 +5,7 @@ mod axis;
 mod chrome;
 mod colormaps;
 mod fetch;
+mod format;
 mod group_link;
 mod icons;
 mod image;

@@ -129,7 +129,10 @@ details say "unknown") and a put the server refuses is shown as a write
 error in the status line and the PV details. A write to a CA or PVA PV that
 was connected and has dropped is refused at once, as is one while 16 earlier
 writes to it still wait, rather than applied late; the status line says so. A
-write to a PV that has yet to connect waits in that queue. A `write_pv` action (or the
+write to a PV that has yet to connect (as a `write_pv` action to a PV not on
+the display makes) waits for it, up to 5 s over CA, without holding up the
+PV's other events; the writes behind it wait in that queue (so while it waits,
+a 17th is refused), and fail with it if it gives up. A `write_pv` action (or the
 toggle script) of a display loaded from an `http://` or `https://` URL asks
 for confirmation before it writes; displays from local files write at once.
 
@@ -137,7 +140,7 @@ for confirmation before it writes; displays from local files write at once.
 
 | widgets | notes |
 | --- | --- |
-| label, textupdate, textentry | formats: default, exponential, hex, binary, string; units, precision |
+| label, textupdate, textentry | formats: default, decimal, exponential, engineering, hex, compact, string, sexagesimal (also HMS and DMS), binary, significant; units, precision; typed text is parsed as Phoebus does (units dropped, `0x`/`0b` numbers, enum labels) |
 | led, multi_state_led, byte_monitor | |
 | action_button, bool_button, choice, radio, combo, checkbox | open display and write PV actions |
 | scaledslider, scrollbar, spinner | |
@@ -153,18 +156,26 @@ for confirmation before it writes; displays from local files write at once.
 
 Also: macros (`$(X)`, `${X}`, defaults, widget properties such as
 `$(pv_name)`, and `$(actions)` in a tooltip), rules (expressions over `pv0`, `pvStr0`, `pvSev0`,
-`pvLegacySev0` … with arithmetic, bitwise and logical operators, that set any
-property, or one item of a list such as `symbols[0]`; output expression rules),
+`pvLegacySev0` … with arithmetic, bitwise (including shifts) and logical
+operators, that set any
+property, or one item of a list such as `symbols[0]`, including the position,
+size and PV; output expression rules; macros expanded; operators bind as in
+Phoebus's Jython, or BOY's JavaScript for an `.opi`, and a lone `=` is
+`==` in a `.bob` as Phoebus makes it; unlike Jython, bitwise operators take
+the integer part of a double such as `pv0`, where Jython fails the rule),
+macros fall back to environment variables in displays opened from files (in
+widget properties and the display name),
 `border_width`/`border_color` borders, label and text update `rotation_step`,
 alarm borders and dashed borders for disconnected PVs, back and
-forward navigation, `loc://` and `sim://` PVs. The display name, with macros
+forward navigation, `loc://` and `sim://` PVs, and formula PVs (`=…`,
+`eq://`). The display name, with macros
 expanded (or the file name if it has none), is the window title.
 
 Unsupported widgets, such as table, webbrowser, array, fileselector and
 byte-array, are drawn as a grey placeholder labelled with the widget type
 and PV name.
 
-Not yet: compressed (codec) images, image axes, ROIs and cursor PVs, the XY plot
+Not yet: `sys://` and other PV types (shown as not supported), PV Access field paths (`pva://name/field`), compressed (codec) images, image axes, ROIs and cursor PVs, the XY plot
 `markers`, error bars and toolbar, the strip chart's toolbar and second y axes, GIF and JPEG
 images (symbols and pictures show their fallback or a placeholder), text inside
 SVG images, and scripts: an `execute` action logs that it is not supported,
@@ -465,7 +476,9 @@ the token from its address after reading it, so a reload needs it again. A page
 with a token loads displays only from its own server, and sends the token only
 to a PVWS on its own server, so a link naming someone else's display or
 `&pvws=` cannot write with it. Writes to a PV that was connected and has
-dropped fail at once, and at most 16 may wait for one PV. Browsers let any page open a websocket, so the
+dropped fail at once, and at most 16 may wait for one PV. One to a PV that
+has yet to connect fails after 5 s, which the page sees only as the PV's
+write error, not as a message. Browsers let any page open a websocket, so the
 server always accepts only pages from itself (by `Origin`), plus
 any named with `--allow-origin https://host.example.com` (repeatable). Those
 pages must also call the server by an IP address, `localhost`, this machine's

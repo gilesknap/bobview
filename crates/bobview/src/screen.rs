@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use pv::{Pv, PvManager};
 
-use crate::rules::CompiledRule;
+use crate::rules::{CompiledRule, Lang};
 
 /// How deep embedded displays may nest before we stop (guards against loops).
 pub(crate) const MAX_DEPTH: u32 = 8;
@@ -372,12 +372,12 @@ impl Node {
     /// Expand macros in a property value, falling back to the widget's own
     /// properties, so `$(pv_name)` and `$(name)` work as in Phoebus.
     pub fn expand(&self, text: &str) -> String {
-        expand_for(&self.w, &self.macros, text)
+        expand_for(&self.w, &self.macros, self.base.as_ref(), text)
     }
 
     /// Expand macros with `macros` in place of the widget's own.
     pub fn expand_with(&self, macros: &Macros, text: &str) -> String {
-        expand_for(&self.w, macros, text)
+        expand_for(&self.w, macros, self.base.as_ref(), text)
     }
 
     /// An expanded simple property.
@@ -390,6 +390,34 @@ impl Node {
 
     pub fn state(&self) -> Option<pv::PvState> {
         self.pv.as_ref().map(|p| p.state())
+    }
+
+    /// Move and size the widget from geometry `before` (x, y, width,
+    /// height as its properties gave them) to `after`, as a rule does; its
+    /// children move with it. Changes, not the values, are applied, so a
+    /// size set from the content (an embedded display's resize mode 2) or
+    /// the parent's offset is kept.
+    pub fn reshape(&mut self, before: [f64; 4], after: [f64; 4]) {
+        for (r, (b, a)) in self.rect.iter_mut().zip(before.iter().zip(after)) {
+            *r += a - b;
+        }
+        let (dx, dy) = (after[0] - before[0], after[1] - before[1]);
+        if dx != 0.0 || dy != 0.0 {
+            self.children
+                .iter_mut()
+                .chain(self.tabs.iter_mut().flatten())
+                .for_each(|n| n.shift(dx, dy));
+        }
+    }
+
+    /// Move the widget and its children by `dx`, `dy`.
+    fn shift(&mut self, dx: f64, dy: f64) {
+        self.rect[0] += dx;
+        self.rect[1] += dy;
+        self.children
+            .iter_mut()
+            .chain(self.tabs.iter_mut().flatten())
+            .for_each(|n| n.shift(dx, dy));
     }
 
     /// Resolve a file named by this widget against the display it is in.
@@ -449,8 +477,14 @@ impl Node {
     }
 }
 
-pub(crate) fn expand_for(w: &Widget, macros: &Macros, text: &str) -> String {
-    expand_props(w, macros, text, &Default::default())
+/// Expand macros in `text` of widget `w`, from a display loaded from
+/// `base`. As Phoebus's `MacroOrPropertyProvider`, a name that is neither a
+/// macro nor a property falls back to an environment variable, but only in
+/// a display from a file: one from the web must not read them (it could
+/// send them out in a PV name or URL).
+pub(crate) fn expand_for(w: &Widget, macros: &Macros, base: Option<&Source>, text: &str) -> String {
+    let env = matches!(base, Some(Source::File(_)));
+    expand_props(w, macros, env, text, &Default::default())
 }
 
 /// Deepest chain of properties naming one another that is expanded.
@@ -469,7 +503,7 @@ type Expanding = std::cell::RefCell<(
 /// or anything unknown, too long or naming others too deeply is left as
 /// written. Each is expanded once, so properties that name others several
 /// times don't take exponential time.
-fn expand_props(w: &Widget, macros: &Macros, text: &str, state: &Expanding) -> String {
+fn expand_props(w: &Widget, macros: &Macros, env: bool, text: &str, state: &Expanding) -> String {
     bob::expand(text, &|name| {
         macros.get(name).map(str::to_string).or_else(|| {
             if let Some(value) = state.borrow().1.get(name) {
@@ -482,9 +516,11 @@ fn expand_props(w: &Widget, macros: &Macros, text: &str, state: &Expanding) -> S
                 return None;
             }
             drop(expanding);
-            let prop = w.text(name)?;
+            let Some(prop) = w.text(name) else {
+                return env.then(|| env_var(name)).flatten();
+            };
             state.borrow_mut().0.push(name.to_string());
-            let value = expand_props(w, macros, prop, state);
+            let value = expand_props(w, macros, env, prop, state);
             let value = Some(value).filter(|v| !v.contains('$') && v.len() <= 1 << 16);
             let mut state = state.borrow_mut();
             state.0.pop();
@@ -494,10 +530,32 @@ fn expand_props(w: &Widget, macros: &Macros, text: &str, state: &Expanding) -> S
     })
 }
 
+/// An environment variable, for a macro no display sets.
+#[cfg(not(target_arch = "wasm32"))]
+fn env_var(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn env_var(_name: &str) -> Option<String> {
+    None
+}
+
+/// A macro in the name of `display`: from `macros`, else, as Phoebus does
+/// for a display's name, an environment variable, if the display is from a
+/// file (see [`expand_for`]).
+pub(crate) fn display_macro(display: &Display, macros: &Macros, name: &str) -> Option<String> {
+    macros.get(name).map(str::to_string).or_else(|| {
+        matches!(display.source, Some(Source::File(_)))
+            .then(|| env_var(name))
+            .flatten()
+    })
+}
+
 /// The display's name with `macros` expanded; a display with no name is
 /// called after its file, as in BOY and Phoebus.
 pub(crate) fn title(display: &Display, macros: &Macros) -> String {
-    let name = bob::expand(&display.name, &|n| macros.get(n).map(str::to_string));
+    let name = bob::expand(&display.name, &|n| display_macro(display, macros, n));
     if !name.trim().is_empty() {
         return name;
     }
@@ -531,6 +589,28 @@ fn default_size(kind: &str) -> (f64, f64) {
     }
 }
 
+/// A widget's x, y, width and height as its properties give them, relative
+/// to its parent.
+pub fn geometry(w: &Widget) -> [f64; 4] {
+    let (dw, dh) = default_size(&w.kind);
+    [
+        w.f64("x").unwrap_or(0.0),
+        w.f64("y").unwrap_or(0.0),
+        w.f64("width").unwrap_or(dw),
+        w.f64("height").unwrap_or(dh),
+    ]
+}
+
+/// The offset of a tabs widget's content from its top-left corner: below
+/// the tabs, or right of them when they run down the side (`direction` 1).
+pub fn tabs_inset(w: &Widget) -> (f64, f64) {
+    if w.i64("direction").unwrap_or(0) == 1 {
+        (w.f64("tab_width").unwrap_or(100.0), 0.0)
+    } else {
+        (0.0, w.f64("tab_height").unwrap_or(30.0))
+    }
+}
+
 /// Offset of a group's children from its top-left corner, by group style.
 pub fn group_inset(w: &Widget) -> (f64, f64) {
     let font = w.font("font").unwrap_or_default();
@@ -553,12 +633,18 @@ fn display_id() -> String {
 impl Builder<'_> {
     /// [`expand_for`], taking the size of the text and result from the load's
     /// macro budget; once it is spent, text is left as written.
-    fn expand_charged(&self, w: &Widget, macros: &Macros, text: &str) -> String {
+    fn expand_charged(
+        &self,
+        w: &Widget,
+        macros: &Macros,
+        base: Option<&Source>,
+        text: &str,
+    ) -> String {
         if self.budget.macros.load(Ordering::Relaxed) == 0 {
             bob::warn_spent();
             return text.to_string();
         }
-        let out = expand_for(w, macros, text);
+        let out = expand_for(w, macros, base, text);
         bob::spend(&self.budget.macros, text.len() + out.len());
         out
     }
@@ -595,7 +681,12 @@ impl Builder<'_> {
             },
             None => (display.widgets.clone(), display.width, display.height),
         };
-        let nodes = self.nodes(&widgets, (0.0, 0.0), &macros, base.as_ref(), depth);
+        let lang = if display.legacy {
+            Lang::JavaScript
+        } else {
+            Lang::Python
+        };
+        let nodes = self.nodes(&widgets, (0.0, 0.0), &macros, base.as_ref(), lang, depth);
         // Phoebus shows widgets beyond the declared display size, so grow to
         // fit them. BOY clipped them, and EDM conversions leave stray widgets
         // far outside the display, so an `.opi` keeps its declared size.
@@ -621,13 +712,14 @@ impl Builder<'_> {
         origin: (f64, f64),
         macros: &Macros,
         base: Option<&Source>,
+        lang: Lang,
         depth: u32,
     ) -> Vec<Node> {
         let mut nodes = Vec::new();
         for w in widgets {
             // Widgets past the budget are left out, after one that says so.
             let over = !Budget::take(&self.budget.widgets);
-            let mut node = self.node(w, origin, macros, base, depth);
+            let mut node = self.node(w, origin, macros, base, lang, depth);
             if over {
                 log::warn!("too many widgets; the rest are left out");
                 node.error = Some("too many widgets; the rest are left out".into());
@@ -645,17 +737,13 @@ impl Builder<'_> {
         origin: (f64, f64),
         parent: &Macros,
         base: Option<&Source>,
+        lang: Lang,
         depth: u32,
     ) -> Node {
         let macros = parent.with_budget(&w.macros(), &self.budget.macros);
-        let (dw, dh) = default_size(&w.kind);
-        let rect = [
-            origin.0 + w.f64("x").unwrap_or(0.0),
-            origin.1 + w.f64("y").unwrap_or(0.0),
-            w.f64("width").unwrap_or(dw),
-            w.f64("height").unwrap_or(dh),
-        ];
-        let ex = |t: &str| self.expand_charged(w, &macros, t);
+        let [x, y, width, height] = geometry(w);
+        let rect = [origin.0 + x, origin.1 + y, width, height];
+        let ex = |t: &str| self.expand_charged(w, &macros, base, t);
         let pv_name = w.text("pv_name").map(ex).unwrap_or_default();
         let pv = (!pv_name.is_empty()).then(|| self.pvs.subscribe(&pv_name));
         let (all_rules, all_actions) = (w.rules(), w.actions());
@@ -665,7 +753,7 @@ impl Builder<'_> {
         let rules = all_rules
             .iter()
             .take(MAX_PER_WIDGET)
-            .map(|r| CompiledRule::new(r, &ex, self.pvs))
+            .map(|r| CompiledRule::new(r, lang, &ex, self.pvs))
             .collect();
 
         let link = crate::group_link::Link::new(w, &ex, self.pvs);
@@ -744,17 +832,13 @@ impl Builder<'_> {
                     (rect[0] + ix, rect[1] + iy),
                     &node.macros,
                     base,
+                    lang,
                     depth,
                 );
             }
             "tabs" => {
-                let tab_height = w.f64("tab_height").unwrap_or(30.0);
-                let horizontal = w.i64("direction").unwrap_or(0) == 0;
-                let content = if horizontal {
-                    (rect[0], rect[1] + tab_height)
-                } else {
-                    (rect[0] + 100.0, rect[1])
-                };
+                let (ix, iy) = tabs_inset(w);
+                let content = (rect[0] + ix, rect[1] + iy);
                 node.active_tab = w.i64("active_tab").unwrap_or(0).max(0) as usize;
                 node.tabs = tab_elements(w)
                     .iter()
@@ -769,7 +853,7 @@ impl Builder<'_> {
                                     .collect()
                             })
                             .unwrap_or_default();
-                        self.nodes(&children, content, &node.macros, base, depth)
+                        self.nodes(&children, content, &node.macros, base, lang, depth)
                     })
                     .collect();
             }
@@ -782,14 +866,14 @@ impl Builder<'_> {
             "xyplot" => {
                 node.traces = crate::plot::subscribe(
                     w,
-                    &|t| self.expand_charged(w, &node.macros, t),
+                    &|t| self.expand_charged(w, &node.macros, node.base.as_ref(), t),
                     self.pvs,
                 );
             }
             "stripchart" => {
                 node.traces = crate::plot::subscribe(
                     w,
-                    &|t| self.expand_charged(w, &node.macros, t),
+                    &|t| self.expand_charged(w, &node.macros, node.base.as_ref(), t),
                     self.pvs,
                 );
                 node.series = node
@@ -1058,6 +1142,18 @@ mod tests {
         let s = Builder::new(&pvs).screen(d, &Macros::default(), None, 0);
         assert_eq!(s.nodes[0].expand("$(p38)"), "xxxx");
         assert!(s.nodes[0].expand("$(p0)").starts_with("$(p0)"));
+    }
+
+    #[test]
+    fn titles_fall_back_to_the_environment_only_from_files() {
+        let path = std::env::var("PATH").unwrap();
+        let mut d = Display::parse("<display><name>On $(PATH)</name></display>").unwrap();
+        d.source = Some(Source::parse("/tmp/x.bob"));
+        assert_eq!(title(&d, &Macros::default()), format!("On {path}"));
+        let own = Macros::from_pairs([("PATH", "mine")]);
+        assert_eq!(title(&d, &own), "On mine");
+        d.source = Some(Source::parse("https://example.com/x.bob"));
+        assert_eq!(title(&d, &Macros::default()), "On $(PATH)");
     }
 
     #[test]
@@ -1386,8 +1482,8 @@ mod tests {
             .spawn(move || {
                 let m = Macros::default();
                 (
-                    expand_for(&w, &m, "$(p0)"),
-                    expand_for(&w, &m, &format!("$(p{})", n - 3)),
+                    expand_for(&w, &m, None, "$(p0)"),
+                    expand_for(&w, &m, None, &format!("$(p{})", n - 3)),
                 )
             })
             .unwrap()
@@ -1445,6 +1541,108 @@ mod tests {
         let pvs = PvManager::new();
         let s = Builder::new(&pvs).screen(d, &Macros::from_pairs([("P", "B")]), None, 0);
         assert_eq!(s.nodes[0].pv_name, "loc://Bq");
+    }
+
+    fn build(xml: &str, pvs: &PvManager) -> Screen {
+        let d = Display::parse(&format!("<display>{xml}</display>")).unwrap();
+        Builder::new(pvs).screen(d, &Macros::default(), None, 0)
+    }
+
+    fn wait_connected(pv: &Pv) {
+        let start = std::time::Instant::now();
+        while !pv.state().connected && start.elapsed().as_secs() < 2 {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn geometry_rules_move_and_size_a_node_and_its_children() {
+        let pvs = PvManager::new();
+        let mut s = build(
+            r#"<widget type="group"><x>10</x><y>20</y><width>100</width><style>3</style>
+              <rules>
+                <rule name="x" prop_id="x" out_exp="true">
+                  <exp bool_exp="true"><expression>pv0</expression></exp>
+                  <pv_name>loc://geo_x(50)</pv_name></rule>
+                <rule name="bar" prop_id="width" out_exp="false">
+                  <exp bool_exp="pv0 &gt; 10"><value>200</value></exp>
+                  <pv_name>loc://geo_x</pv_name></rule>
+              </rules>
+              <widget type="label"><x>5</x><y>6</y></widget>
+            </widget>"#,
+            &pvs,
+        );
+        let g = &mut s.nodes[0];
+        assert_eq!(g.rect, [10.0, 20.0, 100.0, 200.0]);
+        assert_eq!(g.children[0].rect[..2], [15.0, 26.0]);
+        wait_connected(g.rules[0].pvs().first().unwrap());
+        crate::widgets::update_rules(g, &pvs);
+        assert_eq!(g.rect, [50.0, 20.0, 200.0, 200.0]);
+        assert_eq!(g.children[0].rect[..2], [55.0, 26.0]);
+        // Back where it was when the rules no longer hold.
+        g.rules[0].pvs()[0].write("5");
+        crate::widgets::update_rules(g, &pvs);
+        assert_eq!(g.rect, [5.0, 20.0, 100.0, 200.0]);
+        assert_eq!(g.children[0].rect[..2], [10.0, 26.0]);
+    }
+
+    #[test]
+    fn a_pv_name_rule_connects_the_widget_to_that_pv() {
+        let pvs = PvManager::new();
+        let mut s = build(
+            r#"<widget type="textupdate"><pv_name>loc://rule_pv_a</pv_name>
+              <rules><rule name="pv" prop_id="pv_name" out_exp="false">
+                <exp bool_exp="pv0 == 1"><value>loc://rule_pv_$(which)</value></exp>
+                <pv_name>loc://rule_pv_sel(1)</pv_name></rule></rules>
+              <macros><which>b</which></macros>
+            </widget>"#,
+            &pvs,
+        );
+        let n = &mut s.nodes[0];
+        let sel = n.rules[0].pvs()[0].clone();
+        wait_connected(&sel);
+        crate::widgets::update_rules(n, &pvs);
+        assert_eq!(n.pv_name, "loc://rule_pv_b");
+        assert_eq!(n.pv.as_ref().unwrap().name().to_string(), "loc://rule_pv_b");
+        sel.write("0");
+        crate::widgets::update_rules(n, &pvs);
+        assert_eq!(n.pv.as_ref().unwrap().name().to_string(), "loc://rule_pv_a");
+    }
+
+    #[test]
+    fn vertical_tabs_put_their_content_right_of_the_tabs() {
+        let pvs = PvManager::new();
+        let s = build(
+            r#"<widget type="tabs"><x>10</x><y>20</y><direction>1</direction><tab_width>80</tab_width>
+              <tabs><tab><name>A</name><children><widget type="label"><x>1</x><y>2</y></widget></children></tab></tabs>
+            </widget>
+            <widget type="tabs"><x>10</x><y>20</y><tab_height>25</tab_height>
+              <tabs><tab><name>A</name><children><widget type="label"><x>1</x><y>2</y></widget></children></tab></tabs>
+            </widget>"#,
+            &pvs,
+        );
+        assert_eq!(s.nodes[0].tabs[0][0].rect[..2], [91.0, 22.0]);
+        assert_eq!(s.nodes[1].tabs[0][0].rect[..2], [11.0, 47.0]);
+    }
+
+    #[test]
+    fn macros_fall_back_to_the_environment_only_from_files() {
+        let pvs = PvManager::new();
+        let mut s = build(
+            r#"<widget type="label"><text>$(PATH)</text></widget>"#,
+            &pvs,
+        );
+        let n = &mut s.nodes[0];
+        let path = std::env::var("PATH").unwrap();
+        n.base = Some(Source::parse("/tmp/x.bob"));
+        assert_eq!(n.prop("text"), path);
+        // A display's own macros come first.
+        let own = Macros::from_pairs([("PATH".to_string(), "mine".to_string())]);
+        assert_eq!(n.expand_with(&own, "$(PATH)"), "mine");
+        n.base = Some(Source::parse("https://example.com/x.bob"));
+        assert_eq!(n.prop("text"), "$(PATH)");
+        n.base = None;
+        assert_eq!(n.prop("text"), "$(PATH)");
     }
 
     #[test]

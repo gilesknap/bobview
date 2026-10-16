@@ -381,7 +381,7 @@ pub fn draw(
     let bar = w.get("color_bar");
     let bar_visible = bar
         .and_then(|b| b.child_text("visible"))
-        .map(|v| v.trim() != "false")
+        .and_then(bob::parse_bool)
         .unwrap_or(true);
     let bar_size = bar
         .and_then(|b| b.child_text("bar_size"))

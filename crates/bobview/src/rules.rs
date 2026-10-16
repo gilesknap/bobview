@@ -2,14 +2,39 @@
 //!
 //! The expression language covers what rule editors produce: `pv0`, `pvStr0`,
 //! `pvInt0`, `pvSev0`, `pvLegacySev0` (BOY's numbering), numbers, strings, `true`/`false`, comparison,
-//! arithmetic, bitwise `&`, `|` and `^`, `&&`/`and`, `||`/`or`, `!`/`not`
-//! and parentheses.
+//! arithmetic, bitwise `&`, `|`, `^`, `<<` and `>>`, `&&`/`and`,
+//! `||`/`or`, `!`/`not` and parentheses.
+//!
+//! Phoebus runs a rule as a Jython script, so a `.bob` rule's operators bind
+//! as Python's do ([`Lang::Python`]): comparisons chain (`1 < pv0 < 5`) and
+//! bind looser than the bitwise operators (`pv0 & 4 == 4`), `!`/`not` looser
+//! than comparisons (`!pv0 == 1` is `not (pv0 == 1)`), and `/` and `%` of
+//! integers floor. BOY ran rules as JavaScript, so an `.opi` rule's bind as
+//! JavaScript's do ([`Lang::JavaScript`]), as the display was written for.
+//! In both, as in Phoebus, macros in the expressions are expanded first.
+//! As Phoebus turns a rule's JavaScript-style logic into Python, a lone
+//! `=` in a `.bob` rule is `==`.
+//!
+//! The bitwise operators take the integer part of a double, so `pv0 & 4`
+//! works although `pv0` is a double. Jython raises a `TypeError` there
+//! instead, and the rule falls through to the property's own value; bobview
+//! is the more lenient.
 
 use bob::{Element, Rule};
 use pv::{Pv, PvManager};
 
+/// The language a rule's expressions are evaluated as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lang {
+    /// Phoebus (`.bob`): rules run as Jython.
+    Python,
+    /// BOY (`.opi`): rules ran as JavaScript.
+    JavaScript,
+}
+
 pub struct CompiledRule {
     pub prop_id: String,
+    lang: Lang,
     out_exp: bool,
     check_connections: bool,
     /// Each condition, the value it sets, and for an output expression
@@ -33,24 +58,32 @@ impl CompiledRule {
         &self.pvs
     }
 
-    pub fn new(rule: &Rule, expand: &dyn Fn(&str) -> String, pvs: &PvManager) -> Self {
+    /// Compile `rule`, its expressions in `lang`. `expand` expands macros
+    /// in its expressions and PV names.
+    pub fn new(rule: &Rule, lang: Lang, expand: &dyn Fn(&str) -> String, pvs: &PvManager) -> Self {
+        let parse_expanded = |text: &str| {
+            let text = expand(text);
+            let parsed = parse(&text, lang);
+            if parsed.is_none() {
+                log::warn!("rule '{}': cannot parse '{text}'", rule.name);
+            }
+            parsed
+        };
         let exprs = rule
             .exprs
             .iter()
             .map(|e| {
-                let parsed = parse(&e.condition);
-                if parsed.is_none() {
-                    log::warn!("rule '{}': cannot parse '{}'", rule.name, e.condition);
-                }
-                let out = rule.out_exp.then(|| parse(&e.value.text)).flatten();
-                if rule.out_exp && out.is_none() {
-                    log::warn!("rule '{}': cannot parse '{}'", rule.name, e.value.text);
-                }
+                let parsed = parse_expanded(&e.condition);
+                let out = rule
+                    .out_exp
+                    .then(|| parse_expanded(&e.value.text))
+                    .flatten();
                 (parsed, e.value.clone(), out)
             })
             .collect();
         Self {
             prop_id: rule.prop_id.clone(),
+            lang,
             out_exp: rule.out_exp,
             check_connections: rule.check_connections,
             exprs,
@@ -72,7 +105,10 @@ impl CompiledRule {
             }
             s.severity = pv::Severity::Invalid;
         }
-        let env = Env { states: &states };
+        let env = Env {
+            states: &states,
+            lang: self.lang,
+        };
         for (expr, value, out) in &self.exprs {
             let Some(expr) = expr else { continue };
             if !eval(expr, &env).truthy() {
@@ -144,6 +180,8 @@ fn list_item(prop: &str) -> Option<(&str, usize, Option<&str>)> {
 #[derive(Clone, Debug, PartialEq)]
 enum Val {
     Num(f64),
+    /// A Python integer (JavaScript has only [`Val::Num`]).
+    Int(i64),
     Str(String),
     Bool(bool),
 }
@@ -153,6 +191,7 @@ impl Val {
         match self {
             Val::Bool(b) => *b,
             Val::Num(n) => *n != 0.0,
+            Val::Int(n) => *n != 0,
             Val::Str(s) => !s.is_empty(),
         }
     }
@@ -160,13 +199,24 @@ impl Val {
     fn num(&self) -> f64 {
         match self {
             Val::Num(n) => *n,
+            Val::Int(n) => *n as f64,
             Val::Bool(b) => *b as i32 as f64,
             Val::Str(s) => s.trim().parse().unwrap_or(f64::NAN),
         }
     }
 
+    /// The value as a Python integer, if it is one (`bool` is one there).
+    fn int(&self) -> Option<i64> {
+        match self {
+            Val::Int(n) => Some(*n),
+            Val::Bool(b) => Some(*b as i64),
+            _ => None,
+        }
+    }
+
     fn to_text(&self) -> String {
         match self {
+            Val::Int(n) => n.to_string(),
             Val::Num(n) if n.fract() == 0.0 && n.abs() < 1e15 => format!("{}", *n as i64),
             Val::Num(n) => n.to_string(),
             Val::Str(s) => s.clone(),
@@ -182,6 +232,9 @@ enum Expr {
     Not(Box<Expr>),
     Neg(Box<Expr>),
     Bin(Box<Expr>, String, Box<Expr>),
+    /// A Python chained comparison, `a < b < c`: one more operand than
+    /// comparisons.
+    Chain(Vec<Expr>, Vec<String>),
     Call(Func, Vec<Expr>),
 }
 
@@ -305,6 +358,7 @@ fn round_to(x: f64, digits: f64) -> f64 {
 
 struct Env<'a> {
     states: &'a [pv::PvState],
+    lang: Lang,
 }
 
 impl Env<'_> {
@@ -316,27 +370,36 @@ impl Env<'_> {
         let Some(s) = idx.parse::<usize>().ok().and_then(|i| self.states.get(i)) else {
             return Val::Num(0.0);
         };
+        // `pv0` is a double (`PVUtil.getDouble`), the others integers.
         match kind {
             "pv" => match &s.value {
                 pv::Value::Str(t) => Val::Str(t.clone()),
                 v => Val::Num(v.as_f64().unwrap_or(0.0)),
             },
-            "pvInt" => Val::Num(s.value.as_i64().unwrap_or(0) as f64),
+            "pvInt" => self.int(s.value.as_i64().unwrap_or(0)),
             "pvStr" => Val::Str(s.format(None, false)),
-            "pvSev" => Val::Num(s.severity as i32 as f64),
-            "pvLegacySev" => Val::Num(legacy_severity(s.severity)),
+            "pvSev" => self.int(s.severity as i64),
+            "pvLegacySev" => self.int(legacy_severity(s.severity)),
             _ => Val::Num(0.0),
+        }
+    }
+
+    /// An integer: a Python `int`, or a JavaScript number.
+    fn int(&self, n: i64) -> Val {
+        match self.lang {
+            Lang::Python => Val::Int(n),
+            Lang::JavaScript => Val::Num(n as f64),
         }
     }
 }
 
 /// A severity as BOY numbered it: 0 none, 1 major, 2 minor, -1 invalid.
-fn legacy_severity(s: pv::Severity) -> f64 {
+fn legacy_severity(s: pv::Severity) -> i64 {
     match s {
-        pv::Severity::NoAlarm => 0.0,
-        pv::Severity::Major => 1.0,
-        pv::Severity::Minor => 2.0,
-        pv::Severity::Invalid => -1.0,
+        pv::Severity::NoAlarm => 0,
+        pv::Severity::Major => 1,
+        pv::Severity::Minor => 2,
+        pv::Severity::Invalid => -1,
     }
 }
 
@@ -345,49 +408,188 @@ fn eval(e: &Expr, env: &Env) -> Val {
         Expr::Lit(v) => v.clone(),
         Expr::Var(n) => env.var(n),
         Expr::Not(x) => Val::Bool(!eval(x, env).truthy()),
-        Expr::Neg(x) => Val::Num(-eval(x, env).num()),
+        Expr::Neg(x) => match eval(x, env) {
+            Val::Int(n) => n.checked_neg().map_or(Val::Num(-(n as f64)), Val::Int),
+            // A Python bool is an int.
+            Val::Bool(b) if env.lang == Lang::Python => Val::Int(-(b as i64)),
+            v => Val::Num(-v.num()),
+        },
         Expr::Call(f, args) => {
-            let args: Vec<f64> = args.iter().map(|a| eval(a, env).num()).collect();
-            Val::Num(f.call(&args))
+            let args: Vec<Val> = args.iter().map(|a| eval(a, env)).collect();
+            // Python's min, max and abs keep integers integers.
+            let ints: Option<Vec<i64>> = match (env.lang, f) {
+                (Lang::Python, Func::Min | Func::Max | Func::Abs) => {
+                    args.iter().map(Val::int).collect()
+                }
+                _ => None,
+            };
+            let int = ints.and_then(|ns| match f {
+                Func::Min => ns.into_iter().min(),
+                Func::Max => ns.into_iter().max(),
+                _ => ns.first()?.checked_abs(),
+            });
+            int.map_or_else(
+                || Val::Num(f.call(&args.iter().map(Val::num).collect::<Vec<_>>())),
+                Val::Int,
+            )
         }
         Expr::Bin(a, op, b) => {
             let a = eval(a, env);
-            // Short-circuit the logical operators.
+            // Short-circuit the logical operators, which give the operand
+            // that decided, in Python as in JavaScript.
             match op.as_str() {
-                "&&" => return Val::Bool(a.truthy() && eval(b, env).truthy()),
-                "||" => return Val::Bool(a.truthy() || eval(b, env).truthy()),
+                "&&" => return if a.truthy() { eval(b, env) } else { a },
+                "||" => return if a.truthy() { a } else { eval(b, env) },
                 _ => {}
             }
-            let b = eval(b, env);
-            let strings = matches!((&a, &b), (Val::Str(_), Val::Str(_)));
-            match op.as_str() {
-                "==" if strings => Val::Bool(a == b),
-                "!=" if strings => Val::Bool(a != b),
-                "==" => Val::Bool(a.num() == b.num()),
-                "!=" => Val::Bool(a.num() != b.num()),
-                "<" => Val::Bool(a.num() < b.num()),
-                ">" => Val::Bool(a.num() > b.num()),
-                "<=" => Val::Bool(a.num() <= b.num()),
-                ">=" => Val::Bool(a.num() >= b.num()),
-                "+" if strings => Val::Str(a.to_text() + &b.to_text()),
-                "+" => Val::Num(a.num() + b.num()),
-                "-" => Val::Num(a.num() - b.num()),
-                "*" => Val::Num(a.num() * b.num()),
-                "/" => Val::Num(a.num() / b.num()),
-                "%" => Val::Num(a.num() % b.num()),
-                // Bitwise, on the integer parts as JavaScript does.
-                "&" => Val::Num((a.num() as i64 & b.num() as i64) as f64),
-                "|" => Val::Num((a.num() as i64 | b.num() as i64) as f64),
-                "^" => Val::Num((a.num() as i64 ^ b.num() as i64) as f64),
-                _ => Val::Bool(false),
+            binary(&a, op, &eval(b, env), env.lang)
+        }
+        // As Python, each operand is evaluated once, left to right, and
+        // the first false comparison stops the chain.
+        Expr::Chain(operands, ops) => {
+            let mut a = eval(&operands[0], env);
+            let mut result = Val::Bool(true);
+            for (op, b) in ops.iter().zip(&operands[1..]) {
+                let b = eval(b, env);
+                result = binary(&a, op, &b, env.lang);
+                if !result.truthy() {
+                    break;
+                }
+                a = b;
             }
+            result
         }
     }
+}
+
+fn binary(a: &Val, op: &str, b: &Val, lang: Lang) -> Val {
+    let strings = matches!((a, b), (Val::Str(_), Val::Str(_)));
+    // Python keeps integers integers; JavaScript has only doubles.
+    let ints = match (lang, a.int(), b.int()) {
+        (Lang::Python, Some(x), Some(y)) => Some((x, y)),
+        _ => None,
+    };
+    let int_or = |r: Option<i64>, f: f64| r.map_or(Val::Num(f), Val::Int);
+    let (x, y) = (a.num(), b.num());
+    match op {
+        "==" if strings => Val::Bool(a == b),
+        "!=" if strings => Val::Bool(a != b),
+        "==" => Val::Bool(x == y),
+        "!=" => Val::Bool(x != y),
+        "<" if strings => Val::Bool(a.to_text() < b.to_text()),
+        ">" if strings => Val::Bool(a.to_text() > b.to_text()),
+        "<=" if strings => Val::Bool(a.to_text() <= b.to_text()),
+        ">=" if strings => Val::Bool(a.to_text() >= b.to_text()),
+        "<" => Val::Bool(x < y),
+        ">" => Val::Bool(x > y),
+        "<=" => Val::Bool(x <= y),
+        ">=" => Val::Bool(x >= y),
+        "+" if strings => Val::Str(a.to_text() + &b.to_text()),
+        "+" => match ints {
+            Some((i, j)) => int_or(i.checked_add(j), x + y),
+            None => Val::Num(x + y),
+        },
+        "-" => match ints {
+            Some((i, j)) => int_or(i.checked_sub(j), x - y),
+            None => Val::Num(x - y),
+        },
+        "*" => match ints {
+            Some((i, j)) => int_or(i.checked_mul(j), x * y),
+            None => Val::Num(x * y),
+        },
+        // Python 2 (Jython) divides integers to the floor.
+        "/" | "//" => match ints {
+            Some((_, 0)) => Val::Num(f64::NAN),
+            Some((i, j)) => int_or(floor_div(i, j), (x / y).floor()),
+            None if op == "//" => Val::Num((x / y).floor()),
+            None => Val::Num(x / y),
+        },
+        // Python's remainder has the divisor's sign, JavaScript's the
+        // dividend's.
+        "%" => match (lang, ints) {
+            (_, Some((_, 0))) => Val::Num(f64::NAN),
+            (_, Some((i, j))) => match floor_div(i, j) {
+                Some(q) => Val::Int(i - j * q),
+                None => Val::Int(0),
+            },
+            (Lang::Python, None) => Val::Num(x - y * (x / y).floor()),
+            (Lang::JavaScript, None) => Val::Num(x % y),
+        },
+        // Python's bitwise operators keep two bools a bool.
+        "&" | "|" | "^" if lang == Lang::Python => match (a, b) {
+            (Val::Bool(p), Val::Bool(q)) => Val::Bool(match op {
+                "&" => p & q,
+                "|" => p | q,
+                _ => p ^ q,
+            }),
+            _ => bitwise(op, x as i64, y as i64, lang),
+        },
+        "&" | "|" | "^" => bitwise(op, x as i64, y as i64, lang),
+        "<<" | ">>" => shift(op, x, y, lang),
+        _ => Val::Bool(false),
+    }
+}
+
+/// `i op j` for the bitwise operators, on the integer parts.
+fn bitwise(op: &str, i: i64, j: i64, lang: Lang) -> Val {
+    let r = match op {
+        "&" => i & j,
+        "|" => i | j,
+        _ => i ^ j,
+    };
+    match lang {
+        Lang::Python => Val::Int(r),
+        Lang::JavaScript => Val::Num(r as f64),
+    }
+}
+
+/// `x << y` or `x >> y`, on the integer parts. Python's integers do not
+/// overflow (a shift too big for 64 bits gives a double) and a negative
+/// count is an error (NaN here, as for a division by zero); JavaScript's are
+/// 32-bit, with the count taken modulo 32.
+fn shift(op: &str, x: f64, y: f64, lang: Lang) -> Val {
+    let left = op == "<<";
+    match lang {
+        Lang::Python => {
+            let (i, j) = (x as i64, y as i64);
+            if j < 0 {
+                return Val::Num(f64::NAN);
+            }
+            if !left {
+                return Val::Int(i >> j.min(63));
+            }
+            let r = if j < 64 {
+                i.checked_shl(j as u32)
+            } else {
+                None
+            };
+            match r.filter(|r| r >> j == i) {
+                Some(r) => Val::Int(r),
+                None => Val::Num(i as f64 * 2f64.powi(j.min(2000) as i32)),
+            }
+        }
+        Lang::JavaScript => {
+            let (i, n) = (x as i64 as i32, (y as i64 as u32) & 31);
+            Val::Num(if left { i.wrapping_shl(n) } else { i >> n } as f64)
+        }
+    }
+}
+
+/// `i // j`, rounding down as Python does (Rust rounds towards zero); none
+/// where it overflows or `j` is 0.
+fn floor_div(i: i64, j: i64) -> Option<i64> {
+    let q = i.checked_div(j)?;
+    Some(if i % j != 0 && (i < 0) != (j < 0) {
+        q - 1
+    } else {
+        q
+    })
 }
 
 #[derive(Clone, Debug, PartialEq)]
 enum Tok {
     Num(f64),
+    Int(i64),
     Str(String),
     Ident(String),
     Op(String),
@@ -396,7 +598,7 @@ enum Tok {
     Comma,
 }
 
-fn tokenize(s: &str) -> Option<Vec<Tok>> {
+fn tokenize(s: &str, lang: Lang) -> Option<Vec<Tok>> {
     let cs: Vec<char> = s.chars().collect();
     let mut i = 0;
     let mut out = Vec::new();
@@ -415,9 +617,16 @@ fn tokenize(s: &str) -> Option<Vec<Tok>> {
                 }
                 i += 1;
             }
-            out.push(Tok::Num(
-                cs[start..i].iter().collect::<String>().parse().ok()?,
-            ));
+            let text: String = cs[start..i].iter().collect();
+            out.push(
+                if let Some(hex) = text.strip_prefix("0x").or(text.strip_prefix("0X")) {
+                    Tok::Int(i64::from_str_radix(hex, 16).ok()?)
+                } else if let Ok(n) = text.parse::<i64>() {
+                    Tok::Int(n)
+                } else {
+                    Tok::Num(text.parse().ok()?)
+                },
+            );
         } else if c == '"' || c == '\'' {
             let end = cs[i + 1..].iter().position(|&d| d == c)? + i + 1;
             out.push(Tok::Str(cs[i + 1..end].iter().collect()));
@@ -450,9 +659,13 @@ fn tokenize(s: &str) -> Option<Vec<Tok>> {
             i += 1;
         } else {
             let two: String = cs[i..(i + 2).min(cs.len())].iter().collect();
-            if ["==", "!=", "<=", ">=", "&&", "||"].contains(&two.as_str()) {
+            if ["==", "!=", "<=", ">=", "&&", "||", "//", "<<", ">>"].contains(&two.as_str()) {
                 out.push(Tok::Op(two));
                 i += 2;
+            } else if c == '=' && lang == Lang::Python {
+                // As Phoebus's `javascriptToPythonLogic` makes it.
+                out.push(Tok::Op("==".into()));
+                i += 1;
             } else if "<>!+-*/%&|^".contains(c) {
                 out.push(Tok::Op(c.to_string()));
                 i += 1;
@@ -464,8 +677,8 @@ fn tokenize(s: &str) -> Option<Vec<Tok>> {
     Some(out)
 }
 
-fn parse(s: &str) -> Option<Expr> {
-    let toks = tokenize(s)?;
+fn parse(s: &str, lang: Lang) -> Option<Expr> {
+    let toks = tokenize(s, lang)?;
     // A long chain (`1+1+1+...`) builds a deep left-leaning tree that the
     // evaluator and `Drop` walk recursively, so bound the length too.
     if toks.len() > MAX_TOKENS {
@@ -474,47 +687,123 @@ fn parse(s: &str) -> Option<Expr> {
     let mut p = Parser {
         toks,
         pos: 0,
+        lang,
         depth: 0,
     };
-    let e = p.binary(0)?;
+    let e = p.or()?;
     (p.pos == p.toks.len()).then_some(e)
 }
 
 struct Parser {
     toks: Vec<Tok>,
     pos: usize,
-    /// Nesting of parentheses and prefix operators, bounded by `MAX_DEPTH`.
+    lang: Lang,
+    /// Nesting of brackets, calls and prefix operators, bounded by
+    /// `MAX_DEPTH`.
     depth: usize,
 }
 
-/// Deepest nesting of `(`, `!` and `-` a rule expression may have.
+/// Deepest nesting of brackets, calls and prefix operators (`!`, `not`,
+/// `-`, `+`) a rule expression may have.
 const MAX_DEPTH: usize = 64;
 /// Most tokens a rule expression may have.
 const MAX_TOKENS: usize = 1024;
 
-const LEVELS: &[&[&str]] = &[
-    &["||"],
-    &["&&"],
+const COMPARISONS: &[&str] = &["==", "!=", "<", ">", "<=", ">="];
+
+/// Binary operators above the logical ones, loosest first. Python puts
+/// all comparisons, which chain, below the bitwise operators.
+const PYTHON: &[&[&str]] = &[
+    COMPARISONS,
+    &["|"],
+    &["^"],
+    &["&"],
+    &["<<", ">>"],
+    &["+", "-"],
+    &["*", "/", "//", "%"],
+];
+
+const JAVASCRIPT: &[&[&str]] = &[
     &["|"],
     &["^"],
     &["&"],
     &["==", "!="],
     &["<", ">", "<=", ">="],
+    &["<<", ">>"],
     &["+", "-"],
     &["*", "/", "%"],
 ];
 
 impl Parser {
+    fn op(&self) -> Option<&str> {
+        match self.toks.get(self.pos) {
+            Some(Tok::Op(op)) => Some(op),
+            _ => None,
+        }
+    }
+
+    fn or(&mut self) -> Option<Expr> {
+        let mut lhs = self.and()?;
+        while self.op() == Some("||") {
+            self.pos += 1;
+            lhs = Expr::Bin(Box::new(lhs), "||".into(), Box::new(self.and()?));
+        }
+        Some(lhs)
+    }
+
+    fn and(&mut self) -> Option<Expr> {
+        let mut lhs = self.not()?;
+        while self.op() == Some("&&") {
+            self.pos += 1;
+            lhs = Expr::Bin(Box::new(lhs), "&&".into(), Box::new(self.not()?));
+        }
+        Some(lhs)
+    }
+
+    /// Python's `not`, looser than comparisons; JavaScript's `!` is unary.
+    fn not(&mut self) -> Option<Expr> {
+        if self.lang == Lang::Python && self.op() == Some("!") {
+            self.pos += 1;
+            return self.nested(|p| Some(Expr::Not(Box::new(p.not()?))));
+        }
+        self.binary(0)
+    }
+
+    fn levels(&self) -> &'static [&'static [&'static str]] {
+        match self.lang {
+            Lang::Python => PYTHON,
+            Lang::JavaScript => JAVASCRIPT,
+        }
+    }
+
     fn binary(&mut self, level: usize) -> Option<Expr> {
-        if level == LEVELS.len() {
+        let levels = self.levels();
+        if level == levels.len() {
             return self.unary();
         }
+        let ops = levels[level];
         let mut lhs = self.binary(level + 1)?;
-        while let Some(Tok::Op(op)) = self.toks.get(self.pos) {
-            if !LEVELS[level].contains(&op.as_str()) {
-                break;
+        // Python chains comparisons: `a < b < c` is `a < b and b < c`, with
+        // `b` evaluated once.
+        if self.lang == Lang::Python && ops == COMPARISONS {
+            let mut operands = vec![lhs];
+            let mut chain_ops = Vec::new();
+            while let Some(op) = self.op().filter(|op| ops.contains(op)).map(str::to_string) {
+                self.pos += 1;
+                chain_ops.push(op);
+                operands.push(self.binary(level + 1)?);
             }
-            let op = op.clone();
+            return Some(match chain_ops.len() {
+                0 => operands.pop()?,
+                1 => {
+                    let b = operands.pop()?;
+                    let a = operands.pop()?;
+                    Expr::Bin(Box::new(a), chain_ops.pop()?, Box::new(b))
+                }
+                _ => Expr::Chain(operands, chain_ops),
+            });
+        }
+        while let Some(op) = self.op().filter(|op| ops.contains(op)).map(str::to_string) {
             self.pos += 1;
             let rhs = self.binary(level + 1)?;
             lhs = Expr::Bin(Box::new(lhs), op, Box::new(rhs));
@@ -522,23 +811,37 @@ impl Parser {
         Some(lhs)
     }
 
-    fn unary(&mut self) -> Option<Expr> {
+    /// Parse with `f` one level deeper, failing past `MAX_DEPTH`: every
+    /// recursion back into the grammar (brackets, call arguments and prefix
+    /// operators) passes through here, so hostile nesting can't exhaust the
+    /// stack.
+    fn nested(&mut self, f: impl FnOnce(&mut Self) -> Option<Expr>) -> Option<Expr> {
         if self.depth >= MAX_DEPTH {
             return None;
         }
         self.depth += 1;
-        let e = self.unary_inner();
+        let e = f(self);
         self.depth -= 1;
         e
+    }
+
+    fn unary(&mut self) -> Option<Expr> {
+        self.nested(Self::unary_inner)
     }
 
     fn unary_inner(&mut self) -> Option<Expr> {
         let tok = self.toks.get(self.pos)?.clone();
         self.pos += 1;
+        let int = |n: i64| match self.lang {
+            Lang::Python => Val::Int(n),
+            Lang::JavaScript => Val::Num(n as f64),
+        };
         Some(match tok {
             Tok::Op(op) if op == "!" => Expr::Not(Box::new(self.unary()?)),
             Tok::Op(op) if op == "-" => Expr::Neg(Box::new(self.unary()?)),
+            Tok::Op(op) if op == "+" => self.unary()?,
             Tok::Num(n) => Expr::Lit(Val::Num(n)),
+            Tok::Int(n) => Expr::Lit(int(n)),
             Tok::Str(s) => Expr::Lit(Val::Str(s)),
             Tok::Ident(w) => match w.as_str() {
                 "true" | "True" => Expr::Lit(Val::Bool(true)),
@@ -554,7 +857,7 @@ impl Parser {
                 _ => Expr::Var(w),
             },
             Tok::Open => {
-                let e = self.binary(0)?;
+                let e = self.or()?;
                 (self.toks.get(self.pos) == Some(&Tok::Close)).then_some(())?;
                 self.pos += 1;
                 e
@@ -571,7 +874,7 @@ impl Parser {
             return Some(args);
         }
         loop {
-            args.push(self.binary(0)?);
+            args.push(self.or()?);
             let tok = self.toks.get(self.pos)?.clone();
             self.pos += 1;
             match tok {
@@ -587,7 +890,7 @@ impl Parser {
 mod tests {
     use super::*;
 
-    fn run(expr: &str, values: &[pv::Value]) -> Val {
+    fn run_as(lang: Lang, expr: &str, values: &[pv::Value]) -> Val {
         let states: Vec<pv::PvState> = values
             .iter()
             .map(|v| pv::PvState {
@@ -596,14 +899,29 @@ mod tests {
                 ..Default::default()
             })
             .collect();
-        eval(&parse(expr).expect("parses"), &Env { states: &states })
+        let env = Env {
+            states: &states,
+            lang,
+        };
+        eval(&parse(expr, lang).expect("parses"), &env)
+    }
+
+    fn run(expr: &str, values: &[pv::Value]) -> Val {
+        run_as(Lang::Python, expr, values)
+    }
+
+    fn js(expr: &str, values: &[pv::Value]) -> Val {
+        run_as(Lang::JavaScript, expr, values)
     }
 
     /// Run `f` on a thread with a small stack, so unbounded recursion fails
-    /// this test instead of passing on the test runner's larger stack.
+    /// this test instead of passing on the test runner's larger stack. An
+    /// unoptimised build needs about 2 MiB for `MAX_DEPTH` brackets, an
+    /// optimised one under 256 KiB, against the 16 MiB a display is built
+    /// on; without the bound 500 brackets need about 8 MiB.
     fn small_stack<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
         std::thread::Builder::new()
-            .stack_size(1024 * 1024)
+            .stack_size(4 * 1024 * 1024)
             .spawn(f)
             .unwrap()
             .join()
@@ -611,19 +929,61 @@ mod tests {
     }
 
     #[test]
+    fn nested_chained_comparisons_parse_in_linear_time() {
+        // Each level's middle operand is the next chain; copying it into
+        // both comparisons would double the tree at every level.
+        let mut e = String::from("1");
+        for _ in 0..40 {
+            e = format!("(0 < {e} < 2)");
+        }
+        let start = std::time::Instant::now();
+        let parsed = small_stack(move || parse(&e, Lang::Python));
+        assert!(parsed.is_some());
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        let env = Env {
+            states: &[],
+            lang: Lang::Python,
+        };
+        assert!(eval(&parsed.unwrap(), &env).truthy());
+        // The first false comparison decides, as in Python.
+        assert_eq!(run("3 > 2 > 2 > 1", &[]), Val::Bool(false));
+        assert_eq!(run("1 < 3 > 2 != 5", &[]), Val::Bool(true));
+    }
+
+    #[test]
     fn hostile_expressions_are_rejected_not_overflowed() {
-        small_stack(|| {
-            let nested = format!("{}1{}", "(".repeat(5000), ")".repeat(5000));
-            assert!(parse(&nested).is_none());
-            assert!(parse(&format!("{}1", "!".repeat(5000))).is_none());
-            assert!(parse(&format!("{}1", "-".repeat(5000))).is_none());
-            assert!(parse(&vec!["1"; 20000].join("+")).is_none());
-            let calls = format!("{}1{}", "Math.abs(".repeat(5000), ")".repeat(5000));
-            assert!(parse(&calls).is_none());
-            assert!(parse(&format!("max({})", vec!["1"; 20000].join(","))).is_none());
-            // Reasonable nesting still works.
-            let ok = format!("{}1{}", "(".repeat(30), ")".repeat(30));
-            assert!(parse(&ok).is_some());
+        // Nesting within `MAX_TOKENS`, so only the depth bound rejects it.
+        let deep = |open: &str, n: usize, close: &str| {
+            let e = format!("{}1{}", open.repeat(n), close.repeat(n));
+            assert!(
+                tokenize(&e, Lang::Python).unwrap().len() <= MAX_TOKENS,
+                "{e}"
+            );
+            e
+        };
+        small_stack(move || {
+            for lang in [Lang::Python, Lang::JavaScript] {
+                assert!(parse(&deep("(", 500, ")"), lang).is_none());
+                assert!(parse(&deep("!", 1000, ""), lang).is_none());
+                assert!(parse(&deep("-", 1000, ""), lang).is_none());
+                assert!(parse(&deep("+", 1000, ""), lang).is_none());
+                assert!(parse(&deep("Math.abs(", 300, ")"), lang).is_none());
+                // Nesting reached through a call's later arguments.
+                assert!(parse(&deep("max(1, ", 200, ")"), lang).is_none());
+                // Long chains, bounded by `MAX_TOKENS`.
+                assert!(parse(&vec!["1"; 20000].join("+"), lang).is_none());
+                assert!(parse(&vec!["1"; 20000].join("<"), lang).is_none());
+                assert!(parse(&format!("max({})", vec!["1"; 20000].join(",")), lang).is_none());
+                // Reasonable nesting still works.
+                assert!(parse(&deep("(", 30, ")"), lang).is_some());
+            }
+            // Python's `not`, which recurses outside `unary`, alone and
+            // inside brackets and chained comparisons.
+            let py = Lang::Python;
+            assert!(parse(&deep("not ", 1000, ""), py).is_none());
+            assert!(parse(&deep("(not ", 300, ")"), py).is_none());
+            assert!(parse(&deep("(1 < 2 < not ", 120, ")"), py).is_none());
+            assert!(parse(&deep("not ", 30, ""), py).is_some());
         });
     }
 
@@ -639,7 +999,106 @@ mod tests {
         assert!(run("pvSev0 == 0", &[Long(0)]).truthy());
         assert!(run("(pv0 & 4)==4", &[Long(6)]).truthy());
         assert!(!run("(pv0 & 1)!=0", &[Long(6)]).truthy());
-        assert_eq!(run("pv0 | 1 ^ 3", &[Long(4)]), Val::Num(6.0));
+        assert_eq!(run("pv0 | 1 ^ 3", &[Long(4)]), Val::Int(6));
+        assert_eq!(js("pv0 | 1 ^ 3", &[Long(4)]), Val::Num(6.0));
+    }
+
+    #[test]
+    fn bob_rules_bind_as_python() {
+        use pv::Value::*;
+        // Bitwise binds tighter than comparison: (pv0 & 4) == 4.
+        assert!(run("pv0 & 4 == 4", &[Long(6)]).truthy());
+        assert!(!run("pv0 & 4 == 4", &[Long(2)]).truthy());
+        // `not` is looser than comparison: not (pv0 == 1).
+        assert!(run("!pv0 == 1", &[Long(0)]).truthy());
+        assert!(!run("!pv0 == 1", &[Long(1)]).truthy());
+        assert!(run("not pv0 == 1", &[Long(2)]).truthy());
+        // Comparisons chain.
+        assert!(run("1 < pv0 < 5", &[Long(3)]).truthy());
+        assert!(!run("1 < pv0 < 5", &[Long(7)]).truthy());
+        assert!(!run("1 < pv0 < 5", &[Long(0)]).truthy());
+        assert!(run("0 <= pv0 < pv1 <= 10", &[Long(2), Long(4)]).truthy());
+        assert!(!run("0 <= pv0 < pv1 <= 10", &[Long(4), Long(2)]).truthy());
+        // Integer division floors, as in Jython; pv0 is a double.
+        assert_eq!(run("7 / 2", &[]), Val::Int(3));
+        assert_eq!(run("-7 / 2", &[]), Val::Int(-4));
+        assert_eq!(run("7 / -2", &[]), Val::Int(-4));
+        assert_eq!(run("-7 % 3", &[]), Val::Int(2));
+        assert_eq!(run("7 % -3", &[]), Val::Int(-2));
+        assert_eq!(run("pvInt0 / 2", &[Long(7)]), Val::Int(3));
+        assert_eq!(run("pv0 / 2", &[Long(7)]), Val::Num(3.5));
+        assert_eq!(run("7.0 / 2", &[]), Val::Num(3.5));
+        assert_eq!(run("7 // 2.0", &[]), Val::Num(3.0));
+        assert_eq!(run("-7.5 % 2", &[]), Val::Num(0.5));
+        assert_eq!(run("0x10 + 1", &[]), Val::Int(17));
+        // `and`/`or` give the operand that decided.
+        assert_eq!(
+            run("pv0 > 0 and 'up' or 'down'", &[Long(1)]),
+            Val::Str("up".into())
+        );
+        assert_eq!(
+            run("pv0 > 0 and 'up' or 'down'", &[Long(0)]),
+            Val::Str("down".into())
+        );
+        assert!(run("pvStr0 < pvStr1", &[Str("10".into()), Str("9".into())]).truthy());
+    }
+
+    #[test]
+    fn shifts_bind_as_in_python() {
+        use pv::Value::*;
+        // Looser than `+`, tighter than `&` and comparisons.
+        assert_eq!(run("1 << 2 + 1", &[]), Val::Int(8));
+        assert_eq!(run("pvInt0 & 1 << 2", &[Long(6)]), Val::Int(4));
+        assert_eq!(run("-8 >> 1", &[]), Val::Int(-4));
+        assert_eq!(run("1 << 64", &[]), Val::Num(2f64.powi(64)));
+        assert!(matches!(run("1 << -1", &[]), Val::Num(n) if n.is_nan()));
+        // As a techui-support positioner display chains them.
+        for (a, b, state) in [(0, 0, 0), (1, 0, 1), (0, 1, 2), (1, 1, 3)] {
+            let pvs = [Long(a), Long(b)];
+            assert_eq!(run("pvInt0 + (pvInt1<<1)", &pvs), Val::Int(state));
+            let mid = run(" 2 <= (pvInt0 + (pvInt1<<1)) < 4", &pvs).truthy();
+            assert_eq!(mid, (2..4).contains(&state), "{a} {b}");
+        }
+        // JavaScript's are 32-bit, below comparisons.
+        assert_eq!(js("1 << 2 + 1", &[]), Val::Num(8.0));
+        assert_eq!(js("1 << 33", &[]), Val::Num(2.0));
+        assert!(js("1 << 2 == 4", &[]).truthy());
+    }
+
+    #[test]
+    fn python_rules_turn_a_lone_equals_into_a_comparison() {
+        use pv::Value::*;
+        assert!(run("pv0 = 1", &[Long(1)]).truthy());
+        assert!(!run("pv0 = 1", &[Long(2)]).truthy());
+        assert!(run("pv0 <= 1 and pv0 >= 1 and pv0 != 2", &[Long(1)]).truthy());
+    }
+
+    #[test]
+    fn python_bools_stay_bools() {
+        // As Jython: `True & True` is a bool, which Phoebus sets a property
+        // to as Java's Boolean, "true"; `-True` is the int -1.
+        let v = run("(1 < 2) & (2 < 3)", &[]);
+        assert_eq!(v, Val::Bool(true));
+        assert_eq!(v.to_text(), "true");
+        assert_eq!(run("(1 < 2) ^ (2 < 3)", &[]), Val::Bool(false));
+        assert_eq!(run("(1 < 2) & 3", &[]), Val::Int(1));
+        assert_eq!(run("-(1 < 2)", &[]), Val::Int(-1));
+        assert_eq!(js("(1 < 2) & (2 < 3)", &[]), Val::Num(1.0));
+    }
+
+    #[test]
+    fn opi_rules_bind_as_javascript() {
+        use pv::Value::*;
+        // 4 == 4 first, then pv0 & true.
+        assert!(!js("pv0 & 4 == 4", &[Long(6)]).truthy());
+        assert!(js("pv0 & 4 == 4", &[Long(5)]).truthy());
+        // (!pv0) == 1.
+        assert!(js("!pv0 == 1", &[Long(0)]).truthy());
+        assert!(!js("!pv0 == 1", &[Long(2)]).truthy());
+        // (1 < pv0) < 5: a boolean, always below 5.
+        assert!(js("1 < pv0 < 5", &[Long(7)]).truthy());
+        assert_eq!(js("7 / 2", &[]), Val::Num(3.5));
+        assert_eq!(js("-7 % 3", &[]), Val::Num(-1.0));
     }
 
     #[test]
@@ -650,10 +1109,13 @@ mod tests {
             ..Default::default()
         };
         let states = [state(pv::Severity::Major), state(pv::Severity::Invalid)];
-        let env = Env { states: &states };
-        let ev = |e: &str| eval(&parse(e).unwrap(), &env);
-        assert_eq!(ev("pvLegacySev0"), Val::Num(1.0));
-        assert_eq!(ev("pvSev0"), Val::Num(2.0));
+        let env = Env {
+            states: &states,
+            lang: Lang::Python,
+        };
+        let ev = |e: &str| eval(&parse(e, Lang::Python).unwrap(), &env);
+        assert_eq!(ev("pvLegacySev0"), Val::Int(1));
+        assert_eq!(ev("pvSev0"), Val::Int(2));
         assert!(ev("pvLegacySev1 == -1").truthy());
     }
 
@@ -675,9 +1137,9 @@ mod tests {
             check_connections,
         };
         let pvs = PvManager::new();
-        let phoebus = CompiledRule::new(&rule(true), &|t| t.to_string(), &pvs);
+        let phoebus = CompiledRule::new(&rule(true), Lang::Python, &|t| t.to_string(), &pvs);
         assert_eq!(phoebus.evaluate(), Outcome::Keep);
-        let boy = CompiledRule::new(&rule(false), &|t| t.to_string(), &pvs);
+        let boy = CompiledRule::new(&rule(false), Lang::JavaScript, &|t| t.to_string(), &pvs);
         let Outcome::Set(el) = boy.evaluate() else {
             panic!("no outcome")
         };
@@ -705,7 +1167,7 @@ mod tests {
             check_connections: true,
         };
         let pvs = PvManager::new();
-        let compiled = CompiledRule::new(&rule(true), &|t| t.to_string(), &pvs);
+        let compiled = CompiledRule::new(&rule(true), Lang::Python, &|t| t.to_string(), &pvs);
         let start = std::time::Instant::now();
         while !compiled.pvs[0].state().connected && start.elapsed().as_secs() < 2 {
             std::thread::sleep(std::time::Duration::from_millis(5));
@@ -769,19 +1231,77 @@ mod tests {
             "Math.pow(2)",
             "Math.abs()",
         ] {
-            assert!(parse(bad).is_none(), "{bad}");
+            for lang in [Lang::Python, Lang::JavaScript] {
+                assert!(parse(bad, lang).is_none(), "{bad}");
+            }
         }
         assert!(run("Math.min(pv0, 1) == 1 && max(1, 2) > 1", &both).truthy());
-        assert!(parse("Math.nope(1)").is_none());
-        assert!(parse("Math.min(1,").is_none());
-        assert!(parse("Math.min(1 2)").is_none());
+        assert!(parse("Math.nope(1)", Lang::Python).is_none());
+        assert!(parse("Math.min(1,", Lang::Python).is_none());
+        assert!(parse("Math.min(1 2)", Lang::JavaScript).is_none());
+    }
+
+    #[test]
+    fn calls_bind_in_both_languages() {
+        use pv::Value::*;
+        let v = [Double(-3.0)];
+        // Python: calls inside chained comparisons, a loose `not`, and
+        // integer results that floor-divide.
+        assert_eq!(run("1 < abs(pv0) < 5", &v), Val::Bool(true));
+        assert_eq!(run("not max(1, 2) == 1", &[]), Val::Bool(true));
+        assert_eq!(run("max(7, 2) / 2", &[]), Val::Int(3));
+        assert_eq!(run("abs(-7) % 4", &[]), Val::Int(3));
+        assert_eq!(run("max(1, 2.5)", &[]), Val::Num(2.5));
+        assert_eq!(run("Math.min(pv0 > 0 and 1 or 2, 5)", &v), Val::Int(2));
+        assert_eq!(run("round(7 / 2)", &[]), Val::Num(3.0));
+        // JavaScript: doubles throughout.
+        assert_eq!(js("Math.max(7, 2) / 2", &[]), Val::Num(3.5));
+        assert_eq!(js("Math.abs(pv0) & 2", &v), Val::Num(2.0));
+        assert_eq!(js("Math.round(-2.5)", &[]), Val::Num(-2.0));
+        assert_eq!(js("!Math.min(0, 1) == 1", &[]), Val::Bool(true));
     }
 
     #[test]
     fn rejects_garbage() {
-        assert!(parse("pv0 ==").is_none());
-        assert!(parse("pv0 = 1").is_none());
-        assert!(parse("(pv0").is_none());
+        for lang in [Lang::Python, Lang::JavaScript] {
+            assert!(parse("pv0 ==", lang).is_none());
+            assert!(parse("(pv0", lang).is_none());
+            assert!(parse("pv0 == $(STATE)", lang).is_none());
+        }
+        assert!(parse("7 // 2", Lang::JavaScript).is_none());
+        // A lone `=` is `==` only in Python, as Phoebus makes it.
+        assert!(parse("pv0 = 1", Lang::JavaScript).is_none());
+    }
+
+    #[test]
+    fn macros_in_expressions_are_expanded() {
+        let rule = bob::Rule {
+            name: "r".into(),
+            prop_id: "visible".into(),
+            out_exp: true,
+            exprs: vec![bob::RuleExpr {
+                condition: "pv0 == $(STATE)".into(),
+                value: Element {
+                    name: "expression".into(),
+                    text: "pv0 + $(OFFSET)".into(),
+                    ..Default::default()
+                },
+            }],
+            pv_names: vec!["loc://rule_macro(2)".into()],
+            check_connections: true,
+        };
+        let expand = |t: &str| t.replace("$(STATE)", "2").replace("$(OFFSET)", "10");
+        let pvs = PvManager::new();
+        let compiled = CompiledRule::new(&rule, Lang::Python, &expand, &pvs);
+        assert!(compiled.exprs[0].0.is_some() && compiled.exprs[0].2.is_some());
+        let start = std::time::Instant::now();
+        while !compiled.pvs[0].state().connected && start.elapsed().as_secs() < 2 {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let Outcome::Set(el) = compiled.evaluate() else {
+            panic!("no outcome")
+        };
+        assert_eq!(el.text, "12");
     }
 
     #[test]
@@ -801,6 +1321,31 @@ mod tests {
         };
         apply(&mut props, &[("visible".into(), Outcome::Set(set))]);
         assert_eq!(props.child_text("visible"), Some("false"));
+    }
+
+    #[test]
+    fn output_expressions_on_boolean_properties_read_as_phoebus_does() {
+        use pv::Value::Long;
+        // `and` gives an operand, which Phoebus's boolean property takes
+        // only as 1 or 0; another number is invalid, giving the default.
+        let visible = |values: &[pv::Value]| {
+            let text = js("pv0 && pv1", values).to_text();
+            let mut el = Element::default();
+            let set = Element {
+                name: "visible".into(),
+                text,
+                ..Default::default()
+            };
+            apply(&mut el, &[("visible".into(), Outcome::Set(set))]);
+            bob::Widget::from_element(el).bool("visible")
+        };
+        assert_eq!(visible(&[Long(1), Long(1)]), Some(true));
+        assert_eq!(visible(&[Long(1), Long(0)]), Some(false));
+        assert_eq!(visible(&[Long(5), Long(3)]), None);
+        assert_eq!(
+            run("pv0 > 1 and pv1 > 1", &[Long(5), Long(3)]).to_text(),
+            "true"
+        );
     }
 
     #[test]

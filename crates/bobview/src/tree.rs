@@ -14,11 +14,11 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
-use bob::{Action, Macros, Source, Widget};
+use bob::{Action, Display, Macros, Source, Widget};
 use eframe::egui;
 
 use crate::app::Location;
-use crate::screen::{MAX_DEPTH, expand_for, find_group, tab_elements};
+use crate::screen::{MAX_DEPTH, display_macro, expand_for, find_group, tab_elements};
 
 /// What a link opens.
 #[derive(Clone, Debug, PartialEq)]
@@ -82,7 +82,7 @@ pub fn links(loc: &Location) -> Result<Links, bob::Error> {
     }
     let title = crate::screen::title(&display, &macros);
     Ok(Links {
-        name: name(&display.name, &macros).unwrap_or_else(|| title.clone()),
+        name: name(&display, &macros).unwrap_or_else(|| title.clone()),
         title,
         links,
     })
@@ -90,11 +90,12 @@ pub fn links(loc: &Location) -> Result<Links, bob::Error> {
 
 /// The words of a display's `name` that macros fill in, expanded: a
 /// device name, as in `Ion Pump - $(device)`; None if there are none.
-fn name(name: &str, macros: &Macros) -> Option<String> {
-    let words: Vec<String> = name
+fn name(display: &Display, macros: &Macros) -> Option<String> {
+    let words: Vec<String> = display
+        .name
         .split_whitespace()
         .filter(|w| w.contains("$(") || w.contains("${"))
-        .map(|w| bob::expand(w, &|n| macros.get(n).map(str::to_string)))
+        .map(|w| bob::expand(w, &|n| display_macro(display, macros, n)))
         .filter(|w| !w.contains("$(") && !w.contains("${") && !w.trim().is_empty())
         .collect();
     (!words.is_empty()).then(|| words.join(" "))
@@ -116,7 +117,7 @@ fn walk(
         let actions = w.actions();
         for action in &actions {
             if let Some(target) = target(w, &macros, base, action) {
-                let label = label(w, &macros, action, actions.len(), &target);
+                let label = label(w, &macros, base, action, actions.len(), &target);
                 out.push(Link {
                     label,
                     target,
@@ -124,7 +125,7 @@ fn walk(
                 });
             }
         }
-        let prop = |name: &str| expand_for(w, &macros, w.text(name).unwrap_or(""));
+        let prop = |name: &str| expand_for(w, &macros, base, w.text(name).unwrap_or(""));
         match w.kind.as_str() {
             "group" => done = done.and(walk(&w.children, &macros, base, depth, out)),
             "tabs" => {
@@ -155,8 +156,9 @@ fn walk(
             // Every tab, as each is a display a click away.
             "navtabs" => {
                 for tab in tab_elements(w) {
-                    let text =
-                        |name: &str| expand_for(w, &macros, tab.child_text(name).unwrap_or(""));
+                    let text = |name: &str| {
+                        expand_for(w, &macros, base, tab.child_text(name).unwrap_or(""))
+                    };
                     let own = tab.child("macros").map(Macros::from_element);
                     let macros = macros.with(&own.unwrap_or_default());
                     done = done.and(embed(
@@ -220,10 +222,10 @@ fn target(w: &Widget, macros: &Macros, base: Option<&Source>, action: &Action) -
         } => {
             let own = Macros::from_pairs(
                 own.iter()
-                    .map(|(k, v)| (k.to_string(), expand_for(w, macros, v))),
+                    .map(|(k, v)| (k.to_string(), expand_for(w, macros, base, v))),
             );
             let macros = macros.with(&own);
-            let file = expand_for(w, &macros, file);
+            let file = expand_for(w, &macros, base, file);
             (!file.trim().is_empty()).then(|| {
                 Target::Display(Location {
                     source: resolve(base, &file),
@@ -235,12 +237,12 @@ fn target(w: &Widget, macros: &Macros, base: Option<&Source>, action: &Action) -
         Action::Command {
             command, directory, ..
         } if !cfg!(target_arch = "wasm32") => {
-            let command = expand_for(w, macros, command);
+            let command = expand_for(w, macros, base, command);
             // A StripTool launcher opens a trend, not a display.
             if command.trim().is_empty() || bob::strip_tool_pvs(&command).is_some() {
                 return None;
             }
-            let directory = expand_for(w, macros, directory);
+            let directory = expand_for(w, macros, base, directory);
             let directory = (!directory.trim().is_empty()).then(|| resolve(base, &directory));
             Some(Target::Command {
                 base: base.cloned(),
@@ -255,15 +257,22 @@ fn target(w: &Widget, macros: &Macros, base: Option<&Source>, action: &Action) -
 /// What a link is called: its widget's text, when that is its only action,
 /// else the action's description, else the widget's text, else the file or
 /// command.
-fn label(w: &Widget, macros: &Macros, action: &Action, actions: usize, target: &Target) -> String {
+fn label(
+    w: &Widget,
+    macros: &Macros,
+    base: Option<&Source>,
+    action: &Action,
+    actions: usize,
+    target: &Target,
+) -> String {
     let own = ["text", "label"]
         .iter()
         .find_map(|p| w.text(p))
         .filter(|t| !t.contains("$(actions)"))
-        .map(|t| one_line(&expand_for(w, macros, t)))
+        .map(|t| one_line(&expand_for(w, macros, base, t)))
         .filter(|t| !t.is_empty());
-    let description =
-        Some(one_line(&expand_for(w, macros, action.description()))).filter(|t| !t.is_empty());
+    let description = Some(one_line(&expand_for(w, macros, base, action.description())))
+        .filter(|t| !t.is_empty());
     let label = if actions == 1 {
         own.or(description)
     } else {
@@ -970,7 +979,11 @@ mod tests {
 
     #[test]
     fn names_a_display_by_what_macros_fill_in_its_title() {
-        use super::name;
+        use bob::Display;
+        let name = |text: &str, macros: &Macros| {
+            let d = Display::parse(&format!("<display><name>{text}</name></display>")).unwrap();
+            super::name(&d, macros)
+        };
         let macros = Macros::from_pairs([("dom", "LB"), ("device", "LB-VA-IONP-04"), ("id", "02")]);
         assert_eq!(
             name("Ion Pump Controller - $(device)", &macros).as_deref(),
@@ -983,5 +996,10 @@ mod tests {
         // Nothing filled in, or a macro not set: the title instead.
         assert_eq!(name("Linac Vacuum", &macros), None);
         assert_eq!(name("Space $(nope)", &macros), None);
+        // An environment variable, in a display from a file.
+        let mut d = Display::parse("<display><name>Home $(PATH)</name></display>").unwrap();
+        assert_eq!(super::name(&d, &macros), None);
+        d.source = Some(Source::parse("/tmp/x.bob"));
+        assert_eq!(super::name(&d, &macros), std::env::var("PATH").ok());
     }
 }

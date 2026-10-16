@@ -9,6 +9,10 @@ pub enum Scheme {
     Sim,
     /// A formula over other PVs: `=expr` as in BOY, or `eq://expr`.
     Formula,
+    /// A kind of PV bobview does not serve, such as `sys://` or an unknown
+    /// `scheme://` prefix: it never connects, rather than being looked up
+    /// as a Channel Access name.
+    Unsupported,
 }
 
 impl Scheme {
@@ -19,6 +23,7 @@ impl Scheme {
             Scheme::Loc => "loc",
             Scheme::Sim => "sim",
             Scheme::Formula => "eq",
+            Scheme::Unsupported => "",
         }
     }
 }
@@ -32,8 +37,9 @@ pub struct PvName {
 }
 
 impl PvName {
-    /// Parse a name; one without a known prefix is Channel Access, as in
-    /// Phoebus, and one starting `=` is a formula, as in BOY.
+    /// Parse a name; one without a prefix is Channel Access, as in Phoebus,
+    /// and one starting `=` is a formula, as in BOY. An unknown `scheme://`
+    /// prefix is [`Scheme::Unsupported`].
     pub fn parse(name: &str) -> Self {
         let name = name.trim();
         if let Some(expr) = name.strip_prefix('=') {
@@ -58,6 +64,12 @@ impl PvName {
                     pv: rest.trim().to_string(),
                 };
             }
+        }
+        if name.split_once("://").is_some_and(|(p, _)| is_scheme(p)) {
+            return Self {
+                scheme: Scheme::Unsupported,
+                pv: name.to_string(),
+            };
         }
         Self {
             scheme: Scheme::Ca,
@@ -89,7 +101,7 @@ impl PvName {
     pub fn key(&self) -> String {
         match self.scheme {
             Scheme::Loc => format!("loc://{}", self.base()),
-            Scheme::Formula => self.to_string(),
+            Scheme::Formula | Scheme::Unsupported => self.to_string(),
             _ => format!("{}://{}", self.scheme.prefix(), self.pv),
         }
     }
@@ -99,9 +111,17 @@ impl fmt::Display for PvName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.scheme {
             Scheme::Formula => write!(f, "={}", self.pv),
+            Scheme::Unsupported => f.write_str(&self.pv),
             _ => write!(f, "{}://{}", self.scheme.prefix(), self.pv),
         }
     }
+}
+
+/// An RFC 3986 scheme: a letter, then letters, digits, `+`, `-` or `.`.
+fn is_scheme(p: &str) -> bool {
+    p.starts_with(|c: char| c.is_ascii_alphabetic())
+        && p.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
 }
 
 /// Split an argument list on commas that are outside double quotes.
@@ -161,5 +181,19 @@ mod tests {
         assert_eq!(n.pv, "(pv(\"X\")*1000)");
         assert_eq!(n.to_string(), "=(pv(\"X\")*1000)");
         assert_eq!(n.key(), PvName::parse("eq://(pv(\"X\")*1000)").key());
+    }
+
+    #[test]
+    fn unknown_schemes_are_unsupported() {
+        for name in ["sys://time", "mqtt://x/y", "mqtt+ssl://x"] {
+            let n = PvName::parse(name);
+            assert_eq!(n.scheme, Scheme::Unsupported, "{name}");
+            assert_eq!(n.to_string(), name);
+        }
+        // A colon in a CA name is not a scheme.
+        assert_eq!(PvName::parse("BL01:A://B").scheme, Scheme::Ca);
+        assert_eq!(PvName::parse("BL01T-MO-01:X").scheme, Scheme::Ca);
+        assert_eq!(PvName::parse("pva://X").scheme, Scheme::Pva);
+        assert_eq!(PvName::parse("eq://1").scheme, Scheme::Formula);
     }
 }

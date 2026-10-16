@@ -32,6 +32,8 @@ mod sim;
 mod value;
 
 use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
@@ -58,7 +60,6 @@ pub type Listener = Arc<ListenFn>;
 pub type ListenFn = dyn Fn(&PvState) + Send + Sync;
 
 /// A write of text to a PV.
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Put {
     pub text: String,
@@ -106,14 +107,30 @@ impl Control {
 }
 
 /// Writes to one PV that may wait for the backend at once; more are
-/// refused, rather than queued to be applied late.
-#[cfg(not(target_arch = "wasm32"))]
+/// refused, rather than queued to be applied late. Writes made before the
+/// backend task starts count toward it too.
 pub(crate) const WRITE_QUEUE: usize = 16;
 
 /// The queue of a backend's writes, for [`Writer::Channel`].
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn write_queue() -> (mpsc::Sender<Put>, mpsc::Receiver<Put>) {
     mpsc::channel(WRITE_QUEUE)
+}
+
+/// A write's last step, taken once the writer lock is released.
+enum After {
+    /// The backend task has stopped: the write is lost.
+    #[cfg(not(target_arch = "wasm32"))]
+    Stopped(Put),
+    /// The PV connected once and has since dropped: refused at once.
+    #[cfg(not(target_arch = "wasm32"))]
+    Dropped(Put),
+    /// [`WRITE_QUEUE`] writes are already waiting: refused.
+    Full(Put),
+    /// Set a local PV's value.
+    Local(Put),
+    /// The PV takes no writes.
+    Refused,
 }
 
 thread_local! {
@@ -187,6 +204,15 @@ pub(crate) struct Shared {
     /// How many times the state has changed.
     version: AtomicU64,
     writer: Mutex<Option<Writer>>,
+    /// Writes made before the backend task set the writer, sent once it does.
+    pending: Mutex<Vec<Put>>,
+    /// Whether a backend task sets a writer (`ca://`, `pva://`), so writes
+    /// made before then wait for it.
+    backend_writes: bool,
+    /// Writes accepted but not yet answered by [`Shared::write_result`]: the
+    /// task serving the PV outlives its last [`Pv`] until they are.
+    #[cfg(not(target_arch = "wasm32"))]
+    in_flight: AtomicUsize,
     notify: Arc<RwLock<Option<Notifier>>>,
     listeners: Mutex<Vec<Weak<ListenFn>>>,
     /// Set (under the state lock) once the PV has first connected.
@@ -201,6 +227,10 @@ impl Shared {
             state: Mutex::new(PvState::default()),
             version: AtomicU64::new(0),
             writer: Mutex::new(None),
+            pending: Mutex::new(Vec::new()),
+            backend_writes: matches!(name.scheme, Scheme::Ca | Scheme::Pva),
+            #[cfg(not(target_arch = "wasm32"))]
+            in_flight: AtomicUsize::new(0),
             notify,
             listeners: Mutex::new(Vec::new()),
             was_connected: AtomicBool::new(false),
@@ -255,11 +285,29 @@ impl Shared {
     /// A put failed (or worked, with `None`): remember why, and tell the user.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn write_result(&self, text: &str, error: Option<String>) {
+        self.answered();
         if let Some(e) = &error {
             self.ctl
                 .notify(format!("{}: write '{text}' failed: {e}", self.name));
         }
         self.update(|s| s.write_error = error);
+    }
+
+    /// A write counted in flight is done with: sent, failed or refused.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn answered(&self) {
+        let mut n = self.in_flight.load(Ordering::Acquire);
+        while n > 0 {
+            match self.in_flight.compare_exchange_weak(
+                n,
+                n - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(now) => n = now,
+            }
+        }
     }
 
     /// A put that the server does not answer was sent, or failed to be: a
@@ -269,6 +317,8 @@ impl Shared {
     pub(crate) fn write_sent(&self, text: &str, error: Option<String>) {
         if error.is_some() {
             self.write_result(text, error);
+        } else {
+            self.answered();
         }
     }
 
@@ -284,8 +334,125 @@ impl Shared {
         !dropped
     }
 
+    /// Whether it is connected, without copying its state.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn connected(&self) -> bool {
+        self.state.lock().connected
+    }
+
+    /// Set where writes go, and send any made before now.
     pub(crate) fn set_writer(&self, writer: Writer) {
-        *self.writer.lock() = Some(writer);
+        let mut slot = self.writer.lock();
+        *slot = Some(writer);
+        let pending = std::mem::take(&mut *self.pending.lock());
+        // Sent before the lock is released, so later writes follow them.
+        let mut failed: Vec<(Put, &str)> = Vec::new();
+        for put in pending {
+            match slot.as_ref() {
+                // Already counted in flight, so a failure is answered
+                // through `write_result`, which uncounts it.
+                #[cfg(not(target_arch = "wasm32"))]
+                Some(Writer::Channel(tx)) => match tx.try_send(put) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(put)) => {
+                        failed.push((put, "too many writes waiting"))
+                    }
+                    Err(mpsc::error::TrySendError::Closed(put)) => {
+                        failed.push((put, "the PV's connection has stopped"))
+                    }
+                },
+                #[cfg(target_arch = "wasm32")]
+                Some(Writer::Pvws(name)) => {
+                    pvws::write(name, &self.snapshot(), put.text, put.long_string)
+                }
+                // A backend sets only a channel (or the socket).
+                _ => failed.push((put, "cannot be written")),
+            }
+        }
+        drop(slot);
+        for (put, why) in failed {
+            #[cfg(not(target_arch = "wasm32"))]
+            self.write_result(&put.text, Some(why.into()));
+            #[cfg(target_arch = "wasm32")]
+            self.ctl
+                .notify(format!("{}: write '{}' failed: {why}", self.name, put.text));
+        }
+    }
+
+    /// Send a new write through `writer`; with none yet, a `ca://` or
+    /// `pva://` PV (whose task is still starting) keeps it until there is
+    /// one. A write is counted in flight only once queued. Returns what is
+    /// left to do once the writer lock is released, so that it and the
+    /// state lock never nest.
+    fn send(&self, writer: Option<&Writer>, put: Put) -> Option<After> {
+        match writer {
+            #[cfg(not(target_arch = "wasm32"))]
+            Some(Writer::Channel(tx)) => {
+                // Counted before the task can answer it, and uncounted if
+                // it was not queued; a stopped task's write is answered (and
+                // uncounted) by `finish`.
+                self.in_flight.fetch_add(1, Ordering::AcqRel);
+                // The task serving the PV holds the receiver until it stops.
+                match tx.try_send(put) {
+                    Ok(()) => None,
+                    Err(mpsc::error::TrySendError::Full(put)) => {
+                        self.in_flight.fetch_sub(1, Ordering::AcqRel);
+                        Some(After::Full(put))
+                    }
+                    Err(mpsc::error::TrySendError::Closed(put)) => Some(After::Stopped(put)),
+                }
+            }
+            Some(Writer::Local) => Some(After::Local(put)),
+            #[cfg(target_arch = "wasm32")]
+            Some(Writer::Pvws(name)) => {
+                pvws::write(name, &self.snapshot(), put.text, put.long_string);
+                None
+            }
+            None if self.backend_writes => {
+                let mut pending = self.pending.lock();
+                if pending.len() >= WRITE_QUEUE {
+                    return Some(After::Full(put));
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                self.in_flight.fetch_add(1, Ordering::AcqRel);
+                pending.push(put);
+                None
+            }
+            None => Some(After::Refused),
+        }
+    }
+
+    fn finish(&self, after: After) {
+        match after {
+            #[cfg(not(target_arch = "wasm32"))]
+            After::Stopped(put) => {
+                self.write_result(&put.text, Some("the PV's connection has stopped".into()))
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            After::Dropped(put) => self.ctl.notify(format!(
+                "{}: not writing '{}', not connected",
+                self.name, put.text
+            )),
+            After::Full(put) => self.ctl.notify(format!(
+                "{}: not writing '{}', {WRITE_QUEUE} writes still waiting",
+                self.name, put.text
+            )),
+            After::Local(Put { text, long_string }) => self.update(|s| {
+                // Each write is a new sample, though its value be the same.
+                s.timestamp = Some(web_time::SystemTime::now());
+                s.value = if long_string && s.value.is_numeric_array() {
+                    Value::LongArray(
+                        long_string_bytes(&text, None)
+                            .iter()
+                            .map(|b| *b as i64)
+                            .collect(),
+                    )
+                } else {
+                    local::apply(&s.value, &s.labels, &text)
+                }
+            }),
+            After::Refused => self.ctl.notify(format!("{} cannot be written", self.name)),
+        }
     }
 }
 
@@ -295,11 +462,20 @@ type Task = tokio::task::JoinHandle<()>;
 #[cfg(target_arch = "wasm32")]
 type Task = pvws::Task;
 
-/// One subscription; the backend task stops when the last [`Pv`] is dropped.
+/// How long the task of a dropped PV may go on to send writes made on it,
+/// as a write to a PV that is not connected yet must first find it.
+#[cfg(not(target_arch = "wasm32"))]
+const WRITE_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// One subscription; the backend task stops when the last [`Pv`] is dropped,
+/// or once the writes made on it are sent.
 struct Entry {
     name: PvName,
     shared: Arc<Shared>,
     task: Option<Task>,
+    /// The runtime the task runs on, to finish its writes after the drop.
+    #[cfg(not(target_arch = "wasm32"))]
+    rt: tokio::runtime::Handle,
     /// A formula's inputs, followed for as long as it is held.
     #[cfg_attr(not(test), allow(dead_code, reason = "only held"))]
     formula: Option<Arc<formula::Formula>>,
@@ -307,9 +483,25 @@ struct Entry {
 
 impl Drop for Entry {
     fn drop(&mut self) {
-        if let Some(task) = self.task.take() {
-            task.abort();
+        let Some(task) = self.task.take() else {
+            return;
+        };
+        // A write is often made on a PV subscribed just for it and dropped
+        // straight after: let the task send it (or give up) first.
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.shared.in_flight.load(Ordering::Acquire) > 0 {
+            let shared = self.shared.clone();
+            self.rt.spawn(async move {
+                let start = tokio::time::Instant::now();
+                while shared.in_flight.load(Ordering::Acquire) > 0 && start.elapsed() < WRITE_GRACE
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                task.abort();
+            });
+            return;
         }
+        task.abort();
     }
 }
 
@@ -412,61 +604,23 @@ impl Pv {
         // Read first: the state and writer locks never nest.
         #[cfg(not(target_arch = "wasm32"))]
         let dropped = shared.dropped();
-        // Released before the state changes, so the two locks never nest.
+        let put = Put {
+            text: value,
+            long_string,
+        };
         let writer = shared.writer.lock();
-        match writer.as_ref() {
+        let after = match writer.as_ref() {
+            // A write to a PV that has gone would wait for it to come back,
+            // and land late, perhaps long after the user moved on. One that
+            // has not connected yet is queued: it was most likely just
+            // subscribed, and the backend waits a while for it.
             #[cfg(not(target_arch = "wasm32"))]
-            Some(Writer::Channel(tx)) => {
-                // A write to a PV that has gone would wait for it to come
-                // back, and land late, perhaps long after the user moved on.
-                // One that has not connected yet is queued: it was most
-                // likely just subscribed.
-                if dropped {
-                    drop(writer);
-                    shared.ctl.notify(format!(
-                        "{}: not writing '{value}', not connected",
-                        shared.name
-                    ));
-                    return;
-                }
-                // The task serving the PV holds the receiver until it stops.
-                let sent = tx.try_send(Put {
-                    text: value,
-                    long_string,
-                });
-                drop(writer);
-                match sent {
-                    Ok(()) => {}
-                    Err(mpsc::error::TrySendError::Full(put)) => shared.ctl.notify(format!(
-                        "{}: not writing '{}', {WRITE_QUEUE} writes still waiting",
-                        shared.name, put.text
-                    )),
-                    Err(mpsc::error::TrySendError::Closed(put)) => shared
-                        .write_result(&put.text, Some("the PV's connection has stopped".into())),
-                }
-            }
-            Some(Writer::Local) => {
-                drop(writer);
-                shared.update(|s| {
-                    // Each write is a new sample, though its value be the same.
-                    s.timestamp = Some(web_time::SystemTime::now());
-                    s.value = if long_string && s.value.is_numeric_array() {
-                        Value::LongArray(
-                            long_string_bytes(&value, None)
-                                .iter()
-                                .map(|b| *b as i64)
-                                .collect(),
-                        )
-                    } else {
-                        local::apply(&s.value, &s.labels, &value)
-                    }
-                })
-            }
-            #[cfg(target_arch = "wasm32")]
-            Some(Writer::Pvws(name)) => pvws::write(name, &shared.snapshot(), value, long_string),
-            None => shared
-                .ctl
-                .notify(format!("{} cannot be written", shared.name)),
+            Some(Writer::Channel(_)) if dropped => Some(After::Dropped(put)),
+            w => shared.send(w, put),
+        };
+        drop(writer);
+        if let Some(after) = after {
+            shared.finish(after);
         }
     }
 }
@@ -612,6 +766,13 @@ impl PvManager {
                 let f = formula::Formula::new(&name, shared.clone(), Arc::downgrade(&self.inner));
                 (shared, None, Some(f))
             }
+            Scheme::Unsupported => {
+                let shared = shared();
+                log::warn!("{name}: PV type not supported");
+                // New, so no one is listening or drawing it yet.
+                shared.state.lock().error = Some("PV type not supported".into());
+                (shared, None, None)
+            }
             _ => {
                 let shared = shared();
                 let task = self.spawn_backend(&name, shared.clone());
@@ -622,6 +783,8 @@ impl PvManager {
             name,
             shared,
             task,
+            #[cfg(not(target_arch = "wasm32"))]
+            rt: self.runtime().handle().clone(),
             formula: formula.clone(),
         });
         entries.insert(key, Arc::downgrade(&entry));
@@ -651,7 +814,9 @@ impl PvManager {
         Some(match name.scheme {
             Scheme::Sim => pvws::spawn(sim::run(name.clone(), shared)),
             Scheme::Ca | Scheme::Pva => pvws::subscribe(name, shared),
-            Scheme::Loc | Scheme::Formula => unreachable!("local PVs and formulas have no task"),
+            Scheme::Loc | Scheme::Formula | Scheme::Unsupported => {
+                unreachable!("local, formula and unsupported PVs have no task")
+            }
         })
     }
 
@@ -683,7 +848,9 @@ impl PvManager {
                     pva::run(client, &pv, shared).await
                 }))
             }
-            Scheme::Loc | Scheme::Formula => unreachable!("local PVs and formulas have no task"),
+            Scheme::Loc | Scheme::Formula | Scheme::Unsupported => {
+                unreachable!("local, formula and unsupported PVs have no task")
+            }
         }
     }
 }
@@ -795,6 +962,7 @@ mod tests {
             name,
             shared,
             task: None,
+            rt: pvs.runtime().handle().clone(),
             formula: None,
         };
         (Pv(Arc::new(entry)), rx)
@@ -811,6 +979,9 @@ mod tests {
         let (n, text) = pvs.notice();
         assert_eq!(n, 1);
         assert!(text.contains("not connected"), "{text}");
+        // Refused, so not counted as in flight: a dropped handle need not
+        // wait for it.
+        assert_eq!(pv.0.shared.in_flight.load(Ordering::Acquire), 0);
         // And one that disconnects while a write waits reports it.
         assert!(!pv.0.shared.can_write("1"));
         assert_eq!(pv.state().write_error.as_deref(), Some("not connected"));
@@ -854,6 +1025,8 @@ mod tests {
         }
         assert_eq!(got.len(), WRITE_QUEUE);
         assert_eq!(got[0], "0");
+        // Only those queued are in flight.
+        assert_eq!(pv.0.shared.in_flight.load(Ordering::Acquire), WRITE_QUEUE);
         drop(rx);
         pv.write("x");
         assert!(pvs.notice().1.contains("stopped"));
@@ -918,5 +1091,83 @@ mod tests {
             pv.listen(&listener);
         }
         assert_eq!(pv.0.shared.listeners.lock().len(), 1);
+    }
+
+    #[test]
+    fn a_write_made_before_the_writer_is_sent_and_counted_once() {
+        let shared = Shared::new(
+            &PvName::parse("ca://early"),
+            Arc::new(RwLock::new(None)),
+            Arc::default(),
+        );
+        let put = |text: &str| Put {
+            text: text.into(),
+            long_string: false,
+        };
+        assert!(shared.send(None, put("1")).is_none());
+        assert_eq!(shared.in_flight.load(Ordering::Acquire), 1);
+        let (tx, mut rx) = write_queue();
+        shared.set_writer(Writer::Channel(tx));
+        assert_eq!(rx.try_recv().ok(), Some(put("1")));
+        assert_eq!(shared.in_flight.load(Ordering::Acquire), 1);
+        shared.write_result("1", None);
+        assert_eq!(shared.in_flight.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn a_sent_ca_put_is_no_longer_in_flight() {
+        let pvs = PvManager::new();
+        let (pv, mut rx) = queued(&pvs, true);
+        let shared = &pv.0.shared;
+        shared.write_result("0", Some("refused".into()));
+        pv.write("1");
+        assert_eq!(shared.in_flight.load(Ordering::Acquire), 1);
+        let put = rx.try_recv().unwrap();
+        // As the CA task answers a plain write that was sent.
+        shared.write_sent(&put.text, None);
+        assert_eq!(shared.in_flight.load(Ordering::Acquire), 0);
+        // Sent is not confirmed: the earlier failure still shows.
+        assert_eq!(pv.state().write_error.as_deref(), Some("refused"));
+    }
+
+    #[test]
+    fn writes_made_before_the_writer_is_sent_are_bounded() {
+        let pvs = PvManager::new();
+        let shared = Shared::new(
+            &PvName::parse("ca://early_cap"),
+            pvs.inner.notify.clone(),
+            pvs.inner.ctl.clone(),
+        );
+        for i in 0..WRITE_QUEUE + 2 {
+            let put = Put {
+                text: i.to_string(),
+                long_string: false,
+            };
+            if let Some(after) = shared.send(None, put) {
+                shared.finish(after);
+            }
+        }
+        let (n, text) = pvs.notice();
+        assert_eq!(n, 2);
+        assert!(text.contains("writes still waiting"), "{text}");
+        assert_eq!(shared.in_flight.load(Ordering::Acquire), WRITE_QUEUE);
+        let (tx, mut rx) = write_queue();
+        shared.set_writer(Writer::Channel(tx));
+        let mut got = 0;
+        while rx.try_recv().is_ok() {
+            got += 1;
+        }
+        assert_eq!(got, WRITE_QUEUE);
+    }
+
+    #[test]
+    fn unsupported_pvs_never_connect_and_refuse_writes() {
+        let pvs = PvManager::new();
+        let pv = pvs.subscribe("sys://time");
+        let s = pv.state();
+        assert!(!s.connected);
+        assert!(s.error.is_some());
+        pv.write("1");
+        assert!(pvs.notice().1.contains("cannot be written"));
     }
 }

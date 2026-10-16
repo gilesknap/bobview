@@ -7,6 +7,7 @@ use eframe::egui::{
 };
 use pv::{PvManager, PvState, Value};
 
+pub(crate) use crate::format::format_value;
 use crate::rules::{self, Outcome};
 use crate::screen::{Builder, Node, Screen, group_inset, tab_elements};
 use crate::style::{self, View, color, named, severity_color};
@@ -114,7 +115,11 @@ pub fn draw_nodes(ui: &mut Ui, nodes: &mut [Node], cx: &mut Cx, id: Id) {
     }
 }
 
-fn update_rules(node: &mut Node) {
+/// Apply the outcomes of the node's rules to its properties, when they
+/// change. A rule on `x`, `y`, `width` or `height` moves or sizes the
+/// widget (and its children with it), and one on `pv_name` connects it to
+/// the PV named.
+pub(crate) fn update_rules(node: &mut Node, pvs: &pv::PvManager) {
     if node.rules.is_empty() {
         return;
     }
@@ -138,14 +143,24 @@ fn update_rules(node: &mut Node) {
         let orig = node.orig_props.get_or_insert_with(|| node.w.props.clone());
         let mut props = orig.clone();
         rules::apply(&mut props, &outcomes);
+        let before = crate::screen::geometry(&node.w);
         node.w.props = props;
         node.rule_outcomes = outcomes;
+        let after = crate::screen::geometry(&node.w);
+        if before != after {
+            node.reshape(before, after);
+        }
+        let pv_name = node.prop("pv_name");
+        if pv_name != node.pv_name {
+            node.pv = (!pv_name.is_empty()).then(|| pvs.subscribe(&pv_name));
+            node.pv_name = pv_name;
+        }
     }
 }
 
 fn draw_node(ui: &mut Ui, node: &mut Node, cx: &mut Cx, id: Id) {
     crate::group_link::update(node, cx.pvs);
-    update_rules(node);
+    update_rules(node, cx.pvs);
     if node.w.bool("visible") == Some(false) {
         return;
     }
@@ -631,38 +646,6 @@ const STRING_FORMAT: i64 = 6;
 /// when its `format` is string: see [`pv::Pv::write_long_string`].
 fn writes_long_string(w: &Widget) -> bool {
     w.i64("format") == Some(STRING_FORMAT)
-}
-
-/// Value text as Phoebus formats it for the widget's `format` and `precision`.
-pub(crate) fn format_value(w: &Widget, s: &PvState) -> String {
-    let precision = w.i64("precision").filter(|p| *p >= 0).map(|p| p as i32);
-    let units = w.bool("show_units").unwrap_or(true);
-    let format = w.i64("format").unwrap_or(0);
-    match (format, &s.value) {
-        (STRING_FORMAT, v) if v.is_numeric_array() => v.as_long_string().unwrap_or_default(),
-        // A number as the character of its low byte, as Phoebus shows it.
-        (STRING_FORMAT, Value::Long(_) | Value::Double(_)) => {
-            let byte = s.value.as_i64().unwrap_or(0) as u8;
-            let text = pv::long_string([byte]);
-            if units && !s.units.is_empty() {
-                format!("{text} {}", s.units)
-            } else {
-                text
-            }
-        }
-        (4, v) if v.as_i64().is_some() => format!("0x{:X}", v.as_i64().unwrap_or(0)),
-        (10, v) if v.as_i64().is_some() => format!("0b{:b}", v.as_i64().unwrap_or(0)),
-        (2, Value::Double(v)) => {
-            let p = precision.or(s.precision).unwrap_or(3).max(0) as usize;
-            let text = format!("{v:.p$E}");
-            if units && !s.units.is_empty() {
-                format!("{text} {}", s.units)
-            } else {
-                text
-            }
-        }
-        _ => s.format(precision, units),
-    }
 }
 
 /// The `bit` property: Phoebus defaults it to 0 for checkbox, slide_button and
@@ -1170,7 +1153,8 @@ fn text_entry(
             if writes_long_string(&node.w) {
                 write_with(node, |pv| pv.write_long_string(buf));
             } else {
-                write(node, buf.trim().to_string());
+                // The edit starts from the text shown, units and all.
+                write(node, crate::format::entry_value(&w, state, &buf));
             }
         }
         node.edit = None;
@@ -2258,17 +2242,25 @@ fn tabs(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut Cx, id: Id) {
         .collect();
     let tab_h = w.f64("tab_height").unwrap_or(30.0) as f32 * z;
     let painter = ui.painter().with_clip_rect(cx.clip);
-    let body = Rect::from_min_max(rect.min + Vec2::new(0.0, tab_h), rect.max);
+    // The content sits where the builder put the children: below the
+    // tabs, or right of them when they run down the side, `tab_width` wide.
+    let (ix, iy) = crate::screen::tabs_inset(&w);
+    let vertical = ix > 0.0;
+    let body = Rect::from_min_max(rect.min + Vec2::new(ix as f32, iy as f32) * z, rect.max);
     fill(&painter, body, bg(&w, "Background"));
     outline(&painter, body, 1.0, Color32::GRAY);
-    let mut x = rect.left();
+    let mut pos = rect.min;
     for (i, name) in names.iter().enumerate() {
-        let tw = painter
-            .layout_no_wrap(name.clone(), font(&w, z), Color32::BLACK)
-            .size()
-            .x
-            + 20.0 * z;
-        let tab = Rect::from_min_size(Pos2::new(x, rect.top()), Vec2::new(tw, tab_h));
+        let size = if vertical {
+            Vec2::new(ix as f32 * z, tab_h)
+        } else {
+            let tw = painter
+                .layout_no_wrap(name.clone(), font(&w, z), Color32::BLACK)
+                .size()
+                .x;
+            Vec2::new(tw + 20.0 * z, tab_h)
+        };
+        let tab = Rect::from_min_size(pos, size);
         let r = ui.interact(tab.intersect(cx.clip), id.with(("tab", i)), Sense::click());
         let active = i == node.active_tab;
         button_box(
@@ -2294,7 +2286,11 @@ fn tabs(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut Cx, id: Id) {
         if r.clicked() {
             node.active_tab = i;
         }
-        x += tw;
+        if vertical {
+            pos.y += size.y;
+        } else {
+            pos.x += size.x;
+        }
     }
     let active = node.active_tab;
     if let Some(children) = node.tabs.get_mut(active) {
