@@ -19,8 +19,11 @@ pub const MAX_DEPTH: usize = 64;
 ///
 /// It only has to be right for documents the parser accepts: comments, CDATA
 /// and processing instructions are skipped, quotes in tags are honoured, and
-/// anything else odd (a DTD, which the parser rejects) ends the scan. That
-/// relies on roxmltree's default `allow_dtd: false`; do not enable DTDs.
+/// anything else odd ends the scan. A `<!DOCTYPE>` (which usvg accepts) is
+/// skipped too, but entities can expand to markup the scan never sees, so a
+/// DTD declaring any entity value with markup or references in it counts as
+/// infinitely deep. Plain entities, such as the namespace URLs Adobe
+/// Illustrator declares, are fine.
 pub fn depth(xml: &str) -> usize {
     let b = xml.as_bytes();
     let (mut i, mut open, mut deepest) = (0, 0usize, 0usize);
@@ -39,6 +42,11 @@ pub fn depth(xml: &str) -> usize {
             i = skip(i + 9, b"]]>");
         } else if rest.starts_with(b"<?") {
             i = skip(i + 2, b"?>");
+        } else if rest.starts_with(b"<!DOCTYPE") {
+            match doctype_end(b, i + 9) {
+                Some(end) => i = end,
+                None => return usize::MAX,
+            }
         } else if rest.starts_with(b"<!") {
             break;
         } else if rest.starts_with(b"</") {
@@ -68,6 +76,45 @@ pub fn depth(xml: &str) -> usize {
         }
     }
     deepest
+}
+
+/// Where the `<!DOCTYPE` whose name starts at `i` ends, or `None` if its
+/// internal subset declares something that could expand to markup: a quoted
+/// value holding `<`, `&` or `%` (character and parameter entity references
+/// can produce markup too).
+fn doctype_end(b: &[u8], mut i: usize) -> Option<usize> {
+    let mut subset = false;
+    while i < b.len() {
+        let rest = &b[i..];
+        if subset && rest.starts_with(b"<!--") {
+            i += 4 + rest[4..].windows(3).position(|w| w == b"-->")? + 3;
+            continue;
+        }
+        if subset && rest.starts_with(b"<?") {
+            i += 2 + rest[2..].windows(2).position(|w| w == b"?>")? + 2;
+            continue;
+        }
+        match b[i] {
+            q @ (b'"' | b'\'') => {
+                let len = rest[1..].iter().position(|&c| c == q)?;
+                let value = &rest[1..1 + len];
+                if subset && value.iter().any(|c| matches!(c, b'<' | b'&' | b'%')) {
+                    return None;
+                }
+                i += len + 2;
+                continue;
+            }
+            b'[' if !subset => subset = true,
+            b']' if subset => subset = false,
+            // A parameter entity reference in the subset can pull in
+            // declarations from a value we have not seen expanded.
+            b'%' if subset => return None,
+            b'>' if !subset => return Some(i + 1),
+            _ => {}
+        }
+        i += 1;
+    }
+    Some(b.len())
 }
 
 impl Element {
@@ -181,5 +228,34 @@ mod depth_tests {
         assert_eq!(depth("<a x=\"<\"><b></b><b></b></a>"), 2);
         assert_eq!(depth(""), 0);
         assert_eq!(depth("<a><b"), 2);
+    }
+
+    #[test]
+    fn doctypes_are_skipped_but_markup_entities_are_too_deep() {
+        let nest = format!("<svg>{}{}</svg>", "<g>".repeat(50), "</g>".repeat(50));
+        let dt = |dtd: &str| depth(&format!("<?xml version=\"1.0\"?>\n{dtd}\n{nest}"));
+        assert_eq!(dt("<!DOCTYPE svg>"), 51);
+        assert_eq!(
+            dt(
+                r#"<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">"#
+            ),
+            51
+        );
+        // As Adobe Illustrator writes them.
+        let illustrator = r#"<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "x.dtd" [
+            <!ENTITY ns_extend "http://ns.adobe.com/Extensibility/1.0/">
+            <!-- a ] comment > with "quotes -->
+            <!ENTITY ns_svg "http://www.w3.org/2000/svg">
+        ]>"#;
+        assert_eq!(dt(illustrator), 51);
+        for dtd in [
+            r#"<!DOCTYPE svg [<!ENTITY e "<g><g></g></g>">]>"#,
+            r#"<!DOCTYPE svg [<!ENTITY e '&#60;g>'>]>"#,
+            r#"<!DOCTYPE svg [<!ENTITY e "&f;">]>"#,
+            r#"<!DOCTYPE svg [<!ENTITY % p "x"> %p;]>"#,
+            r#"<!DOCTYPE svg [<!ENTITY e "x"#,
+        ] {
+            assert_eq!(dt(dtd), usize::MAX, "{dtd}");
+        }
     }
 }
