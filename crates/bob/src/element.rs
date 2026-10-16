@@ -17,41 +17,33 @@ pub const MAX_DEPTH: usize = 64;
 /// The deepest element nesting in `xml`, found by a quick scan without
 /// recursion, so it can run before the (recursive) XML parser.
 ///
-/// It only has to be right for documents the parser accepts: comments, CDATA
-/// and processing instructions are skipped, quotes in tags are honoured, and
-/// anything else odd ends the scan. A `<!DOCTYPE>` (which usvg accepts) is
-/// skipped too, but entities can expand to markup the scan never sees, so a
-/// DTD declaring any entity value with markup or references in it counts as
-/// infinitely deep. Plain entities, such as the namespace URLs Adobe
-/// Illustrator declares, are fine.
+/// It only has to be right for documents the parser (roxmltree) accepts, but
+/// it fails closed: markup it does not understand counts as infinitely deep.
+/// Comments, CDATA and processing instructions are skipped and quotes in tags
+/// are honoured. A `<!DOCTYPE>` (which usvg accepts) is skipped the way
+/// roxmltree reads it, but entities can expand to markup the scan never sees,
+/// so a DTD declaring any entity value with markup or references in it, or
+/// one roxmltree may read differently, counts as infinitely deep. Plain
+/// entities, such as the namespace URLs Adobe Illustrator declares, are fine.
 pub fn depth(xml: &str) -> usize {
     let b = xml.as_bytes();
     let (mut i, mut open, mut deepest) = (0, 0usize, 0usize);
-    let skip = |i: usize, end: &[u8]| -> usize {
-        b[i..]
-            .windows(end.len())
-            .position(|w| w == end)
-            .map_or(b.len(), |p| i + p + end.len())
-    };
     while let Some(p) = b[i..].iter().position(|&c| c == b'<') {
         i += p;
         let rest = &b[i..];
-        if rest.starts_with(b"<!--") {
-            i = skip(i + 4, b"-->");
+        let next = if rest.starts_with(b"<!--") {
+            skip_past(b, i + 4, b"-->")
         } else if rest.starts_with(b"<![CDATA[") {
-            i = skip(i + 9, b"]]>");
+            skip_past(b, i + 9, b"]]>")
         } else if rest.starts_with(b"<?") {
-            i = skip(i + 2, b"?>");
+            skip_past(b, i + 2, b"?>")
         } else if rest.starts_with(b"<!DOCTYPE") {
-            match doctype_end(b, i + 9) {
-                Some(end) => i = end,
-                None => return usize::MAX,
-            }
+            doctype_end(b, i + 9)
         } else if rest.starts_with(b"<!") {
-            break;
+            None
         } else if rest.starts_with(b"</") {
             open = open.saturating_sub(1);
-            i = skip(i + 2, b">");
+            skip_past(b, i + 2, b">")
         } else {
             // A start tag: find its closing `>`, outside any quoted value.
             let mut j = i + 1;
@@ -66,55 +58,102 @@ pub fn depth(xml: &str) -> usize {
                 j += 1;
             }
             deepest = deepest.max(open + 1);
-            if j == 0 || b.get(j - 1) != Some(&b'/') {
+            if b[j - 1] != b'/' {
                 open += 1;
             }
-            i = j + 1;
-        }
-        if i >= b.len() {
-            break;
+            Some(j + 1)
+        };
+        match next {
+            Some(next) if next < b.len() => i = next,
+            Some(_) => break,
+            None => return usize::MAX,
         }
     }
     deepest
 }
 
-/// Where the `<!DOCTYPE` whose name starts at `i` ends, or `None` if its
-/// internal subset declares something that could expand to markup: a quoted
-/// value holding `<`, `&` or `%` (character and parameter entity references
-/// can produce markup too).
+/// Where the first `end` at or after `i` ends, or `None` if there is none.
+fn skip_past(b: &[u8], i: usize, end: &[u8]) -> Option<usize> {
+    let p = b.get(i..)?.windows(end.len()).position(|w| w == end)?;
+    Some(i + p + end.len())
+}
+
+/// Where the `<!DOCTYPE` whose name starts at `i` ends, read as roxmltree
+/// reads it (`tokenizer.rs`, `parse_doctype`). `None` if it declares
+/// something that could expand to markup (an entity value holding `<`, `&`
+/// or `%`, a parameter or external entity), or holds anything else roxmltree
+/// would not skip in the same way.
 fn doctype_end(b: &[u8], mut i: usize) -> Option<usize> {
-    let mut subset = false;
-    while i < b.len() {
-        let rest = &b[i..];
-        if subset && rest.starts_with(b"<!--") {
-            i += 4 + rest[4..].windows(3).position(|w| w == b"-->")? + 3;
-            continue;
+    let spaces = |mut i: usize| {
+        while b
+            .get(i)
+            .is_some_and(|c| matches!(c, b' ' | b'\t' | b'\n' | b'\r'))
+        {
+            i += 1;
         }
-        if subset && rest.starts_with(b"<?") {
-            i += 2 + rest[2..].windows(2).position(|w| w == b"?>")? + 2;
-            continue;
+        i
+    };
+    let name = |mut i: usize| {
+        while b.get(i).is_some_and(|c| {
+            !matches!(
+                c,
+                b' ' | b'\t' | b'\n' | b'\r' | b'[' | b'>' | b'"' | b'\'' | b'%'
+            )
+        }) {
+            i += 1;
         }
-        match b[i] {
-            q @ (b'"' | b'\'') => {
-                let len = rest[1..].iter().position(|&c| c == q)?;
-                let value = &rest[1..1 + len];
-                if subset && value.iter().any(|c| matches!(c, b'<' | b'&' | b'%')) {
-                    return None;
-                }
-                i += len + 2;
-                continue;
-            }
-            b'[' if !subset => subset = true,
-            b']' if subset => subset = false,
-            // A parameter entity reference in the subset can pull in
-            // declarations from a value we have not seen expanded.
-            b'%' if subset => return None,
-            b'>' if !subset => return Some(i + 1),
-            _ => {}
-        }
-        i += 1;
+        i
+    };
+    // A quoted literal starting at `i`: where it ends, and its value.
+    let quoted = |i: usize| -> Option<(usize, &[u8])> {
+        let q = *b.get(i).filter(|q| matches!(q, b'"' | b'\''))?;
+        let len = b[i + 1..].iter().position(|&c| c == q)?;
+        Some((i + len + 2, &b[i + 1..i + 1 + len]))
+    };
+    i = name(spaces(i));
+    i = spaces(i);
+    if b[i..].starts_with(b"SYSTEM") {
+        i = quoted(spaces(i + 6))?.0;
+    } else if b[i..].starts_with(b"PUBLIC") {
+        i = quoted(spaces(i + 6))?.0;
+        i = quoted(spaces(i))?.0;
     }
-    Some(b.len())
+    i = spaces(i);
+    match b.get(i)? {
+        b'>' => return Some(i + 1),
+        b'[' => i += 1,
+        _ => return None,
+    }
+    // The internal subset.
+    loop {
+        i = spaces(i);
+        let rest = b.get(i..)?;
+        i = if rest.starts_with(b"<!ENTITY") {
+            // Only `<!ENTITY name "value">`, with a value free of markup and
+            // references: no parameter or external entities.
+            let (end, value) = quoted(spaces(name(spaces(i + 8))))?;
+            if value.iter().any(|c| matches!(c, b'<' | b'&' | b'%')) {
+                return None;
+            }
+            let end = spaces(end);
+            (b.get(end) == Some(&b'>')).then_some(end + 1)?
+        } else if rest.starts_with(b"<!--") {
+            skip_past(b, i + 4, b"-->")?
+        } else if rest.starts_with(b"<?") {
+            skip_past(b, i + 2, b"?>")?
+        } else if rest.starts_with(b"]") {
+            let end = spaces(i + 1);
+            return (b.get(end) == Some(&b'>')).then_some(end + 1);
+        } else if rest.starts_with(b"<!ELEMENT")
+            || rest.starts_with(b"<!ATTLIST")
+            || rest.starts_with(b"<!NOTATION")
+        {
+            // roxmltree skips these to the next `>`, quoted or not.
+            skip_past(b, i, b">")?
+        } else {
+            return None;
+        };
+    }
 }
 
 impl Element {
@@ -254,8 +293,131 @@ mod depth_tests {
             r#"<!DOCTYPE svg [<!ENTITY e "&f;">]>"#,
             r#"<!DOCTYPE svg [<!ENTITY % p "x"> %p;]>"#,
             r#"<!DOCTYPE svg [<!ENTITY e "x"#,
+            r#"<!DOCTYPE svg [<!ENTITY e SYSTEM "x.xml">]>"#,
+            // roxmltree skips declarations to the next `>`, so this `]`
+            // does not end the subset and the entity is still declared.
+            r#"<!DOCTYPE svg [<!ELEMENT x ]><!ENTITY e "<g>">]>"#,
+            r#"<!DOCTYPE svg [<!ATTLIST x y CDATA "]>"><!ENTITY e "<g>">]>"#,
+            // Anything the scan does not know.
+            r#"<!DOCTYPE svg [<!FOO>]>"#,
+            r#"<!DOCTYPE svg [] x>"#,
         ] {
             assert_eq!(dt(dtd), usize::MAX, "{dtd}");
         }
+        // Declarations roxmltree skips are skipped.
+        assert_eq!(
+            dt(
+                r#"<!DOCTYPE svg [<!ELEMENT x ]><!ATTLIST a b CDATA "x"><!NOTATION n SYSTEM "n">]>"#
+            ),
+            51
+        );
+        // Markup the parser would reject is too deep, not the end of the scan.
+        assert_eq!(depth("<a><!FOO><b><c/></b></a>"), usize::MAX);
+    }
+
+    /// The deepest element nesting roxmltree finds in `xml`, if it parses.
+    fn parsed_depth(xml: &str) -> Option<usize> {
+        let options = roxmltree::ParsingOptions {
+            allow_dtd: true,
+            ..Default::default()
+        };
+        let doc = roxmltree::Document::parse_with_options(xml, options).ok()?;
+        doc.descendants()
+            .filter(|n| n.is_element())
+            .map(|n| n.ancestors().filter(|a| a.is_element()).count())
+            .max()
+    }
+
+    /// Random documents made of the pieces that matter to the scan: it never
+    /// finds a document roxmltree parses shallower than roxmltree does.
+    #[test]
+    fn never_shallower_than_roxmltree() {
+        const DTD: &[&str] = &[
+            " ",
+            "<!ELEMENT x ]>",
+            "<!ELEMENT x (a|b)*>",
+            r#"<!ATTLIST a b CDATA "]>">"#,
+            r#"<!ATTLIST a b CDATA ']'>"#,
+            "<!NOTATION n SYSTEM 'n'>",
+            r#"<!ENTITY p "v">"#,
+            r#"<!ENTITY m "<a><a></a></a>">"#,
+            r#"<!ENTITY r "&p;">"#,
+            r#"<!ENTITY q ']>'>"#,
+            "<!-- ] > -->",
+            "<?p ]> ?>",
+            "]",
+            ">",
+            "]>",
+            "\"",
+            "'",
+            "<!ENTITY",
+            "<!",
+            "<a>",
+            "</a>",
+            "&m;",
+        ];
+        const BODY: &[&str] = &[
+            "<a>",
+            "</a>",
+            "<a/>",
+            "<b x='>'/>",
+            "<b x=\"/\">",
+            "</b>",
+            "<!--<a>-->",
+            "<![CDATA[<a>]]>",
+            "<?p <a> ?>",
+            "t",
+            "&p;",
+            "&m;",
+            "&q;",
+            "&r;",
+            "<!",
+            ">",
+            "]]>",
+            "&lt;a>",
+            "\"",
+            "<!DOCTYPE a>",
+            "<b x=\"/\"></b>",
+        ];
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut rand = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        let (mut parsed, mut deep) = (0, 0);
+        for _ in 0..200_000 {
+            let mut xml = String::new();
+            if rand(4) > 0 {
+                xml += "<!DOCTYPE r [";
+                for _ in 0..rand(5) {
+                    xml += DTD[rand(DTD.len())];
+                }
+                xml += "]>";
+            }
+            // Mostly balanced, so that many parse.
+            xml += "<r>";
+            let mut open = 0;
+            for _ in 0..rand(12) {
+                let token = BODY[rand(BODY.len())];
+                match token {
+                    "<a>" => open += 1,
+                    "</a>" if open == 0 => continue,
+                    "</a>" => open -= 1,
+                    _ => {}
+                }
+                xml += token;
+            }
+            xml += &"</a>".repeat(open);
+            xml += "</r>";
+            if let Some(real) = parsed_depth(&xml) {
+                parsed += 1;
+                deep += usize::from(real > 2);
+                assert!(depth(&xml) >= real, "{xml}: scan {} < {real}", depth(&xml));
+            }
+        }
+        // The generator does reach documents worth checking.
+        assert!(parsed > 1000 && deep > 100, "{parsed} parsed, {deep} deep");
     }
 }
