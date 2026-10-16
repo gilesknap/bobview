@@ -267,6 +267,26 @@ impl Action {
         }
     }
 
+    /// What Phoebus calls the action: its description, or without one its
+    /// kind's default (Phoebus' `Messages.Action*`).
+    pub fn label(&self) -> &str {
+        let description = self.description();
+        if !description.is_empty() {
+            return description;
+        }
+        match self {
+            Action::OpenDisplay { .. } => "Open Display",
+            Action::WritePv { .. } => "Write PV",
+            Action::OpenWebpage { .. } => "Open Web Page",
+            Action::Execute { .. } => "Execute Script",
+            Action::Command { .. } => "Execute Command",
+            Action::CloseDisplay { .. } => "Close Display",
+            Action::Trend { .. } => "Open Data Browser",
+            Action::Unsupported { kind, .. } if kind == "open_file" => "Open File",
+            Action::Unsupported { kind, .. } => kind,
+        }
+    }
+
     pub fn description(&self) -> &str {
         match self {
             Action::OpenDisplay { description, .. }

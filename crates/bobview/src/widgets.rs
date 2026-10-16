@@ -1241,7 +1241,7 @@ fn action_button(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut Cx, id: Id) 
     } else if allowed && actions.len() > 1 {
         egui::Popup::menu(&resp).show(|ui| {
             for a in &actions {
-                if ui.button(node.expand(a.description())).clicked() {
+                if ui.button(node.expand(a.label())).clicked() {
                     run_action(node, a, cx);
                 }
             }
@@ -1250,19 +1250,20 @@ fn action_button(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut Cx, id: Id) 
     resp
 }
 
-/// An action button's label. As in Phoebus, only text naming `$(actions)`
-/// (the default when there is none) is replaced by the first action's
-/// description; empty text stays empty.
+/// An action button's label, as Phoebus' `makeButtonText`: text that is
+/// exactly `$(actions)` (the default when there is none) names the one
+/// action, or says how many there are; other text, empty too, is shown.
 fn button_text(node: &Node, actions: &[Action]) -> String {
-    if let Some(text) = node.w.text("text")
-        && !text.contains("$(actions)")
-    {
+    if node.w.text("text").is_some_and(|t| t != "$(actions)") {
         return node.prop("text");
     }
-    actions
-        .first()
-        .map(|a| node.expand(a.description()))
-        .unwrap_or_default()
+    let as_one = node.w.get("actions").and_then(|a| a.attr("execute_as_one")) == Some("true");
+    match actions {
+        [] => "EMPTY".into(),
+        [one] => node.expand(one.label()),
+        _ if as_one => format!("{} actions", actions.len()),
+        _ => format!("Choose 1 of {}", actions.len()),
+    }
 }
 
 pub(crate) fn run_action(node: &Node, action: &Action, cx: &mut Cx) {
@@ -2583,6 +2584,29 @@ mod tests {
             let node = &screen.nodes[0];
             assert_eq!(button_text(node, &node.w.actions()), shown, "{props}");
         }
+        // As Phoebus' messages: none, several, several run as one, and an
+        // action without a description.
+        let text = |actions: &str| {
+            let d = bob::Display::parse(&format!(
+                "<display><widget type='action_button'>{actions}</widget></display>"
+            ))
+            .unwrap();
+            let screen = crate::screen::Builder::new(&pvs).screen(d, &Macros::default(), None, 0);
+            let node = &screen.nodes[0];
+            button_text(node, &node.w.actions())
+        };
+        let two = "<action type='write_pv'><pv_name>loc://a</pv_name></action>
+            <action type='open_display'><file>a.bob</file></action>";
+        assert_eq!(text(""), "EMPTY");
+        assert_eq!(text(&format!("<actions>{two}</actions>")), "Choose 1 of 2");
+        assert_eq!(
+            text(&format!("<actions execute_as_one='true'>{two}</actions>")),
+            "2 actions"
+        );
+        assert_eq!(
+            text("<actions><action type='write_pv'><pv_name>loc://a</pv_name></action></actions>"),
+            "Write PV"
+        );
     }
 
     #[test]
