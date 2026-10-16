@@ -218,7 +218,7 @@ fn cli_command(name: &PvName) -> Option<String> {
     match name.scheme {
         Scheme::Ca => Some(format!("caget {}", shell_quote(&name.pv))),
         Scheme::Pva => Some(format!("pvget {}", shell_quote(&name.pv))),
-        Scheme::Loc | Scheme::Sim => None,
+        Scheme::Loc | Scheme::Sim | Scheme::Unsupported => None,
     }
 }
 
@@ -246,6 +246,7 @@ fn protocol(scheme: Scheme) -> &'static str {
         Scheme::Pva => "PV Access",
         Scheme::Loc => "local",
         Scheme::Sim => "simulated",
+        Scheme::Unsupported => "not supported",
     }
 }
 

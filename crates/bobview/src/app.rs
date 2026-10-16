@@ -2054,6 +2054,7 @@ fn raise_trend(ctx: &egui::Context, id: u64) {
 pub(crate) fn plain_name(name: &pv::PvName) -> String {
     match name.scheme {
         pv::Scheme::Ca => name.base().to_string(),
+        pv::Scheme::Unsupported => name.pv.clone(),
         _ => {
             let full = name.to_string();
             let prefix = &full[..full.len() - name.pv.len()];

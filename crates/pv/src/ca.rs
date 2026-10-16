@@ -9,6 +9,9 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::{Severity, Shared, Value, Writer};
 
+/// How long a write waits for its channel to connect.
+const WRITE_CONNECT: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub(crate) async fn run(client: &CaClient, pv: &str, shared: Arc<Shared>) {
     let channel = client.create_channel(pv);
     let mut events = channel.connection_events();
@@ -52,6 +55,13 @@ pub(crate) async fn run(client: &CaClient, pv: &str, shared: Arc<Shared>) {
                 None => return,
             },
             Some(text) = writes.recv() => {
+                // A write made as the PV was subscribed, as a `write_pv`
+                // action to a PV not connected in advance makes, waits for
+                // the channel to connect.
+                if let Err(e) = channel.wait_connected(WRITE_CONNECT).await {
+                    shared.write_result(&text, Some(format!("not connected: {e}")));
+                    continue;
+                }
                 // Arrays are typed as they are shown, `[1, 2]` or `["a", "b"]`;
                 // the server converts each string element to the field type.
                 let items: Option<Vec<String>> = match shared.snapshot().value {

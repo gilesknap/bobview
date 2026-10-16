@@ -27,6 +27,8 @@ mod sim;
 mod value;
 
 use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
@@ -82,6 +84,15 @@ pub(crate) struct Shared {
     name: String,
     state: Mutex<PvState>,
     writer: Mutex<Option<Writer>>,
+    /// Writes made before the backend task set the writer, sent once it does.
+    pending: Mutex<Vec<String>>,
+    /// Whether a backend task sets a writer (`ca://`, `pva://`), so writes
+    /// made before then wait for it.
+    backend_writes: bool,
+    /// Writes accepted but not yet answered by [`Shared::write_result`]: the
+    /// task serving the PV outlives its last [`Pv`] until they are.
+    #[cfg(not(target_arch = "wasm32"))]
+    in_flight: AtomicUsize,
     notify: Arc<RwLock<Option<Notifier>>>,
     listeners: Mutex<Vec<Weak<ListenFn>>>,
 }
@@ -93,6 +104,10 @@ impl Shared {
             name: name.to_string(),
             state: Mutex::new(PvState::default()),
             writer: Mutex::new(None),
+            pending: Mutex::new(Vec::new()),
+            backend_writes: matches!(name.scheme, Scheme::Ca | Scheme::Pva),
+            #[cfg(not(target_arch = "wasm32"))]
+            in_flight: AtomicUsize::new(0),
             notify,
             listeners: Mutex::new(Vec::new()),
         })
@@ -125,6 +140,18 @@ impl Shared {
     /// A put failed (or worked, with `None`): remember why, and tell the user.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn write_result(&self, text: &str, error: Option<String>) {
+        let mut n = self.in_flight.load(Ordering::Acquire);
+        while n > 0 {
+            match self.in_flight.compare_exchange_weak(
+                n,
+                n - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(now) => n = now,
+            }
+        }
         if let Some(e) = &error {
             self.ctl
                 .notify(format!("{}: write '{text}' failed: {e}", self.name));
@@ -132,8 +159,37 @@ impl Shared {
         self.update(|s| s.write_error = error);
     }
 
+    /// Set where writes go, and send any made before now.
     pub(crate) fn set_writer(&self, writer: Writer) {
-        *self.writer.lock().unwrap() = Some(writer);
+        let mut slot = self.writer.lock().unwrap();
+        *slot = Some(writer);
+        for value in std::mem::take(&mut *self.pending.lock().unwrap()) {
+            self.send(slot.as_ref(), value);
+        }
+    }
+
+    /// Send a write through `writer`; with none yet, a `ca://` or `pva://`
+    /// PV (whose task is still starting) keeps it until there is one.
+    fn send(&self, writer: Option<&Writer>, value: String) {
+        match writer {
+            #[cfg(not(target_arch = "wasm32"))]
+            Some(Writer::Channel(tx)) => {
+                if tx.send(value).is_ok() {
+                    self.in_flight.fetch_add(1, Ordering::AcqRel);
+                }
+            }
+            Some(Writer::Local) => {
+                self.update(|s| s.value = local::apply(&s.value, &s.labels, &value));
+            }
+            #[cfg(target_arch = "wasm32")]
+            Some(Writer::Pvws(name)) => pvws::write(name, &self.snapshot(), value),
+            None if self.backend_writes => {
+                #[cfg(not(target_arch = "wasm32"))]
+                self.in_flight.fetch_add(1, Ordering::AcqRel);
+                self.pending.lock().unwrap().push(value);
+            }
+            None => self.ctl.notify(format!("{} cannot be written", self.name)),
+        }
     }
 }
 
@@ -143,18 +199,43 @@ type Task = tokio::task::JoinHandle<()>;
 #[cfg(target_arch = "wasm32")]
 type Task = pvws::Task;
 
-/// One subscription; the backend task stops when the last [`Pv`] is dropped.
+/// How long the task of a dropped PV may go on to send writes made on it,
+/// as a write to a PV that is not connected yet must first find it.
+#[cfg(not(target_arch = "wasm32"))]
+const WRITE_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// One subscription; the backend task stops when the last [`Pv`] is dropped,
+/// or once the writes made on it are sent.
 struct Entry {
     name: PvName,
     shared: Arc<Shared>,
     task: Option<Task>,
+    /// The runtime the task runs on, to finish its writes after the drop.
+    #[cfg(not(target_arch = "wasm32"))]
+    rt: tokio::runtime::Handle,
 }
 
 impl Drop for Entry {
     fn drop(&mut self) {
-        if let Some(task) = self.task.take() {
-            task.abort();
+        let Some(task) = self.task.take() else {
+            return;
+        };
+        // A write is often made on a PV subscribed just for it and dropped
+        // straight after: let the task send it (or give up) first.
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.shared.in_flight.load(Ordering::Acquire) > 0 {
+            let shared = self.shared.clone();
+            self.rt.spawn(async move {
+                let start = tokio::time::Instant::now();
+                while shared.in_flight.load(Ordering::Acquire) > 0 && start.elapsed() < WRITE_GRACE
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                task.abort();
+            });
+            return;
         }
+        task.abort();
     }
 }
 
@@ -209,20 +290,8 @@ impl Pv {
             ));
             return;
         }
-        match shared.writer.lock().unwrap().as_ref() {
-            #[cfg(not(target_arch = "wasm32"))]
-            Some(Writer::Channel(tx)) => {
-                let _ = tx.send(value);
-            }
-            Some(Writer::Local) => {
-                shared.update(|s| s.value = local::apply(&s.value, &s.labels, &value));
-            }
-            #[cfg(target_arch = "wasm32")]
-            Some(Writer::Pvws(name)) => pvws::write(name, &shared.snapshot(), value),
-            None => shared
-                .ctl
-                .notify(format!("{} cannot be written", shared.name)),
-        }
+        let writer = shared.writer.lock().unwrap();
+        shared.send(writer.as_ref(), value);
     }
 }
 
@@ -354,13 +423,25 @@ impl PvManager {
 
         let (shared, task) = match name.scheme {
             Scheme::Loc => (self.local(&name), None),
+            Scheme::Unsupported => {
+                let shared = Shared::new(&name, self.inner.notify.clone(), self.inner.ctl.clone());
+                log::warn!("{name}: formula and other PV types are not supported");
+                shared.update(|s| s.error = Some("PV type not supported".into()));
+                (shared, None)
+            }
             _ => {
                 let shared = Shared::new(&name, self.inner.notify.clone(), self.inner.ctl.clone());
                 let task = self.spawn_backend(&name, shared.clone());
                 (shared, task)
             }
         };
-        let entry = Arc::new(Entry { name, shared, task });
+        let entry = Arc::new(Entry {
+            name,
+            shared,
+            task,
+            #[cfg(not(target_arch = "wasm32"))]
+            rt: self.runtime().handle().clone(),
+        });
         entries.insert(key, Arc::downgrade(&entry));
         Pv(entry)
     }
@@ -383,7 +464,7 @@ impl PvManager {
         Some(match name.scheme {
             Scheme::Sim => pvws::spawn(sim::run(name.clone(), shared)),
             Scheme::Ca | Scheme::Pva => pvws::subscribe(name, shared),
-            Scheme::Loc => unreachable!("local PVs have no task"),
+            Scheme::Loc | Scheme::Unsupported => unreachable!("no task"),
         })
     }
 
@@ -415,7 +496,7 @@ impl PvManager {
                     pva::run(client, &pv, shared).await
                 }))
             }
-            Scheme::Loc => unreachable!("local PVs have no task"),
+            Scheme::Loc | Scheme::Unsupported => unreachable!("no task"),
         }
     }
 }
@@ -486,5 +567,16 @@ mod tests {
             pv.listen(&listener);
         }
         assert_eq!(pv.0.shared.listeners.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn formulas_never_connect_and_refuse_writes() {
+        let pvs = PvManager::new();
+        let pv = pvs.subscribe("=pv0 + 1");
+        let s = pv.state();
+        assert!(!s.connected);
+        assert!(s.error.is_some());
+        pv.write("1");
+        assert!(pvs.notice().1.contains("cannot be written"));
     }
 }
