@@ -701,7 +701,10 @@ pub(crate) fn decimate(run: Vec<Pos2>) -> Vec<Pos2> {
     out
 }
 
-pub(crate) fn line(painter: &egui::Painter, pts: Vec<Pos2>, stroke: Stroke, style: i64) {
+pub(crate) fn line(painter: &egui::Painter, mut pts: Vec<Pos2>, stroke: Stroke, style: i64) {
+    // egui's tessellator turns a zero-length segment into NaN vertices,
+    // which can paint one triangle over the whole display.
+    pts.dedup_by(|b, a| a.distance_sq(*b) < 1e-6);
     if pts.len() < 2 {
         if let Some(p) = pts.first() {
             painter.circle_filled(*p, stroke.width, stroke.color);
@@ -843,5 +846,38 @@ mod tests {
             vec![(10.0, 1.0), (20.0, 2.0)]
         );
         assert_eq!(points(None, &[7.0]), vec![(0.0, 7.0)]);
+    }
+
+    #[test]
+    fn a_line_with_all_points_equal_tessellates_to_finite_vertices() {
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let painter = ui.painter();
+            let p = Pos2::new(10.0, 10.0);
+            for style in [0, 1] {
+                line(
+                    painter,
+                    vec![p, p, p],
+                    Stroke::new(1.0, Color32::BLACK),
+                    style,
+                );
+            }
+        });
+        out.textures_delta.clear();
+        let prims = ctx.tessellate(out.shapes, 1.0);
+        let vertices: Vec<Pos2> = prims
+            .iter()
+            .flat_map(|c| match &c.primitive {
+                egui::epaint::Primitive::Mesh(m) => m.vertices.iter().map(|v| v.pos).collect(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert!(!vertices.is_empty());
+        assert!(vertices.iter().all(|v| v.x.is_finite() && v.y.is_finite()));
+        assert!(
+            vertices
+                .iter()
+                .all(|v| (*v - Pos2::new(10.0, 10.0)).length() < 3.0)
+        );
     }
 }
