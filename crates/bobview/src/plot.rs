@@ -609,6 +609,11 @@ pub(crate) fn legend(
     }
 }
 
+/// How much egui's anti-aliasing widens a line, in points.
+const FEATHER_WIDTH: f32 = 0.4;
+/// Thinnest a trace's line is drawn, so a 1 pixel line stays solid enough.
+const MIN_TRACE_WIDTH: f32 = 0.6;
+
 fn draw_trace(outer: &egui::Painter, t: &Trace, xs: &Scale, ys: &Scale, plot: Rect) {
     let painter = &outer.with_clip_rect(outer.clip_rect().intersect(plot));
     // Markers may poke out of the plot by half their size.
@@ -625,7 +630,9 @@ fn draw_trace(outer: &egui::Painter, t: &Trace, xs: &Scale, ys: &Scale, plot: Re
         })
     };
     let pts: Vec<Option<Pos2>> = t.points.iter().map(|p| screen(*p)).collect();
-    let stroke = Stroke::new(t.width, t.color);
+    // egui's anti-aliasing widens a line by about a pixel, which makes
+    // thin traces look heavier than the aliased ones of CS-Studio.
+    let stroke = Stroke::new((t.width - FEATHER_WIDTH).max(MIN_TRACE_WIDTH), t.color);
 
     // Runs of finite points; a NaN breaks the line.
     let runs = pts
@@ -655,7 +662,8 @@ fn draw_trace(outer: &egui::Painter, t: &Trace, xs: &Scale, ys: &Scale, plot: Re
                 0.0f64.clamp(ys.lo, ys.hi)
             });
             let n = pts.iter().flatten().count().max(1) as f32;
-            let half = (plot.width() / n * 0.4).max(0.5);
+            // A bar is a line from the axis, as in CS-Studio.
+            let half = (t.width / 2.0).max(0.5).min(plot.width() / n * 0.4);
             for p in pts.iter().flatten() {
                 let bar =
                     Rect::from_x_y_ranges(p.x - half..=p.x + half, p.y.min(base)..=p.y.max(base));
@@ -693,7 +701,10 @@ pub(crate) fn decimate(run: Vec<Pos2>) -> Vec<Pos2> {
     out
 }
 
-pub(crate) fn line(painter: &egui::Painter, pts: Vec<Pos2>, stroke: Stroke, style: i64) {
+pub(crate) fn line(painter: &egui::Painter, mut pts: Vec<Pos2>, stroke: Stroke, style: i64) {
+    // egui's tessellator turns a zero-length segment into NaN vertices,
+    // which can paint one triangle over the whole display.
+    pts.dedup_by(|b, a| a.distance_sq(*b) < 1e-6);
     if pts.len() < 2 {
         if let Some(p) = pts.first() {
             painter.circle_filled(*p, stroke.width, stroke.color);
@@ -835,5 +846,38 @@ mod tests {
             vec![(10.0, 1.0), (20.0, 2.0)]
         );
         assert_eq!(points(None, &[7.0]), vec![(0.0, 7.0)]);
+    }
+
+    #[test]
+    fn a_line_with_all_points_equal_tessellates_to_finite_vertices() {
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let painter = ui.painter();
+            let p = Pos2::new(10.0, 10.0);
+            for style in [0, 1] {
+                line(
+                    painter,
+                    vec![p, p, p],
+                    Stroke::new(1.0, Color32::BLACK),
+                    style,
+                );
+            }
+        });
+        out.textures_delta.clear();
+        let prims = ctx.tessellate(out.shapes, 1.0);
+        let vertices: Vec<Pos2> = prims
+            .iter()
+            .flat_map(|c| match &c.primitive {
+                egui::epaint::Primitive::Mesh(m) => m.vertices.iter().map(|v| v.pos).collect(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert!(!vertices.is_empty());
+        assert!(vertices.iter().all(|v| v.x.is_finite() && v.y.is_finite()));
+        assert!(
+            vertices
+                .iter()
+                .all(|v| (*v - Pos2::new(10.0, 10.0)).length() < 3.0)
+        );
     }
 }

@@ -413,10 +413,13 @@ fn valid_name(name: &str) -> bool {
 
 /// Whether a client may have `name` from this server: not `loc://` PVs,
 /// which would live here for ever and be shared by every client, nor
-/// `sim://` ones, which cost the server for nothing. A page makes both
-/// itself.
+/// `sim://` ones, which cost the server for nothing, nor formulas, which
+/// could read the server's `loc://` PVs. A page makes all three itself.
 fn served_scheme(name: &str) -> bool {
-    !matches!(pv::PvName::parse(name).scheme, Scheme::Loc | Scheme::Sim)
+    !matches!(
+        pv::PvName::parse(name).scheme,
+        Scheme::Loc | Scheme::Sim | Scheme::Formula
+    )
 }
 
 /// Whether `given` is the write token, without stopping at the first
@@ -555,10 +558,10 @@ fn handle(hub: &Hub, subs: &mut Subs, text: &str, peer: SocketAddr) -> Vec<Strin
                 ))];
             }
             if local > 0 {
-                log::warn!("PVWS client {peer} asked for {local} loc:// or sim:// PVs");
+                log::warn!("PVWS client {peer} asked for {local} loc://, sim:// or formula PVs");
                 return vec![error(format!(
-                    "Cannot subscribe to {local} PVs: loc:// and sim:// PVs are made by \
-                     the page, not this server"
+                    "Cannot subscribe to {local} PVs: loc:// and sim:// PVs and formulas \
+                     are made by the page, not this server"
                 ))];
             }
             if refused > 0 {
@@ -1211,7 +1214,7 @@ mod tests {
         let hub = Hub::new(PvManager::new(), config(&[], &[]));
         let peer: SocketAddr = "192.0.2.1:5000".parse().unwrap();
         let mut subs = Subs::default();
-        for name in ["loc://x(1)", "sim://sine", "loc://y"] {
+        for name in ["loc://x(1)", "sim://sine", "loc://y", "=pv('loc://x')"] {
             let msg = json!({"type": "subscribe", "pvs": [name]}).to_string();
             let replies = handle(&hub, &mut subs, &msg, peer);
             assert!(replies[0].contains("loc:// and sim://"), "{replies:?}");

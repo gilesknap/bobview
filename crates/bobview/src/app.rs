@@ -769,6 +769,8 @@ impl BobApp {
         let was_pinned = self.main_pinned;
         let mut action = None;
         let mut actual_size = false;
+        let mut all_windows = None;
+        let others = !self.windows.is_empty() || !self.trends.is_empty();
         ui.spacing_mut().button_padding = Vec2::new(10.0, 6.0);
         ui.spacing_mut().item_spacing.x = 8.0;
         // Every item is as tall as a framed group (single buttons in an
@@ -888,6 +890,8 @@ impl BobApp {
                     {
                         toggle_auto_size(&mut self.chrome);
                     }
+                    ui.separator();
+                    all_windows = window_items(ui, others);
                     if windows {
                         ui.separator();
                         if compact {
@@ -937,6 +941,14 @@ impl BobApp {
                 }
             });
         });
+        if let Some(req) = all_windows {
+            let origin = Origin {
+                window: WindowKey::Main,
+                ctrl: false,
+                shift: false,
+            };
+            self.request(ui.ctx(), origin, req);
+        }
         // Actual size: 100%, and the window (with the navigator) sized to it.
         if actual_size {
             self.main.fit = false;
@@ -1670,6 +1682,26 @@ impl BobApp {
                     }
                 }
             },
+            Request::RaiseAll => {
+                for w in &self.windows {
+                    raise(ctx, WindowKey::Child(w.id));
+                }
+                for t in &self.trends {
+                    raise_trend(ctx, t.id);
+                }
+                raise(ctx, WindowKey::Main);
+                // The window asking stays on top.
+                if window != WindowKey::Main {
+                    raise(ctx, window);
+                }
+            }
+            Request::CloseOthers => {
+                log::info!("close all other windows");
+                for w in &mut self.windows {
+                    w.close |= WindowKey::Child(w.id) != window;
+                }
+                self.trends.clear();
+            }
             Request::Webpage(url) => open_webpage(&url),
         }
     }
@@ -1900,6 +1932,25 @@ fn display_window_id(id: egui::ViewportId) -> Id {
     Id::new(("display window", id))
 }
 
+/// The menu items acting on all of bobview's windows, enabled when there
+/// are `others` than the main one; the request of the one clicked.
+fn window_items(ui: &mut egui::Ui, others: bool) -> Option<Request> {
+    let raise = ui
+        .add_enabled(others, egui::Button::new("Bring all windows to front"))
+        .clicked();
+    let close = ui
+        .add_enabled(others, egui::Button::new("Close all other windows"))
+        .on_hover_text("Close every display and trend window but the main one and this one")
+        .clicked();
+    if raise {
+        Some(Request::RaiseAll)
+    } else if close {
+        Some(Request::CloseOthers)
+    } else {
+        None
+    }
+}
+
 /// Bring `window` to the front, as a link to its display is followed.
 fn raise(ctx: &egui::Context, window: WindowKey) {
     match window {
@@ -2002,7 +2053,7 @@ fn child_ui(
             .rect
             .height();
     }
-    let drawn = w.view.draw(ui, vcx);
+    let mut drawn = w.view.draw(ui, vcx);
     panels += drawn.status;
     if let Some(background) = &drawn.background {
         background.context_menu(|ui| {
@@ -2016,6 +2067,15 @@ fn child_ui(
             }
             if ui.button("Close").clicked() {
                 w.close = true;
+            }
+            ui.separator();
+            if let Some(req) = window_items(ui, true) {
+                let origin = Origin {
+                    window: WindowKey::Child(w.id),
+                    ctrl: false,
+                    shift: false,
+                };
+                drawn.requests.push((origin, req));
             }
         });
     }
@@ -2654,6 +2714,16 @@ mod tests {
         assert!(app.view_mut(second).is_none());
         // The main window still goes back first.
         app.request(&ctx, plain(main), Request::Close);
+        assert_eq!(app.main.current, Some(display("a")));
+
+        // Closing all other windows keeps the main one and the one asking.
+        let open_windows = |app: &BobApp| app.windows.iter().filter(|w| !w.close).count();
+        assert_eq!(open_windows(&app), 2);
+        app.request(&ctx, plain(first), Request::CloseOthers);
+        assert_eq!(open_windows(&app), 1);
+        assert!(app.view_mut(first).is_some());
+        app.request(&ctx, plain(main), Request::CloseOthers);
+        assert_eq!(open_windows(&app), 0);
         assert_eq!(app.main.current, Some(display("a")));
     }
 

@@ -11,6 +11,7 @@ use pv::{Pv, PvManager};
 pub struct CompiledRule {
     pub prop_id: String,
     out_exp: bool,
+    check_connections: bool,
     /// Each condition, the value it sets, and for an output expression
     /// rule that value parsed as an expression.
     exprs: Vec<(Option<Expr>, Element, Option<Expr>)>,
@@ -51,6 +52,7 @@ impl CompiledRule {
         Self {
             prop_id: rule.prop_id.clone(),
             out_exp: rule.out_exp,
+            check_connections: rule.check_connections,
             exprs,
             pvs: rule
                 .pv_names
@@ -61,10 +63,14 @@ impl CompiledRule {
     }
 
     pub fn evaluate(&self) -> Outcome {
-        let states: Vec<pv::PvState> = self.pvs.iter().map(|p| p.state()).collect();
-        // Phoebus does not evaluate a rule until all its PVs have values.
-        if states.iter().any(|s| !s.connected) {
-            return Outcome::Keep;
+        let mut states: Vec<pv::PvState> = self.pvs.iter().map(|p| p.state()).collect();
+        // Phoebus does not evaluate a rule until all its PVs have values;
+        // BOY does, with the disconnected ones INVALID.
+        for s in states.iter_mut().filter(|s| !s.connected) {
+            if self.check_connections {
+                return Outcome::Keep;
+            }
+            s.severity = pv::Severity::Invalid;
         }
         let env = Env { states: &states };
         for (expr, value, out) in &self.exprs {
@@ -439,6 +445,33 @@ mod tests {
     }
 
     #[test]
+    fn boy_rules_read_disconnected_pvs_as_invalid() {
+        let rule = |check_connections| bob::Rule {
+            name: "r".into(),
+            prop_id: "background_color".into(),
+            out_exp: false,
+            exprs: vec![bob::RuleExpr {
+                condition: "pvLegacySev0==-1".into(),
+                value: Element {
+                    name: "value".into(),
+                    text: "white".into(),
+                    ..Default::default()
+                },
+            }],
+            pv_names: vec!["ca://bobview:test:never".into()],
+            check_connections,
+        };
+        let pvs = PvManager::new();
+        let phoebus = CompiledRule::new(&rule(true), &|t| t.to_string(), &pvs);
+        assert_eq!(phoebus.evaluate(), Outcome::Keep);
+        let boy = CompiledRule::new(&rule(false), &|t| t.to_string(), &pvs);
+        let Outcome::Set(el) = boy.evaluate() else {
+            panic!("no outcome")
+        };
+        assert_eq!(el.text, "white");
+    }
+
+    #[test]
     fn output_expressions_set_the_value_where_the_condition_holds() {
         let rule = |out_exp: bool| bob::Rule {
             name: "r".into(),
@@ -456,6 +489,7 @@ mod tests {
                 })
                 .collect(),
             pv_names: vec!["loc://rule_out(0.5)".into()],
+            check_connections: true,
         };
         let pvs = PvManager::new();
         let compiled = CompiledRule::new(&rule(true), &|t| t.to_string(), &pvs);

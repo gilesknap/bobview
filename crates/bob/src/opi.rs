@@ -5,8 +5,9 @@
 //! properties are renamed and converted as Phoebus's own legacy import does
 //! it (in its widgets' `CustomConfigurator`s), so nothing downstream needs to
 //! know where a display came from. Scripts are not translated, except the
-//! DLS `get_pv_name.py` widget script (see [`crate::group_link`]); script
-//! actions stay as unsupported actions unless [`action`] recognises them.
+//! DLS `get_pv_name.py` widget script (see [`crate::group_link`]) and the
+//! scripts that choose a linking container's display (see
+//! [`crate::opi_file_script`]); script actions stay as unsupported actions unless [`action`] recognises them.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -15,9 +16,13 @@ use crate::Element;
 
 const PREFIX: &str = "org.csstudio.opibuilder.widgets.";
 
-/// Phoebus divides legacy font heights given in points by this
-/// (`legacy_font_calibration`) to get pixels.
-const FONT_CALIBRATION: f64 = 1.01;
+/// BOY font heights not given in pixels are points, which CS-Studio draws
+/// at the 96 DPI of a Linux desktop, 4/3 of a pixel each. egui's text
+/// looks a little larger than SWT's at the same size, so a point is 1.27
+/// pixels here: side by side with CS-Studio, the text matches. (Phoebus
+/// divides points by its `legacy_font_calibration`, 1.01 by default,
+/// which leaves these screens' text far smaller than CS-Studio showed it.)
+const PIXELS_PER_POINT: f64 = 1.27;
 
 /// Fonts Phoebus defines itself; a BOY font with one of these names uses
 /// the Phoebus definition rather than the height in the file.
@@ -122,7 +127,7 @@ fn font(el: &Element) -> Element {
     let size = if el.attr("pixels") == Some("true") {
         height
     } else {
-        height.map(|h| h / FONT_CALIBRATION)
+        height.map(|h| h * PIXELS_PER_POINT)
     };
     out.with_attr("family", el.attr("fontName").unwrap_or("Liberation Sans"))
         .with_attr("style", style)
@@ -406,17 +411,35 @@ fn is_button(kind: &str) -> bool {
 /// label) or are wrapped (a linking container in a group box).
 fn widget(mut el: Element) -> Vec<Element> {
     let type_id = el.attr("typeId").unwrap_or("").to_string();
-    let short = type_id.strip_prefix(PREFIX).unwrap_or(&type_id).to_string();
+    let short = match type_id.strip_prefix(PREFIX).unwrap_or(&type_id) {
+        // DAWN's XY and intensity graphs have the BOY ones' properties, and
+        // Phoebus reads them as those.
+        "dawn.xygraph" => "xyGraph",
+        "dawn.intensitygraph" => "intensityGraph",
+        s => s,
+    }
+    .to_string();
     let (kids, props): (Vec<Element>, Vec<Element>) =
         el.children.drain(..).partition(|c| c.name == "widget");
     el.children = props;
     // Read before the scripts and widget type are dropped as noise.
     let group_link = crate::group_link::from_opi(&el);
-    // Kept for `has_scripts` unless bobview runs them as a group link.
+    let opi_file = (short == "linkingContainer")
+        .then(|| crate::opi_file_script::from_opi(&el))
+        .flatten();
+    // Kept for `has_scripts` unless bobview runs them as a group link, or
+    // knows the display they choose.
     let scripts = el
         .child("scripts")
-        .filter(|s| group_link.is_none() && !s.children.is_empty())
+        .filter(|s| group_link.is_none() && opi_file.is_none() && !s.children.is_empty())
         .cloned();
+    if let Some((file, macros)) = opi_file {
+        el.set_child(Element::with_text("opi_file", file));
+        // The script's macros replace the container's own.
+        if let Some(macros) = macros {
+            el.set_child(macros);
+        }
+    }
     remove(&mut el, NOISE);
     el.children.extend(group_link);
     el.children.extend(scripts);
@@ -804,11 +827,16 @@ fn items(el: &mut Element) {
 }
 
 /// An EDM menu mux, a drop-down that sets local PVs that stand in for
-/// macros: a combo on the first target. It writes the item's label, not the
-/// mux's value for it.
+/// macros: a combo on its own PV or, without one, its first target, with
+/// the sets kept in a `<menu_mux>` (see [`crate::menu_mux`]).
 fn menu_mux(el: &mut Element) {
+    let mux = crate::menu_mux::from_opi(el);
     if text(el, "pv_name").is_none_or(str::is_empty)
-        && let Some(target) = text(el, "target0").map(str::to_string)
+        && let Some(target) = mux
+            .children
+            .iter()
+            .find_map(|s| s.child_text("target"))
+            .map(str::to_string)
     {
         set(el, "pv_name", target);
     }
@@ -818,6 +846,7 @@ fn menu_mux(el: &mut Element) {
         !(c.name.starts_with("target") || c.name.starts_with("values"))
             && !["initial", "num_sets"].contains(&c.name.as_str())
     });
+    el.children.push(mux);
 }
 
 /// A DLS detail panel's rows: each child is a row's (already placed)
@@ -1376,6 +1405,9 @@ fn rules(el: &mut Element) {
         return;
     };
     for rule in rules.children.iter_mut().filter(|r| r.name == "rule") {
+        // BOY runs a rule while its PVs are disconnected, so that an alarm
+        // rule shows them as INVALID.
+        rule.set_attr("check_connections", "false");
         let own = format!(
             "pv{}",
             rule.children.iter().filter(|c| c.name == "pv").count()
@@ -1497,7 +1529,7 @@ menumap {
     }
 
     #[test]
-    fn fonts_follow_phoebus() {
+    fn fonts_follow_boy() {
         let w = one(
             "Label",
             r#"<font><opifont.name fontName="Liberation Sans" height="15" style="0" pixels="true">Default</opifont.name></font>
@@ -1514,9 +1546,9 @@ menumap {
         let f = w.font("scale_font").unwrap();
         assert_eq!((f.size, f.style), (16.0, FontStyle::Bold));
         let f = w.font("title_font").unwrap();
-        assert_eq!((f.size, f.style), (9.9, FontStyle::BoldItalic));
+        assert_eq!((f.size, f.style), (12.7, FontStyle::BoldItalic));
         let f = w.font("other_font").unwrap();
-        assert_eq!((f.size, f.family.as_str()), (19.8, "Arial"));
+        assert_eq!((f.size, f.family.as_str()), (25.4, "Arial"));
         assert_eq!(f.name.as_deref(), Some("Site Big"));
         let f = w.font("pixel_font").unwrap();
         assert_eq!((f.size, f.family.as_str()), (20.0, "Arial"));
@@ -1550,6 +1582,8 @@ menumap {
             ("ImageBoolIndicator", "symbol"),
             ("scaledslider", "scaledslider"),
             ("xyGraph", "xyplot"),
+            ("dawn.xygraph", "xyplot"),
+            ("dawn.intensitygraph", "image"),
             ("tab", "tabs"),
             ("edm.menumux", "combo"),
             ("NoSuchWidget", "NoSuchWidget"),
@@ -1627,6 +1661,7 @@ menumap {
         assert_eq!(r.prop_id, "line_color");
         assert_eq!(r.pv_names, ["X"]);
         assert_eq!(r.exprs[0].condition, "pvLegacySev0==1");
+        assert!(!r.check_connections);
         let c = crate::Color::from_element(r.exprs[0].value.child("color").unwrap());
         assert_eq!(c.rgba(), [200, 200, 200, 255]);
         let w = one(
@@ -1912,6 +1947,49 @@ ScriptUtil.executeEclipseCommand(command_id, ['pvnames', '$(dom)-VA-GAUGE-01:PLO
     }
 
     #[test]
+    fn linking_container_scripts_choose_the_display() {
+        let script = |text: &str, pv: &str| {
+            format!(
+                r#"<macros><include_parent_macros>true</include_parent_macros><a>1</a></macros>
+                <scripts><path pathString="EmbeddedJs" checkConnect="true"><scriptName>OPIFileScript</scriptName>
+                <scriptText><![CDATA[{text}]]></scriptText><pv trig="true">{pv}</pv></path></scripts>"#
+            )
+        };
+        // The EDM converter's script, at its PV's initial value.
+        let w = one(
+            "linkingContainer",
+            &script(
+                r#"var pv0 = PVUtil.getLong(pvs[0]);
+if(pv0==0){
+var macroInput = DataUtil.createMacrosInput(true);
+macroInput.put("device", "LI-DI-YAG-01");
+widget.setPropertyValue("macros", macroInput);
+widget.setPropertyValue("opi_file","../xbpm/xbpmsi.opi");
+}"#,
+                "loc://menu0&lt;VDouble&gt;(0)",
+            ),
+        );
+        assert_eq!(w.text("file"), Some("../xbpm/xbpmsi.opi"));
+        assert_eq!(
+            (w.macros().get("device"), w.macros().get("a")),
+            (Some("LI-DI-YAG-01"), None)
+        );
+        assert!(!w.has_scripts());
+        // A file named by a macro, through the PV.
+        let w = one(
+            "linkingContainer",
+            &script(
+                r#"var pv0 = PVUtil.getString(pvs[0]);
+widget.setPropertyValue("opi_file", pv0 + ".opi");"#,
+                r#"loc://$(DID)dummy&lt;VString&gt;("$(control)")"#,
+            ),
+        );
+        assert_eq!(w.text("file"), Some("$(control).opi"));
+        assert_eq!(w.macros().get("a"), Some("1"));
+        assert!(!w.has_scripts());
+    }
+
+    #[test]
     fn linking_containers_embed() {
         let w = one(
             "linkingContainer",
@@ -2146,6 +2224,52 @@ ScriptUtil.executeEclipseCommand(command_id, ['pvnames', '$(dom)-VA-GAUGE-01:PLO
         assert_eq!(w.list("items", "item"), ["NORMAL", "BL"]);
         assert_eq!(w.bool("items_from_pv"), Some(false));
         assert!(w.get("values0").is_none());
+        // The sets are kept: picking an item writes its value to each target.
+        let mux = w.menu_mux().unwrap();
+        assert!(!mux.index);
+        assert_eq!(mux.writes(1), [("loc://$(DID)CON<VString>", "BLCON")]);
+        assert_eq!(mux.current(None, "BLCON"), Some(1));
+    }
+
+    #[test]
+    fn menu_muxes_write_every_target_and_their_initial_item() {
+        let w = one(
+            "edm.menumux",
+            r#"<pv_name></pv_name><initial>1</initial><num_sets>2</num_sets>
+            <items><s>Rate 1s</s><s>Log Rate 1s</s></items>
+            <target0>loc://$(DID)ll&lt;VString&gt;</target0><target1>loc://$(DID)lld&lt;VString&gt;</target1>
+            <target2></target2>
+            <values0><s>RATE</s><s>LOG</s></values0><values1><s>LOG</s><s>LOG</s></values1><values2 />"#,
+        );
+        let mux = w.menu_mux().unwrap();
+        assert_eq!(mux.initial, Some(1));
+        assert_eq!(
+            mux.writes(0),
+            [
+                ("loc://$(DID)ll<VString>", "RATE"),
+                ("loc://$(DID)lld<VString>", "LOG")
+            ]
+        );
+        assert_eq!(mux.current(None, "LOG"), Some(1));
+        assert_eq!(mux.current(None, "DID"), None);
+    }
+
+    #[test]
+    fn menu_muxes_with_their_own_pv_write_the_index() {
+        let w = one(
+            "edm.menumux",
+            r#"<initial></initial><num_sets>1</num_sets>
+            <items><s>Hide Required BPMs</s><s>Show Required BPMs</s></items>
+            <pv_name>loc://show-required&lt;VEnum&gt;(0, "hide", "show")</pv_name>
+            <target0></target0><values0><s>0</s><s>1</s></values0>"#,
+        );
+        assert_eq!(
+            w.text("pv_name"),
+            Some(r#"loc://show-required<VEnum>(0, "hide", "show")"#)
+        );
+        let mux = w.menu_mux().unwrap();
+        assert!(mux.index && mux.sets.is_empty() && mux.initial.is_none());
+        assert_eq!(mux.current(Some(1), "show"), Some(1));
     }
 
     #[test]
