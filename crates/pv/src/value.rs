@@ -108,6 +108,22 @@ impl Value {
             other => other.as_f64().map(|v| v as i64),
         }
     }
+
+    /// An unsigned 64-bit integer: a [`Value::Long`] when it fits, else a
+    /// [`Value::Double`] near it, rather than a negative number.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn from_u64(x: u64) -> Value {
+        i64::try_from(x).map_or(Value::Double(x as f64), Value::Long)
+    }
+
+    /// Unsigned 64-bit integers, as [`Value::from_u64`] takes one.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn from_u64s(a: &[u64]) -> Value {
+        match a.iter().map(|x| i64::try_from(*x)).collect() {
+            Ok(longs) => Value::LongArray(longs),
+            Err(_) => Value::DoubleArray(a.iter().map(|x| *x as f64).collect()),
+        }
+    }
 }
 
 /// EPICS alarm severity.
@@ -285,6 +301,20 @@ pub fn split_strings(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsigned_64_bit_values_never_wrap_negative() {
+        assert_eq!(Value::from_u64(5), Value::Long(5));
+        assert_eq!(Value::from_u64(u64::MAX), Value::Double(u64::MAX as f64));
+        assert_eq!(
+            Value::from_u64s(&[1, 2]),
+            Value::LongArray(Arc::from([1, 2]))
+        );
+        assert_eq!(
+            Value::from_u64s(&[1, u64::MAX]),
+            Value::DoubleArray(Arc::from([1.0, u64::MAX as f64]))
+        );
+    }
 
     #[test]
     fn formats_with_precision_and_units() {

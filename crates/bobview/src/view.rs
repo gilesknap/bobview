@@ -239,6 +239,23 @@ impl View {
         }
     }
 
+    /// Whether this shows `loc`: the same display with the same macros, its
+    /// own defaults under both, as a link on it has them (while it loads,
+    /// as it was opened). Macros from a link's group or widget still count.
+    pub fn shows(&self, loc: &Location) -> bool {
+        let Some(cur) = &self.current else {
+            return false;
+        };
+        let Some(screen) = &self.screen else {
+            return cur.same_display(loc);
+        };
+        let defaults = |l: &Location| Location {
+            source: l.source.clone(),
+            macros: screen.display.macros.with(&l.macros),
+        };
+        defaults(cur).same_display(&defaults(loc))
+    }
+
     /// Navigate to a display, recording where we came from.
     pub fn open(&mut self, loc: Location) {
         if let Some(cur) = self.current.take() {

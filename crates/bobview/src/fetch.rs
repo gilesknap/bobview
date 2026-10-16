@@ -18,9 +18,10 @@
 //! own rules (CORS, mixed content) instead.
 
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock};
 
 use bob::{Display, Error, Source};
+use parking_lot::Mutex;
 
 /// Largest display file we will read.
 const MAX_SIZE: u64 = 16 << 20;
@@ -59,9 +60,9 @@ pub fn load(source: &Source) -> Result<Display, Error> {
 
 /// Drop every cached display, so the next load fetches it again.
 pub fn forget() {
-    CACHE.lock().unwrap().clear();
+    CACHE.lock().clear();
     #[cfg(target_arch = "wasm32")]
-    web::FAILED.lock().unwrap().clear();
+    web::FAILED.lock().clear();
     #[cfg(not(target_arch = "wasm32"))]
     native::forget();
 }
@@ -104,10 +105,11 @@ mod native {
     use std::io::Read;
     use std::net::{IpAddr, ToSocketAddrs};
     use std::path::{Path, PathBuf};
-    use std::sync::{LazyLock, Mutex};
+    use std::sync::LazyLock;
     use std::time::Duration;
 
     use bob::{Error, Source};
+    use parking_lot::Mutex;
     use ureq::Body;
     use ureq::http::Response;
 
@@ -142,8 +144,8 @@ mod native {
 
     /// Note that the display at `base` names `url`.
     pub(super) fn named_by(base: &str, url: &str) {
-        if PUBLIC.lock().unwrap().contains(base) {
-            let mut from_public = FROM_PUBLIC.lock().unwrap();
+        if PUBLIC.lock().contains(base) {
+            let mut from_public = FROM_PUBLIC.lock();
             if !from_public.contains(url) {
                 from_public.insert(url.to_string());
             }
@@ -152,8 +154,8 @@ mod native {
 
     /// Forget which displays came from public addresses.
     pub(super) fn forget() {
-        PUBLIC.lock().unwrap().clear();
-        FROM_PUBLIC.lock().unwrap().clear();
+        PUBLIC.lock().clear();
+        FROM_PUBLIC.lock().clear();
     }
 
     /// GET `url`, following redirects, but not from https to http, nor from
@@ -161,7 +163,7 @@ mod native {
     /// a file a display from a public address named. Returns where it was
     /// finally served from, and the response.
     fn call(url: &str) -> Result<(String, Response<Body>), String> {
-        let mut public_only = FROM_PUBLIC.lock().unwrap().contains(url);
+        let mut public_only = FROM_PUBLIC.lock().contains(url);
         let mut url = url.to_string();
         for _ in 0..=MAX_REDIRECTS {
             if public_only && is_private(&url) {
@@ -215,7 +217,7 @@ mod native {
             .is_some_and(|s| s.eq_ignore_ascii_case("https"));
         let port = uri.port_u16().unwrap_or(if https { 443 } else { 80 });
         #[cfg(test)]
-        if host == "127.0.0.1" && PRETEND_PUBLIC.lock().unwrap().contains(&port) {
+        if host == "127.0.0.1" && PRETEND_PUBLIC.lock().contains(&port) {
             return false;
         }
         match host.parse::<IpAddr>() {
@@ -297,7 +299,7 @@ mod native {
     }
 
     pub(super) fn get(url: &str) -> Result<Fetched, Error> {
-        if let Some(fetched) = CACHE.lock().unwrap().get(url).cloned() {
+        if let Some(fetched) = CACHE.lock().get(url).cloned() {
             return Ok(fetched);
         }
         log::info!("fetching {url}");
@@ -311,15 +313,12 @@ mod native {
             .map_err(|e| fail(describe(e)))?
             .into();
         if !is_private(&served) {
-            let mut public = PUBLIC.lock().unwrap();
+            let mut public = PUBLIC.lock();
             public.insert(url.to_string());
             public.insert(served.clone());
         }
         let fetched = Fetched { url: served, text };
-        CACHE
-            .lock()
-            .unwrap()
-            .insert(url.to_string(), fetched.clone());
+        CACHE.lock().insert(url.to_string(), fetched.clone());
         Ok(fetched)
     }
 
@@ -335,9 +334,10 @@ mod native {
 #[cfg(target_arch = "wasm32")]
 mod web {
     use std::collections::{HashMap, HashSet};
-    use std::sync::{LazyLock, Mutex};
+    use std::sync::LazyLock;
 
     use bob::{Error, Source};
+    use parking_lot::Mutex;
     use wasm_bindgen::JsCast;
     use wasm_bindgen_futures::JsFuture;
 
@@ -353,31 +353,31 @@ mod web {
 
     /// Whether any display is still being fetched.
     pub fn pending() -> bool {
-        !PENDING.lock().unwrap().is_empty()
+        !PENDING.lock().is_empty()
     }
 
     pub(super) fn get(url: &str) -> Result<Fetched, Error> {
-        if let Some(fetched) = CACHE.lock().unwrap().get(url).cloned() {
+        if let Some(fetched) = CACHE.lock().get(url).cloned() {
             return Ok(fetched);
         }
-        if let Some(why) = FAILED.lock().unwrap().get(url) {
+        if let Some(why) = FAILED.lock().get(url) {
             return Err(Error::Fetch(url.to_string(), why.clone()));
         }
-        if PENDING.lock().unwrap().insert(url.to_string()) {
+        if PENDING.lock().insert(url.to_string()) {
             let url = url.to_string();
             wasm_bindgen_futures::spawn_local(async move {
                 match fetch(&url).await {
                     Ok((served, data)) => {
                         let text = String::from_utf8_lossy(&data).into();
                         let fetched = Fetched { url: served, text };
-                        CACHE.lock().unwrap().insert(url.clone(), fetched);
+                        CACHE.lock().insert(url.clone(), fetched);
                     }
                     Err(why) => {
                         log::warn!("cannot fetch {url}: {why}");
-                        FAILED.lock().unwrap().insert(url.clone(), why);
+                        FAILED.lock().insert(url.clone(), why);
                     }
                 }
-                PENDING.lock().unwrap().remove(&url);
+                PENDING.lock().remove(&url);
             });
         }
         Err(Error::Fetch(url.to_string(), LOADING.into()))
@@ -452,7 +452,7 @@ mod tests {
                 while reader.read_line(&mut line).unwrap() > 2 {
                     line.clear();
                 }
-                *count.lock().unwrap() += 1;
+                *count.lock() += 1;
                 let (status, body) = if first.starts_with("GET /opi/a.bob ") {
                     ("200 OK", DISPLAY)
                 } else if first.starts_with("GET /old/a.bob ") {
@@ -482,7 +482,7 @@ mod tests {
         let d = load(&src).unwrap();
         assert_eq!(d.name, "Served");
         assert_eq!(d.source.as_ref(), Some(&src));
-        assert_eq!(*hits.lock().unwrap(), 1, "second load came from the cache");
+        assert_eq!(*hits.lock(), 1, "second load came from the cache");
 
         let missing = src.resolve("../missing.bob");
         let err = load(&missing).unwrap_err().to_string();
@@ -501,7 +501,7 @@ mod tests {
     fn serve_public(away: &str) -> (String, Arc<Mutex<usize>>) {
         let (base, hits) = serve_to(away);
         let port = base.rsplit(':').next().unwrap().parse().unwrap();
-        native::PRETEND_PUBLIC.lock().unwrap().insert(port);
+        native::PRETEND_PUBLIC.lock().insert(port);
         (base, hits)
     }
 
@@ -520,7 +520,7 @@ mod tests {
         assert!(err.contains("refused"), "{err}");
         let err = bytes(&inside).unwrap_err().to_string();
         assert!(err.contains("refused"), "{err}");
-        assert_eq!(*private_hits.lock().unwrap(), 0);
+        assert_eq!(*private_hits.lock(), 0);
         // A private URL named by the user, or by a private display, is
         // fetched. (Once a public display has named a URL, it stays refused
         // until a reload.)
@@ -530,7 +530,7 @@ mod tests {
         assert_eq!(resolve(None, &named.to_string()), named);
         load(&resolve(d.source.as_ref(), &named.to_string())).unwrap();
         // The redirect, and where it leads.
-        assert_eq!(*private_hits.lock().unwrap(), 2);
+        assert_eq!(*private_hits.lock(), 2);
     }
 
     #[test]
@@ -541,11 +541,11 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("refused"), "{err}");
-        assert_eq!(*private_hits.lock().unwrap(), 0);
+        assert_eq!(*private_hits.lock(), 0);
         // From one private server to another is fine.
         let (inside, _) = serve_to(&format!("{private}/opi/a.bob"));
         load(&Source::parse(&format!("{inside}/away"))).unwrap();
-        assert_eq!(*private_hits.lock().unwrap(), 1);
+        assert_eq!(*private_hits.lock(), 1);
     }
 
     #[test]

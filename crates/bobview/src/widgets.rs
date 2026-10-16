@@ -1603,6 +1603,12 @@ fn combo_item_font(widget: FontId, ui: &FontId) -> FontId {
     }
 }
 
+/// Phoebus labels a checkbox or slide button "Label" unless the file says
+/// otherwise; an explicit empty `<label>` stays empty.
+fn raw_label(w: &Widget) -> &str {
+    w.text("label").unwrap_or("Label")
+}
+
 fn checkbox(
     ui: &mut Ui,
     node: &mut Node,
@@ -1642,7 +1648,7 @@ fn checkbox(
     text_in(
         &painter,
         tr,
-        &node.prop("label"),
+        &node.expand(raw_label(&w)),
         font(&w, z),
         fg(&w),
         Align2::LEFT_CENTER,
@@ -1670,10 +1676,7 @@ fn slide_button(
     let on = s.is_some_and(|s| s.connected && is_on(&w, s));
     let resp = ui.interact(rect.intersect(cx.clip), id, Sense::click());
     let painter = ui.painter().with_clip_rect(cx.clip);
-    // Phoebus labels a slide button "Label" unless the file says otherwise.
-    let label = w
-        .text("label")
-        .map_or_else(|| "Label".to_string(), |t| node.expand(t));
+    let label = node.expand(raw_label(&w));
     let (track, label_rect) = slide_layout(rect, z, !label.is_empty());
     let track_color = if on {
         w.color("on_color")
@@ -2366,6 +2369,13 @@ mod tests {
             writable,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn label_defaults_to_label_only_when_absent() {
+        assert_eq!(raw_label(&widget("")), "Label");
+        assert_eq!(raw_label(&widget("<label></label>")), "");
+        assert_eq!(raw_label(&widget("<label>Go</label>")), "Go");
     }
 
     #[test]
