@@ -2281,7 +2281,7 @@ fn raise_trend(ctx: &egui::Context, id: u64) {
 pub(crate) fn plain_name(name: &pv::PvName) -> String {
     match name.scheme {
         pv::Scheme::Ca => name.base().to_string(),
-        pv::Scheme::Unsupported => name.pv.clone(),
+        pv::Scheme::Formula | pv::Scheme::Unsupported => name.to_string(),
         _ => {
             let full = name.to_string();
             let prefix = &full[..full.len() - name.pv.len()];
@@ -2849,6 +2849,9 @@ mod tests {
         assert_eq!(t("ca://BL01T:X"), "BL01T:X");
         assert_eq!(t("BL01T:X"), "BL01T:X");
         assert_eq!(t("pva://BL01T:Y"), "pva://BL01T:Y");
+        // A formula and an unknown PV type keep their whole text.
+        assert_eq!(t("=(pv(\"X\") < 5)"), "=(pv(\"X\") < 5)");
+        assert_eq!(t("sys://time"), "sys://time");
     }
 
     /// Poll `view` until its display has loaded, which takes as long as its
