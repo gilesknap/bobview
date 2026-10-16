@@ -1324,6 +1324,31 @@ mod tests {
     }
 
     #[test]
+    fn output_expressions_on_boolean_properties_read_as_phoebus_does() {
+        use pv::Value::Long;
+        // `and` gives an operand, which Phoebus's boolean property takes
+        // only as 1 or 0; another number is invalid, giving the default.
+        let visible = |values: &[pv::Value]| {
+            let text = js("pv0 && pv1", values).to_text();
+            let mut el = Element::default();
+            let set = Element {
+                name: "visible".into(),
+                text,
+                ..Default::default()
+            };
+            apply(&mut el, &[("visible".into(), Outcome::Set(set))]);
+            bob::Widget::from_element(el).bool("visible")
+        };
+        assert_eq!(visible(&[Long(1), Long(1)]), Some(true));
+        assert_eq!(visible(&[Long(1), Long(0)]), Some(false));
+        assert_eq!(visible(&[Long(5), Long(3)]), None);
+        assert_eq!(
+            run("pv0 > 1 and pv1 > 1", &[Long(5), Long(3)]).to_text(),
+            "true"
+        );
+    }
+
+    #[test]
     fn sets_one_item_of_a_list_property() {
         let el = |name: &str, text: &str| Element {
             name: name.into(),

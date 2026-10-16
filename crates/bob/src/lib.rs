@@ -207,8 +207,11 @@ impl Widget {
         self.f64(name).map(|v| v as i64)
     }
 
+    /// A boolean property, parsed as Phoebus's `BooleanWidgetProperty`
+    /// does; anything else, such as a rule's output expression giving `5`,
+    /// is invalid and the widget uses its default.
     pub fn bool(&self, name: &str) -> Option<bool> {
-        self.text(name).map(|t| t.trim() == "true")
+        self.text(name).and_then(parse_bool)
     }
 
     pub fn color(&self, name: &str) -> Option<Color> {
@@ -290,9 +293,41 @@ impl Widget {
     }
 }
 
+/// `true`, `yes` or `1`, and `false`, `no` or `0`, as Phoebus's
+/// `BooleanWidgetProperty.parseExpandedSpecification`.
+pub fn parse_bool(text: &str) -> Option<bool> {
+    match text.trim() {
+        t if t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes") || t == "1" => {
+            Some(true)
+        }
+        t if t.eq_ignore_ascii_case("false") || t.eq_ignore_ascii_case("no") || t == "0" => {
+            Some(false)
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn booleans_parse_as_phoebus_does() {
+        for (text, want) in [
+            ("true", Some(true)),
+            (" TRUE ", Some(true)),
+            ("Yes", Some(true)),
+            ("1", Some(true)),
+            ("false", Some(false)),
+            ("No", Some(false)),
+            ("0", Some(false)),
+            ("5", None),
+            ("1.0", None),
+            ("", None),
+        ] {
+            assert_eq!(parse_bool(text), want, "{text:?}");
+        }
+    }
 
     #[test]
     fn deeply_nested_xml_is_an_error_not_a_stack_overflow() {
