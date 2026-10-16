@@ -36,12 +36,20 @@ pub enum Target {
 pub struct Link {
     pub label: String,
     pub target: Target,
+    /// The label doesn't tell the link apart: it is the file name or the
+    /// command, or another link's label too. The node is then called by its
+    /// display's `Links::name` once that has been read.
+    pub vague: bool,
 }
 
 /// A display's title and the links on it, each target once.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Links {
     pub title: String,
+    /// What tells this display apart from others of the same file: the
+    /// parts of its title that macros fill in (a device name), else the
+    /// title.
+    pub name: String,
     pub links: Vec<Link>,
 }
 
@@ -64,10 +72,33 @@ pub fn links(loc: &Location) -> Result<Links, bob::Error> {
             links.push(link);
         }
     }
+    for i in 0..links.len() {
+        let label = &links[i].label;
+        let repeated = links.iter().filter(|l| l.label == *label).count() > 1;
+        let named_after = match &links[i].target {
+            Target::Display(loc) => *label == file_name(&loc.source),
+            Target::Command { command, .. } => label.contains(command.trim()),
+        };
+        links[i].vague = repeated || named_after;
+    }
+    let title = crate::screen::title(&display, &macros);
     Ok(Links {
-        title: crate::screen::title(&display, &macros),
+        name: name(&display.name, &macros).unwrap_or_else(|| title.clone()),
+        title,
         links,
     })
+}
+
+/// The words of a display's `name` that macros fill in, expanded: a
+/// device name, as in `Ion Pump - $(device)`; None if there are none.
+fn name(name: &str, macros: &Macros) -> Option<String> {
+    let words: Vec<String> = name
+        .split_whitespace()
+        .filter(|w| w.contains("$(") || w.contains("${"))
+        .map(|w| bob::expand(w, &|n| macros.get(n).map(str::to_string)))
+        .filter(|w| !w.contains("$(") && !w.contains("${") && !w.trim().is_empty())
+        .collect();
+    (!words.is_empty()).then(|| words.join(" "))
 }
 
 /// Add the links of `widgets`, in a display at `base`, to `out`.
@@ -84,7 +115,11 @@ fn walk(
         for action in &actions {
             if let Some(target) = target(w, &macros, base, action) {
                 let label = label(w, &macros, action, actions.len(), &target);
-                out.push(Link { label, target });
+                out.push(Link {
+                    label,
+                    target,
+                    vague: false,
+                });
             }
         }
         let prop = |name: &str| expand_for(w, &macros, w.text(name).unwrap_or(""));
@@ -350,7 +385,11 @@ impl Navigator {
                     Some(Some(Ok(links))) => links.title.clone(),
                     _ => file_name(&root.source),
                 };
-                let link = Link { label, target };
+                let link = Link {
+                    label,
+                    target,
+                    vague: false,
+                };
                 self.node(ui, &link, &mut Vec::new(), &here, &mut clicked);
             } else {
                 self.matches(ui, &here, &mut clicked);
@@ -384,7 +423,10 @@ impl Navigator {
             (Some(loc), Some(k)) if !cycle => self.read(k, loc),
             _ => None,
         };
-        let mut text = link.label.clone();
+        let mut text = match &read {
+            Some(Some(Ok(links))) if link.vague => links.name.clone(),
+            _ => link.label.clone(),
+        };
         let mut tip = match &loc {
             Some(loc) => describe(loc),
             None => match &link.target {
@@ -409,7 +451,7 @@ impl Navigator {
             }
             (_, Some(Some(Ok(links)))) => {
                 branch = !links.links.is_empty();
-                if links.title != link.label && !links.title.is_empty() {
+                if links.title != text && !links.title.is_empty() {
                     tip = format!("{}\n{tip}", links.title);
                 }
             }
@@ -508,11 +550,28 @@ impl Navigator {
                     Target::Command { command, .. } => command.clone(),
                 };
                 let k = target_key(&target);
-                let hit = link.label.to_lowercase().contains(&filter)
-                    || file.to_lowercase().contains(&filter);
+                let read = match self.displays.get(&k) {
+                    Some(Some(Ok(read))) => Some(read),
+                    _ => None,
+                };
+                let label = match read {
+                    Some(read) if link.vague => read.name.clone(),
+                    _ => link.label.clone(),
+                };
+                let title = read.map_or("", |r| r.title.as_str());
+                let hit = [label.as_str(), title, &file]
+                    .iter()
+                    .any(|t| t.to_lowercase().contains(&filter));
                 if hit && !found.iter().any(|(fk, _)| *fk == k) {
-                    let label = link.label.clone();
-                    found.push((k, Link { label, target }));
+                    let vague = false;
+                    found.push((
+                        k,
+                        Link {
+                            label,
+                            target,
+                            vague,
+                        },
+                    ));
                 }
             }
         }
@@ -648,6 +707,37 @@ mod tests {
     use crate::app::Location;
     use bob::{Macros, Source};
 
+    /// Print the navigator's nodes below the display at $TREE_DUMP (with
+    /// macros $TREE_MACROS, as `P=X,R=Y`), to check their labels:
+    /// `TREE_DUMP=… cargo test -p bobview print_links -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn print_links() {
+        let path = std::env::var("TREE_DUMP").unwrap();
+        let pairs = std::env::var("TREE_MACROS").unwrap_or_default();
+        let macros = pairs.split(',').filter_map(|p| p.split_once('='));
+        let loc = Location {
+            source: Source::File(path.into()),
+            macros: Macros::from_pairs(macros),
+        };
+        let found = links(&loc).unwrap();
+        println!("{} ({})", found.title, found.name);
+        for l in &found.links {
+            match &l.target {
+                Target::Display(loc) => {
+                    let read = links(loc);
+                    let label = match &read {
+                        Ok(read) if l.vague => read.name.clone(),
+                        _ => l.label.clone(),
+                    };
+                    let title = read.map_or_else(|e| e.to_string(), |r| r.title);
+                    println!("  {label}  [{title}]");
+                }
+                Target::Command { command, .. } => println!("  {}  [command {command}]", l.label),
+            }
+        }
+    }
+
     fn button(text: Option<&str>, actions: &str) -> String {
         let text = text.map_or(String::new(), |t| format!("<text>{t}</text>"));
         format!(r#"<widget type="action_button">{text}<actions>{actions}</actions></widget>"#)
@@ -729,5 +819,25 @@ mod tests {
             ("Launch", "./go".to_string()),
         ];
         assert_eq!(shown, expected);
+        // Called after the file: vague, so named by its display once read.
+        let vague: Vec<bool> = found.links.iter().map(|l| l.vague).collect();
+        assert_eq!(vague, [false, false, false, true, false, false]);
+    }
+
+    #[test]
+    fn names_a_display_by_what_macros_fill_in_its_title() {
+        use super::name;
+        let macros = Macros::from_pairs([("dom", "LB"), ("device", "LB-VA-IONP-04"), ("id", "02")]);
+        assert_eq!(
+            name("Ion Pump Controller - $(device)", &macros).as_deref(),
+            Some("LB-VA-IONP-04")
+        );
+        assert_eq!(
+            name("Gauge - $(dom)-VA-GAUGE-$(id)", &macros).as_deref(),
+            Some("LB-VA-GAUGE-02")
+        );
+        // Nothing filled in, or a macro not set: the title instead.
+        assert_eq!(name("Linac Vacuum", &macros), None);
+        assert_eq!(name("Space $(nope)", &macros), None);
     }
 }

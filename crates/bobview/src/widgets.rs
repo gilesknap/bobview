@@ -20,11 +20,6 @@ pub enum Request {
         target: String,
     },
     Webpage(String),
-    /// Edit a value with the on-screen keypad.
-    Keypad {
-        pv: pv::Pv,
-        text: String,
-    },
     /// Show the details of a widget's PV, from its context menu.
     Details(crate::pvmenu::Details),
     /// Open a trend window of these PVs.
@@ -55,8 +50,8 @@ pub struct Cx<'a> {
     pub pvs: &'a PvManager,
     pub requests: &'a mut Vec<Request>,
     pub depth: u32,
-    /// Text entries open the on-screen keypad instead of taking keyboard focus.
-    pub keypad: bool,
+    /// Touch mode: finger-sized rows in drop-down lists.
+    pub touch: bool,
     /// The open trend windows, (id, title), that a PV's context menu can
     /// add it to.
     pub trends: &'a [(u64, String)],
@@ -72,7 +67,7 @@ impl Cx<'_> {
             pvs: self.pvs,
             requests: self.requests,
             depth: self.depth + 1,
-            keypad: self.keypad,
+            touch: self.touch,
             trends: self.trends,
             window: self.window,
         }
@@ -90,7 +85,7 @@ const MOUSE_RADIUS: f32 = 5.0;
 /// [`TOUCH_TARGET`].
 const TOUCH_RADIUS: f32 = (TOUCH_TARGET - 20.0) / 2.0;
 
-/// Grow the hit area of every control in touch (keypad) mode, without
+/// Grow the hit area of every control in touch mode, without
 /// changing how anything is drawn. egui hit-tests in two steps: a touch
 /// directly on a control always goes to that control (the topmost one), and
 /// only a touch on no control at all goes to the nearest control within
@@ -1079,36 +1074,6 @@ fn text_entry(
     };
     let align = alignment(&w, 1);
     let enabled = can_write(&w, state);
-    if cx.keypad {
-        let resp = ui.interact(rect.intersect(cx.clip), id, Sense::click());
-        let painter = ui.painter().with_clip_rect(cx.clip);
-        fill(&painter, rect, bg(&w, "Write_Background"));
-        text_in(
-            &painter,
-            rect.shrink2(Vec2::new(2.0, 0.0)),
-            &shown,
-            font(&w, cx.view.zoom),
-            fg(&w),
-            align,
-            false,
-        );
-        if resp.clicked()
-            && enabled
-            && let Some(pv) = &node.pv
-        {
-            let text = state.map(|s| {
-                s.format(
-                    w.i64("precision").filter(|p| *p >= 0).map(|p| p as i32),
-                    false,
-                )
-            });
-            cx.requests.push(Request::Keypad {
-                pv: pv.clone(),
-                text: text.unwrap_or_default(),
-            });
-        }
-        return resp;
-    }
     let mut buf = node.edit.clone().unwrap_or(shown);
     // Text that does not fit is elided with `…` like a text update's, except
     // while it is being edited, when every character must be there for the
@@ -1613,7 +1578,7 @@ fn combo(
         font(&w, z),
         &ui.style().text_styles[&egui::TextStyle::Button],
     );
-    let row_h = if cx.keypad { TOUCH_TARGET } else { 0.0 };
+    let row_h = if cx.touch { TOUCH_TARGET } else { 0.0 };
     egui::Popup::menu(&resp).width(rect.width()).show(|ui| {
         ui.set_min_width(rect.width() - ui.spacing().menu_margin.sum().x);
         for item in &items {
@@ -2158,7 +2123,7 @@ mod tests {
                 pvs: &pvs,
                 requests: &mut requests,
                 depth: 0,
-                keypad: false,
+                touch: false,
                 trends: &[],
                 window: WindowKey::Main,
             };
@@ -2485,7 +2450,7 @@ mod tests {
             pvs: &pvs,
             requests: &mut requests,
             depth: 0,
-            keypad: false,
+            touch: false,
             trends: &[],
             window: WindowKey::Main,
         };
@@ -2519,7 +2484,7 @@ mod tests {
             pvs: &pvs,
             requests: &mut requests,
             depth: 0,
-            keypad: false,
+            touch: false,
             trends: &[],
             window: WindowKey::Main,
         };
@@ -2570,7 +2535,7 @@ pv.setValue(pv_value);
                 pvs: &pvs,
                 requests: &mut requests,
                 depth: 0,
-                keypad: false,
+                touch: false,
                 trends: &[],
                 window: WindowKey::Main,
             };
