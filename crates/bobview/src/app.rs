@@ -2676,11 +2676,14 @@ mod tests {
             app.request(&ctx, origin, req);
         };
         open(&mut app, true, at(&[("P", "a")]));
+        // Showing a display waits only briefly for its build thread.
+        wait_loaded(&ctx, &mut app.main);
         assert!(app.main.screen.is_some());
         let shown = app.main.shown;
         // Its link has the display's own macros too: reloaded in place, in
         // the pinned main window, not opened in a new one.
         open(&mut app, false, at(&[("X", "1"), ("P", "a")]));
+        wait_loaded(&ctx, &mut app.main);
         std::fs::remove_dir_all(&dir).ok();
         assert!(app.main.back.is_empty());
         assert_eq!(app.main.shown, shown + 1);
@@ -2696,6 +2699,17 @@ mod tests {
         assert_eq!(t("pva://BL01T:Y"), "pva://BL01T:Y");
     }
 
+    /// Poll `view` until its display has loaded, which takes as long as its
+    /// build thread does under load.
+    fn wait_loaded(ctx: &eframe::egui::Context, view: &mut crate::view::View) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while view.is_loading() {
+            assert!(std::time::Instant::now() < until, "never loaded");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            view.poll_loading(ctx);
+        }
+    }
+
     /// Draw `frames` frames of `app` in a window of `size` points, as a
     /// window manager would: the window takes the sizes the app asks for.
     fn run(
@@ -2706,7 +2720,15 @@ mod tests {
     ) {
         use eframe::egui::{self, Pos2, Rect, Vec2};
         let monitor = Vec2::new(1920.0, 1080.0);
-        for _ in 0..frames {
+        // Past `frames`, keep drawing while this app's displays still load:
+        // under load the build threads can take longer than the frames do.
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut drawn = 0;
+        while drawn < frames
+            || (std::time::Instant::now() < until
+                && (app.main.is_loading() || app.windows.iter().any(|w| w.view.is_loading())))
+        {
+            drawn += 1;
             let zoom = ctx.zoom_factor();
             let screen = Rect::from_min_size(Pos2::ZERO, *size / zoom);
             let mut input = egui::RawInput {
