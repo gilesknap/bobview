@@ -3144,17 +3144,23 @@ pv.setValue(pv_value);
                 trends: &[],
                 window: WindowKey::Main,
             };
-            for a in node.w.actions() {
-                run_action(node, &a, &mut cx);
-            }
-            (pv.state().value.as_f64(), requests)
+            let values: Vec<_> = node
+                .w
+                .actions()
+                .iter()
+                .map(|a| {
+                    run_action(node, a, &mut cx);
+                    pv.state().value.as_f64()
+                })
+                .collect();
+            (values, requests)
         };
         // Wherever the display came from, both actions write at once, as
         // in Phoebus: write_pv sets 5, then the toggle flips 5 to 0.
         for source in ["https://host/a.bob", "/tmp/a.bob"] {
-            let (value, requests) = run(source);
+            let (values, requests) = run(source);
             assert!(requests.is_empty(), "{source}");
-            assert_eq!(value, Some(0.0), "{source}");
+            assert_eq!(values, [Some(5.0), Some(0.0)], "{source}");
         }
     }
 
