@@ -9,10 +9,13 @@ use crate::Element;
 /// A set layered over another (see [`Macros::with`]) shares it rather than
 /// copying it, so each widget of a large display costs only its own macros.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct Macros {
-    parent: Option<Arc<Macros>>,
+pub struct Macros(Arc<Layer>);
+
+#[derive(Debug, Default, PartialEq)]
+struct Layer {
+    parent: Option<Macros>,
     /// Consulted after `parent` and everything below it.
-    base: Option<Arc<Macros>>,
+    base: Option<Macros>,
     own: Vec<(String, String)>,
     /// Position in `own` of the last definition of each name.
     index: HashMap<String, usize>,
@@ -27,7 +30,7 @@ const MAX_LAYER_BYTES: usize = 1 << 20;
 /// it came to, that a whole load should do, for [`Macros::with_budget`] to be
 /// given. Each expansion takes the size of its text and result, so this also
 /// bounds the lookups, and so the time, of a load.
-pub const MAX_LOAD_BYTES: usize = 16 << 20;
+pub const MAX_LOAD_BYTES: usize = 4 << 20;
 
 /// The most definitions in a layer, and the most layers; more are ignored.
 const MAX_LAYER_MACROS: usize = 512;
@@ -48,47 +51,43 @@ impl Macros {
         Self::layer(None, None, own)
     }
 
-    fn layer(
-        parent: Option<Arc<Macros>>,
-        base: Option<Arc<Macros>>,
-        own: Vec<(String, String)>,
-    ) -> Self {
+    fn layer(parent: Option<Macros>, base: Option<Macros>, own: Vec<(String, String)>) -> Self {
         let index = own
             .iter()
             .enumerate()
             .map(|(i, (k, _))| (k.clone(), i))
             .collect();
-        let depth = parent.as_ref().map_or(0, |p| p.depth + 1);
-        Self {
+        let depth = parent.as_ref().map_or(0, |p| p.0.depth + 1);
+        Self(Arc::new(Layer {
             parent,
             base,
             own,
             index,
             depth,
-        }
+        }))
     }
 
     pub fn get(&self, name: &str) -> Option<&str> {
-        let own = self.index.get(name).map(|&i| self.own[i].1.as_str());
-        own.or_else(|| self.parent.as_ref()?.get(name))
-            .or_else(|| self.base.as_ref()?.get(name))
+        let own = self.0.index.get(name).map(|&i| self.0.own[i].1.as_str());
+        own.or_else(|| self.0.parent.as_ref()?.get(name))
+            .or_else(|| self.0.base.as_ref()?.get(name))
     }
 
     pub fn is_empty(&self) -> bool {
-        self.own.is_empty()
-            && self.parent.as_ref().is_none_or(|p| p.is_empty())
-            && self.base.as_ref().is_none_or(|b| b.is_empty())
+        self.0.own.is_empty()
+            && self.0.parent.as_ref().is_none_or(|p| p.is_empty())
+            && self.0.base.as_ref().is_none_or(|b| b.is_empty())
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
         let mut layers = vec![self];
-        while let Some(p) = &layers[layers.len() - 1].parent {
+        while let Some(p) = &layers[layers.len() - 1].0.parent {
             layers.push(p);
         }
         layers
             .into_iter()
             .rev()
-            .flat_map(|m| m.own.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .flat_map(|m| m.0.own.iter().map(|(k, v)| (k.as_str(), v.as_str())))
     }
 
     /// These macros with `inner` layered on top. Values in `inner` are first
@@ -105,17 +104,18 @@ impl Macros {
     /// itself are used, at most [`MAX_LAYER_MACROS`] of them, and no more
     /// than [`MAX_LAYERS`] deep.
     pub fn with_budget(&self, inner: &Macros, left: &AtomicUsize) -> Macros {
-        if inner.own.is_empty() {
+        if inner.0.own.is_empty() {
             return self.clone();
         }
-        if self.depth >= MAX_LAYERS {
+        if self.0.depth >= MAX_LAYERS {
             log::warn!("macros nested over {MAX_LAYERS} deep are ignored");
             return self.clone();
         }
-        if inner.own.len() > MAX_LAYER_MACROS {
+        if inner.0.own.len() > MAX_LAYER_MACROS {
             log::warn!("over {MAX_LAYER_MACROS} macros in a widget; the rest are ignored");
         }
         let own = inner
+            .0
             .own
             .iter()
             .take(MAX_LAYER_MACROS)
@@ -130,26 +130,22 @@ impl Macros {
                 (k.clone(), v)
             })
             .collect();
-        Self::layer(Some(Arc::new(self.clone())), None, own)
+        Self::layer(Some(self.clone()), None, own)
     }
 
     /// `defaults` with `over` on top of them, sharing both: `over` is the
     /// macros an embedding passes to the display it embeds, and is a whole
     /// chain of the embedder's layers, which are not copied.
     pub fn over(defaults: &Macros, over: &Macros, left: &AtomicUsize) -> Macros {
-        if over.parent.is_none() && over.base.is_none() {
+        if over.0.parent.is_none() && over.0.base.is_none() {
             return defaults.with_budget(over, left);
         }
-        Self::layer(
-            Some(Arc::new(over.clone())),
-            Some(Arc::new(defaults.clone())),
-            Vec::new(),
-        )
+        Self::layer(Some(over.clone()), Some(defaults.clone()), Vec::new())
     }
 
     /// The bytes of the definitions in this layer alone.
     pub fn own_bytes(&self) -> usize {
-        self.own.iter().map(|(k, v)| k.len() + v.len()).sum()
+        self.0.own.iter().map(|(k, v)| k.len() + v.len()).sum()
     }
 }
 

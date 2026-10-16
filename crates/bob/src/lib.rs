@@ -44,6 +44,8 @@ pub struct Display {
     /// Translated from a BOY `.opi` file. BOY clipped widgets to the
     /// declared size, where Phoebus grows the display to show them.
     pub legacy: bool,
+    /// The size of the file's XML, in bytes.
+    pub size: usize,
 }
 
 /// One widget: its type, property elements and child widgets.
@@ -140,6 +142,7 @@ impl Display {
             widgets,
             source: None,
             legacy,
+            size: xml.len(),
         })
     }
 

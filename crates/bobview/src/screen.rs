@@ -15,6 +15,9 @@ const MAX_DEPTH: u32 = 8;
 /// against displays that embed themselves several times over).
 const MAX_SCREENS: u32 = 256;
 
+/// The most XML, in all the displays a load embeds, that it parses.
+const MAX_EMBEDDED_BYTES: usize = 32 << 20;
+
 /// The most widgets one load builds, counting those of embedded displays.
 const MAX_WIDGETS: u32 = 100_000;
 
@@ -82,6 +85,8 @@ struct Budget {
     widgets: AtomicU32,
     /// Bytes of expanded macro values and PV names.
     macros: AtomicUsize,
+    /// Bytes of embedded display files.
+    files: AtomicUsize,
 }
 
 impl Budget {
@@ -211,6 +216,7 @@ impl<'a> Builder<'a> {
                 screens: AtomicU32::new(MAX_SCREENS),
                 widgets: AtomicU32::new(MAX_WIDGETS),
                 macros: AtomicUsize::new(bob::MAX_LOAD_BYTES),
+                files: AtomicUsize::new(MAX_EMBEDDED_BYTES),
             }),
         }
     }
@@ -446,16 +452,18 @@ impl Builder<'_> {
         let ex = |t: &str| self.expand_charged(w, &macros, t);
         let pv_name = w.text("pv_name").map(ex).unwrap_or_default();
         let pv = (!pv_name.is_empty()).then(|| self.pvs.subscribe(&pv_name));
-        let rules = w
-            .rules()
+        let (all_rules, all_actions) = (w.rules(), w.actions());
+        if all_rules.len() > MAX_PER_WIDGET || all_actions.len() > MAX_PER_WIDGET {
+            log::warn!("over {MAX_PER_WIDGET} rules or actions in a widget; the rest are ignored");
+        }
+        let rules = all_rules
             .iter()
             .take(MAX_PER_WIDGET)
             .map(|r| CompiledRule::new(r, &ex, self.pvs))
             .collect();
 
         let link = crate::group_link::Link::new(w, &ex, self.pvs);
-        let action_pvs = w
-            .actions()
+        let action_pvs = all_actions
             .iter()
             .take(MAX_PER_WIDGET)
             .filter_map(|a| match a {
@@ -463,10 +471,6 @@ impl Builder<'_> {
                 _ => None,
             })
             .collect();
-        if w.rules().len() > MAX_PER_WIDGET || w.actions().len() > MAX_PER_WIDGET {
-            log::warn!("over {MAX_PER_WIDGET} rules or actions in a widget; the rest are ignored");
-        }
-
         let mut node = Node {
             w: w.clone(),
             rect,
@@ -588,7 +592,11 @@ impl Builder<'_> {
         }
         let source = node.resolve(file);
         match crate::fetch::load(&source) {
+            Ok(d) if this.budget.files.load(Ordering::Relaxed) < d.size => {
+                node.error = Some("embedded displays too large in total".into());
+            }
             Ok(d) => {
+                bob::spend(&this.budget.files, d.size);
                 let screen = this.screen(d, macros, Some(group), depth + 1);
                 // Resize mode 2 sizes the widget to its content.
                 if node.w.i64("resize") == Some(2) {
@@ -800,32 +808,106 @@ mod tests {
         assert!(start.elapsed().as_secs() < 10);
     }
 
-    #[test]
-    fn macro_text_is_bounded_across_a_load() {
-        // V9 is 2 KiB. Every widget has 256 macros naming it, and a PV name
-        // that does: 400 widgets would hold 200 MB if each were expanded.
-        let doubling: String = (1..=9)
+    /// How long a hostile display may take; debug builds are far slower.
+    fn patience() -> std::time::Duration {
+        std::time::Duration::from_secs(if cfg!(debug_assertions) { 60 } else { 10 })
+    }
+
+    /// Root macros V0..V9, where V9 is 2 KiB.
+    fn doubling() -> String {
+        let v: String = (1..=9)
             .map(|i| format!("<V{i}>$(V{n})$(V{n})</V{i}>", n = i - 1))
             .collect();
+        format!("<macros><V0>xxxx</V0>{v}</macros>")
+    }
+
+    /// Load `xml` from a file, as an untrusted display, and say how long it took.
+    fn load_hostile(name: &str, xml: &str) -> (Screen, std::time::Duration) {
+        let dir = std::env::temp_dir().join(format!("bobview-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("hostile.bob");
+        std::fs::write(&file, xml).unwrap();
+        let start = std::time::Instant::now();
+        let pvs = PvManager::new();
+        let s = Screen::load(&Source::File(file), &Macros::default(), &pvs).unwrap();
+        let took = start.elapsed();
+        std::fs::remove_dir_all(&dir).ok();
+        (s, took)
+    }
+
+    #[test]
+    fn macro_text_is_bounded_across_a_load() {
+        // Every widget has 256 macros naming the 2 KiB V9, and a PV name that
+        // does: 100 widgets would hold 50 MB if each were expanded.
         let own: String = (0..256).map(|i| format!("<N{i}>$(V9)</N{i}>")).collect();
         let widget = format!(
             "<widget type='label'><pv_name>loc://$(V9)</pv_name><macros>{own}</macros></widget>"
         );
-        let d = Display::parse(&format!(
-            "<display><macros><V0>xxxx</V0>{doubling}</macros>{}</display>",
-            widget.repeat(400)
-        ))
-        .unwrap();
-        let start = std::time::Instant::now();
-        let pvs = PvManager::new();
-        let s = Builder::new(&pvs).screen(d, &Macros::default(), None, 0);
+        let xml = format!("<display>{}{}</display>", doubling(), widget.repeat(100));
+        let (s, took) = load_hostile("macros", &xml);
         let held: usize = s
             .nodes
             .iter()
             .map(|n| n.macros.own_bytes() + n.pv_name.len())
             .sum();
         assert!(held < 2 * bob::MAX_LOAD_BYTES, "{held} bytes held");
-        assert!(start.elapsed().as_secs() < 20);
+        assert!(took < patience(), "{took:?}");
+    }
+
+    #[test]
+    fn rules_and_actions_per_widget_are_capped() {
+        let rules: String = (0..5000)
+            .map(|i| format!("<rule name='r{i}' prop_id='visible'><exp bool_exp='true'><value>true</value></exp><pv_name>$(V9)u{i}</pv_name></rule>"))
+            .collect();
+        let actions: String = (0..5000)
+            .map(|i| {
+                format!(
+                    "<action type='write_pv'><pv_name>$(V9)w{i}</pv_name><value>1</value></action>"
+                )
+            })
+            .collect();
+        let xml = format!(
+            "<display>{}<widget type='label'><rules>{rules}</rules><actions>{actions}</actions></widget></display>",
+            doubling()
+        );
+        let (s, took) = load_hostile("rules", &xml);
+        assert!(s.nodes[0].rules.len() <= MAX_PER_WIDGET);
+        assert!(s.nodes[0].action_pvs.len() <= MAX_PER_WIDGET);
+        assert!(took < patience(), "{took:?}");
+    }
+
+    #[test]
+    fn deeply_nested_groups_of_macros_load_quickly() {
+        // 30 groups, each in the last and defining 256 macros that name V9.
+        let own: String = (0..256).map(|i| format!("<N{i}>$(V9)</N{i}>")).collect();
+        let mut inner = "<widget type='label'><pv_name>loc://$(N0)</pv_name></widget>".to_string();
+        for _ in 0..30 {
+            inner = format!("<widget type='group'><macros>{own}</macros>{inner}</widget>");
+        }
+        let xml = format!("<display>{}{inner}</display>", doubling());
+        let (_, took) = load_hostile("nest", &xml);
+        assert!(took < patience(), "{took:?}");
+    }
+
+    #[test]
+    fn embedding_does_not_copy_the_caller_chain() {
+        // A self-embedding display with large root macros, passing 256 more
+        // at each level: the ancestors' macros must be shared, not copied.
+        let big: String = (0..2000)
+            .map(|i| format!("<B{i}>{}</B{i}>", "b".repeat(500)))
+            .collect();
+        let own: String = (0..256)
+            .map(|i| format!("<N{i}>{}</N{i}>", "n".repeat(50)))
+            .collect();
+        let embed = format!(
+            "<widget type='embedded'><file>hostile.bob</file><macros>{own}</macros></widget>"
+        );
+        let xml = format!(
+            "<display><macros>{big}</macros>{}</display>",
+            embed.repeat(4)
+        );
+        let (_, took) = load_hostile("embed", &xml);
+        assert!(took < patience(), "{took:?}");
     }
 
     #[test]
