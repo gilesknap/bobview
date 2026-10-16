@@ -406,7 +406,13 @@ fn is_button(kind: &str) -> bool {
 /// label) or are wrapped (a linking container in a group box).
 fn widget(mut el: Element) -> Vec<Element> {
     let type_id = el.attr("typeId").unwrap_or("").to_string();
-    let short = type_id.strip_prefix(PREFIX).unwrap_or(&type_id).to_string();
+    let short = match type_id.strip_prefix(PREFIX).unwrap_or(&type_id) {
+        // DAWN's XY graph has the BOY one's properties, and Phoebus reads
+        // it as one.
+        "dawn.xygraph" => "xyGraph",
+        s => s,
+    }
+    .to_string();
     let (kids, props): (Vec<Element>, Vec<Element>) =
         el.children.drain(..).partition(|c| c.name == "widget");
     el.children = props;
@@ -1553,6 +1559,7 @@ menumap {
             ("ImageBoolIndicator", "symbol"),
             ("scaledslider", "scaledslider"),
             ("xyGraph", "xyplot"),
+            ("dawn.xygraph", "xyplot"),
             ("tab", "tabs"),
             ("edm.menumux", "combo"),
             ("NoSuchWidget", "NoSuchWidget"),
