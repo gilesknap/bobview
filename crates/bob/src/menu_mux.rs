@@ -21,6 +21,10 @@
 
 use crate::{Element, Widget};
 
+/// The most sets a menu mux has, as in BOY (`target0`…`target7`); any more
+/// in a `<menu_mux>` are ignored.
+pub const MAX_SETS: usize = 8;
+
 /// One target and the value each item writes to it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MuxSet {
@@ -68,6 +72,7 @@ impl Widget {
             .children
             .iter()
             .filter(|c| c.name == "set")
+            .take(MAX_SETS)
             .map(|s| MuxSet {
                 target: s.child_text("target").unwrap_or("").trim().to_string(),
                 values: s
@@ -89,7 +94,7 @@ impl Widget {
 /// Sets with no target are left out, as there is nothing to write.
 pub(crate) fn from_opi(el: &Element) -> Element {
     let text = |name: &str| el.child_text(name).map(str::trim).unwrap_or("");
-    let num_sets = text("num_sets").parse().unwrap_or(1usize).min(8);
+    let num_sets = text("num_sets").parse().unwrap_or(1usize).min(MAX_SETS);
     let mut out = Element::new("menu_mux").with_child(Element::with_text(
         "index",
         (!text("pv_name").is_empty()).to_string(),

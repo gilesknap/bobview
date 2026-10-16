@@ -680,10 +680,18 @@ impl Builder<'_> {
         // A menu mux's targets, which a pick writes, and the values of its
         // initial item, which BOY writes as the display opens.
         if let Some(mux) = w.menu_mux() {
-            let initial = mux.initial.map(|i| mux.writes(i)).unwrap_or_default();
+            let sets = w
+                .get("menu_mux")
+                .map_or(0, |m| m.children.iter().filter(|c| c.name == "set").count());
+            if sets > bob::MAX_MUX_SETS {
+                log::warn!(
+                    "over {} sets in a menu mux; the rest are ignored",
+                    bob::MAX_MUX_SETS
+                );
+            }
             for set in &mux.sets {
                 let target = self.pvs.subscribe(&ex(&set.target));
-                if let Some((_, value)) = initial.iter().find(|(t, _)| *t == set.target) {
+                if let Some(value) = mux.initial.and_then(|i| set.values.get(i)) {
                     target.write(ex(value));
                 }
                 action_pvs.push(target);
@@ -1145,6 +1153,27 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         assert_eq!(s.nodes[0].error, None);
         assert!(s.nodes[0].embedded.is_some());
+    }
+
+    #[test]
+    fn menu_mux_sets_are_capped() {
+        // A hand-written `<menu_mux>` with far more sets than BOY allows.
+        let set = |i: usize| {
+            format!(
+                "<set><target>loc://t{i}&lt;VString&gt;</target><values><v>a{i}</v><v>b{i}</v></values></set>"
+            )
+        };
+        let sets: String = (0..10_000).map(set).collect();
+        let xml = format!(
+            "<display><widget type='combo'><menu_mux><initial>1</initial>{sets}</menu_mux></widget></display>"
+        );
+        let (s, took) = load_hostile("mux", &xml);
+        let pvs = &s.nodes[0].action_pvs;
+        assert_eq!(pvs.len(), bob::MAX_MUX_SETS);
+        // Each target is written its own set's value for the initial item.
+        assert!(pvs[3].name().to_string().starts_with("loc://t3"));
+        assert_eq!(pvs[3].state().format(None, false), "b3");
+        assert!(took < patience(), "{took:?}");
     }
 
     /// How long a hostile display may take; debug builds are far slower.
