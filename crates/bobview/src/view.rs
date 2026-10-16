@@ -14,20 +14,23 @@ use crate::widgets::{self, Cx, Request};
 
 /// The window a view is drawn in, and so the window a widget's request acts
 /// on (Back, Reload and Close act on their own window).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum WindowKey {
     /// The main window, with the toolbar.
+    #[default]
     Main,
     /// A display window of its own.
     Child(egui::ViewportId),
 }
 
-/// Where a request came from: its window, and whether ctrl was held as it
-/// was made (a link then navigates in place in multi-window mode).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Where a request came from: its window, and whether ctrl or shift was
+/// held as it was made (a link then navigates in place, or opens a window
+/// of its own).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Origin {
     pub window: WindowKey,
     pub ctrl: bool,
+    pub shift: bool,
 }
 
 /// What drawing a view gives back.
@@ -91,6 +94,16 @@ type Loading = Receiver<Result<Screen, bob::Error>>;
 /// once they have all arrived.
 #[cfg(target_arch = "wasm32")]
 struct Loading;
+
+/// A display window's title: the display's, after a pin when the window
+/// is pinned.
+pub fn window_title(title: &str, pinned: bool) -> String {
+    if pinned {
+        format!("📌 {title}")
+    } else {
+        title.to_string()
+    }
+}
 
 /// What makes two command actions the same: base, directory and command.
 pub type LaunchKey = (Option<String>, Option<String>, String);
@@ -269,12 +282,13 @@ impl View {
     }
 
     /// Title the window this view is drawn in (or the browser page) after
-    /// its display.
-    pub fn update_title(&mut self, ctx: &egui::Context) {
-        if let Some(s) = &self.screen
-            && s.title != self.window_title
-        {
-            self.window_title = s.title.clone();
+    /// its display, marked when the window is `pinned`.
+    pub fn update_title(&mut self, ctx: &egui::Context, pinned: bool) {
+        let Some(title) = self.screen.as_ref().map(|s| window_title(&s.title, pinned)) else {
+            return;
+        };
+        if title != self.window_title {
+            self.window_title = title;
             #[cfg(not(target_arch = "wasm32"))]
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.window_title.clone()));
             #[cfg(target_arch = "wasm32")]
@@ -362,6 +376,7 @@ impl View {
         let origin = Origin {
             window: vcx.window,
             ctrl: ui.input(|i| i.modifiers.command),
+            shift: ui.input(|i| i.modifiers.shift),
         };
         Drawn {
             status,
