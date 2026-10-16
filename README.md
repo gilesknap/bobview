@@ -167,15 +167,15 @@ macros fall back to environment variables in displays opened from files (in
 widget properties and the display name),
 `border_width`/`border_color` borders, label and text update `rotation_step`,
 alarm borders and dashed borders for disconnected PVs, back and
-forward navigation, `loc://` and `sim://` PVs. The display name, with macros
+forward navigation, `loc://` and `sim://` PVs, and formula PVs (`=…`,
+`eq://`). The display name, with macros
 expanded (or the file name if it has none), is the window title.
 
 Unsupported widgets, such as table, webbrowser, array, fileselector and
 byte-array, are drawn as a grey placeholder labelled with the widget type
 and PV name.
 
-Not yet: formula PVs (`=…`, `eq://`), `sys://` and other PV types (shown
-as disconnected), PV Access field paths (`pva://name/field`), compressed (codec) images, image axes, ROIs and cursor PVs, the XY plot
+Not yet: `sys://` and other PV types (shown as not supported), PV Access field paths (`pva://name/field`), compressed (codec) images, image axes, ROIs and cursor PVs, the XY plot
 `markers`, error bars and toolbar, the strip chart's toolbar and second y axes, GIF and JPEG
 images (symbols and pictures show their fallback or a placeholder), text inside
 SVG images, and scripts: an `execute` action logs that it is not supported,

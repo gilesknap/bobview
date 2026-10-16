@@ -7,9 +7,11 @@ pub enum Scheme {
     Pva,
     Loc,
     Sim,
-    /// A kind of PV bobview does not serve, such as a formula (`=pv0+1`,
-    /// `eq://`) or `sys://`: it never connects, rather than being looked
-    /// up as a Channel Access name.
+    /// A formula over other PVs: `=expr` as in BOY, or `eq://expr`.
+    Formula,
+    /// A kind of PV bobview does not serve, such as `sys://` or an unknown
+    /// `scheme://` prefix: it never connects, rather than being looked up
+    /// as a Channel Access name.
     Unsupported,
 }
 
@@ -20,6 +22,7 @@ impl Scheme {
             Scheme::Pva => "pva",
             Scheme::Loc => "loc",
             Scheme::Sim => "sim",
+            Scheme::Formula => "eq",
             Scheme::Unsupported => "",
         }
     }
@@ -34,24 +37,24 @@ pub struct PvName {
 }
 
 impl PvName {
-    /// Parse a name; one without a prefix is Channel Access, as in Phoebus.
-    /// A formula (`=…`) or an unknown `scheme://` prefix is
-    /// [`Scheme::Unsupported`].
+    /// Parse a name; one without a prefix is Channel Access, as in Phoebus,
+    /// and one starting `=` is a formula, as in BOY. An unknown `scheme://`
+    /// prefix is [`Scheme::Unsupported`].
     pub fn parse(name: &str) -> Self {
         let name = name.trim();
-        let prefixed = name.split_once("://").is_some_and(|(p, _)| is_scheme(p));
-        if name.starts_with('=') || prefixed {
-            let known = ["ca", "pva", "loc", "sim"]
-                .iter()
-                .any(|p| name.strip_prefix(p).is_some_and(|r| r.starts_with("://")));
-            if !known {
-                return Self {
-                    scheme: Scheme::Unsupported,
-                    pv: name.to_string(),
-                };
-            }
+        if let Some(expr) = name.strip_prefix('=') {
+            return Self {
+                scheme: Scheme::Formula,
+                pv: expr.trim().to_string(),
+            };
         }
-        for scheme in [Scheme::Ca, Scheme::Pva, Scheme::Loc, Scheme::Sim] {
+        for scheme in [
+            Scheme::Ca,
+            Scheme::Pva,
+            Scheme::Loc,
+            Scheme::Sim,
+            Scheme::Formula,
+        ] {
             if let Some(rest) = name
                 .strip_prefix(scheme.prefix())
                 .and_then(|r| r.strip_prefix("://"))
@@ -61,6 +64,12 @@ impl PvName {
                     pv: rest.trim().to_string(),
                 };
             }
+        }
+        if name.split_once("://").is_some_and(|(p, _)| is_scheme(p)) {
+            return Self {
+                scheme: Scheme::Unsupported,
+                pv: name.to_string(),
+            };
         }
         Self {
             scheme: Scheme::Ca,
@@ -92,7 +101,8 @@ impl PvName {
     pub fn key(&self) -> String {
         match self.scheme {
             Scheme::Loc => format!("loc://{}", self.base()),
-            _ => self.to_string(),
+            Scheme::Formula | Scheme::Unsupported => self.to_string(),
+            _ => format!("{}://{}", self.scheme.prefix(), self.pv),
         }
     }
 }
@@ -100,6 +110,7 @@ impl PvName {
 impl fmt::Display for PvName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.scheme {
+            Scheme::Formula => write!(f, "={}", self.pv),
             Scheme::Unsupported => f.write_str(&self.pv),
             _ => write!(f, "{}://{}", self.scheme.prefix(), self.pv),
         }
@@ -164,14 +175,17 @@ mod tests {
     }
 
     #[test]
-    fn formulas_and_unknown_schemes_are_unsupported() {
-        for name in [
-            "=pv0 + 1",
-            "eq://`a`+1",
-            "sys://time",
-            "mqtt://x/y",
-            "mqtt+ssl://x",
-        ] {
+    fn formulas() {
+        let n = PvName::parse(" =(pv(\"X\")*1000)");
+        assert_eq!(n.scheme, Scheme::Formula);
+        assert_eq!(n.pv, "(pv(\"X\")*1000)");
+        assert_eq!(n.to_string(), "=(pv(\"X\")*1000)");
+        assert_eq!(n.key(), PvName::parse("eq://(pv(\"X\")*1000)").key());
+    }
+
+    #[test]
+    fn unknown_schemes_are_unsupported() {
+        for name in ["sys://time", "mqtt://x/y", "mqtt+ssl://x"] {
             let n = PvName::parse(name);
             assert_eq!(n.scheme, Scheme::Unsupported, "{name}");
             assert_eq!(n.to_string(), name);
@@ -180,5 +194,6 @@ mod tests {
         assert_eq!(PvName::parse("BL01:A://B").scheme, Scheme::Ca);
         assert_eq!(PvName::parse("BL01T-MO-01:X").scheme, Scheme::Ca);
         assert_eq!(PvName::parse("pva://X").scheme, Scheme::Pva);
+        assert_eq!(PvName::parse("eq://1").scheme, Scheme::Formula);
     }
 }

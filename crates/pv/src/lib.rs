@@ -10,6 +10,7 @@
 //! | `pva://`  | PV Access                               |
 //! | `loc://`  | local PVs held in this process          |
 //! | `sim://`  | simulated signals (sine, ramp, noise …) |
+//! | `=`, `eq://` | formulas over other PVs              |
 //!
 //! In a browser (wasm32) there is no runtime: `sim://` runs on the page's
 //! event loop, and `ca://` and `pva://` PVs come over a PV Web Socket
@@ -17,6 +18,7 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 mod ca;
+mod formula;
 mod local;
 mod name;
 mod origin;
@@ -131,6 +133,69 @@ enum After {
     Refused,
 }
 
+thread_local! {
+    /// How many PVs' listeners this thread is calling, under their locks.
+    static CALLING: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Work a listener left for when this thread holds no PV's lock.
+    static DEFERRED: std::cell::RefCell<std::collections::VecDeque<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+    /// Whether this thread is running that work, and how many times it has
+    /// begun to (see [`drain_number`]).
+    static DRAINING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static DRAINS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Call listeners in `f`, under a PV's lock; [`after_listeners`] once the
+/// lock is let go.
+fn calling_listeners<R>(f: impl FnOnce() -> R) -> R {
+    struct Calling;
+    impl Drop for Calling {
+        fn drop(&mut self) {
+            CALLING.with(|c| c.set(c.get() - 1));
+        }
+    }
+    CALLING.with(|c| c.set(c.get() + 1));
+    let _calling = Calling;
+    f()
+}
+
+/// Run the work listeners left, once this thread holds no PV's lock. Work
+/// that leaves more (and updates within it) joins this loop rather than
+/// nesting, so the stack stays flat however long a chain of formulas is.
+fn after_listeners() {
+    if CALLING.with(|c| c.get()) != 0 || DRAINING.with(|d| d.get()) {
+        return;
+    }
+    struct Draining;
+    impl Drop for Draining {
+        fn drop(&mut self) {
+            DRAINING.with(|d| d.set(false));
+        }
+    }
+    DRAINING.with(|d| d.set(true));
+    DRAINS.with(|n| n.set(n.get() + 1));
+    let _draining = Draining;
+    // One at a time, so a panic leaves the rest for the next time.
+    while let Some(work) = DEFERRED.with(|d| d.borrow_mut().pop_front()) {
+        work();
+    }
+}
+
+/// Which run of left work this thread is in: work it leaves for itself
+/// (one formula evaluating another) stays in the same one.
+pub(crate) fn drain_number() -> u64 {
+    DRAINS.with(|n| n.get())
+}
+
+/// Run `work` once this thread holds no PV's lock: now, unless it is in a
+/// listener. Work that locks a PV (subscribing, listening, publishing)
+/// could otherwise wait for one this thread holds, or take two in another
+/// thread's order.
+pub(crate) fn outside_listeners(work: Box<dyn FnOnce()>) {
+    DEFERRED.with(|d| d.borrow_mut().push_back(work));
+    after_listeners();
+}
+
 /// State shared between a [`Pv`] handle and the task serving it.
 pub(crate) struct Shared {
     ctl: Arc<Control>,
@@ -186,18 +251,21 @@ impl Shared {
             // task (or the UI thread writing a local PV) for good. Release
             // builds abort on any panic instead (`panic = "abort"`).
             let mut listeners = self.listeners.lock();
-            listeners.retain(|l| match l.upgrade() {
-                Some(l) => {
-                    let call = std::panic::AssertUnwindSafe(|| l(&state));
-                    let ok = std::panic::catch_unwind(call).is_ok();
-                    if !ok {
-                        log::error!("{}: a listener panicked and was removed", self.name);
+            calling_listeners(|| {
+                listeners.retain(|l| match l.upgrade() {
+                    Some(l) => {
+                        let call = std::panic::AssertUnwindSafe(|| l(&state));
+                        let ok = std::panic::catch_unwind(call).is_ok();
+                        if !ok {
+                            log::error!("{}: a listener panicked and was removed", self.name);
+                        }
+                        ok
                     }
-                    ok
-                }
-                None => false,
+                    None => false,
+                })
             });
         }
+        after_listeners();
         if let Some(n) = self.notify.read().as_ref() {
             n();
         }
@@ -370,6 +438,8 @@ impl Shared {
                 self.name, put.text
             )),
             After::Local(Put { text, long_string }) => self.update(|s| {
+                // Each write is a new sample, though its value be the same.
+                s.timestamp = Some(web_time::SystemTime::now());
                 s.value = if long_string && s.value.is_numeric_array() {
                     Value::LongArray(
                         long_string_bytes(&text, None)
@@ -406,6 +476,9 @@ struct Entry {
     /// The runtime the task runs on, to finish its writes after the drop.
     #[cfg(not(target_arch = "wasm32"))]
     rt: tokio::runtime::Handle,
+    /// A formula's inputs, followed for as long as it is held.
+    #[cfg_attr(not(test), allow(dead_code, reason = "only held"))]
+    formula: Option<Arc<formula::Formula>>,
 }
 
 impl Drop for Entry {
@@ -489,12 +562,15 @@ impl Pv {
     /// frame, this sees every monitor update.
     pub fn listen(&self, listener: &Listener) {
         let shared = &self.0.shared;
-        let state = shared.state.lock();
-        listener(&state);
-        let mut listeners = shared.listeners.lock();
-        // Drop dead ones here too: a PV that never changes is never updated.
-        listeners.retain(|l| l.strong_count() > 0);
-        listeners.push(Arc::downgrade(listener));
+        {
+            let state = shared.state.lock();
+            calling_listeners(|| listener(&state));
+            let mut listeners = shared.listeners.lock();
+            // Drop dead ones here too: a PV that never changes is never updated.
+            listeners.retain(|l| l.strong_count() > 0);
+            listeners.push(Arc::downgrade(listener));
+        }
+        after_listeners();
     }
 
     /// Write a value given as text; the backend converts it to the PV's type.
@@ -676,19 +752,31 @@ impl PvManager {
         if let Some(entry) = entries.map.get(&key).and_then(Weak::upgrade) {
             return Pv(entry);
         }
+        // A macro left unexpanded makes a name that is not what was meant,
+        // and a local one would share its state with every other such PV.
+        if name.pv.contains("$(") || name.pv.contains("${") {
+            log::warn!("{}: PV name has an undefined macro", name.pv);
+        }
 
-        let (shared, task) = match name.scheme {
-            Scheme::Loc => (self.local(&name), None),
+        let shared = || Shared::new(&name, self.inner.notify.clone(), self.inner.ctl.clone());
+        let (shared, task, formula) = match name.scheme {
+            Scheme::Loc => (self.local(&name), None, None),
+            Scheme::Formula => {
+                let shared = shared();
+                let f = formula::Formula::new(&name, shared.clone(), Arc::downgrade(&self.inner));
+                (shared, None, Some(f))
+            }
             Scheme::Unsupported => {
-                let shared = Shared::new(&name, self.inner.notify.clone(), self.inner.ctl.clone());
-                log::warn!("{name}: formula and other PV types are not supported");
-                shared.update(|s| s.error = Some("PV type not supported".into()));
-                (shared, None)
+                let shared = shared();
+                log::warn!("{name}: PV type not supported");
+                // New, so no one is listening or drawing it yet.
+                shared.state.lock().error = Some("PV type not supported".into());
+                (shared, None, None)
             }
             _ => {
-                let shared = Shared::new(&name, self.inner.notify.clone(), self.inner.ctl.clone());
+                let shared = shared();
                 let task = self.spawn_backend(&name, shared.clone());
-                (shared, task)
+                (shared, task, None)
             }
         };
         let entry = Arc::new(Entry {
@@ -697,8 +785,14 @@ impl PvManager {
             task,
             #[cfg(not(target_arch = "wasm32"))]
             rt: self.runtime().handle().clone(),
+            formula: formula.clone(),
         });
         entries.insert(key, Arc::downgrade(&entry));
+        // Its inputs are subscribed to with the entries unlocked.
+        drop(entries);
+        if let Some(f) = formula {
+            f.start();
+        }
         Pv(entry)
     }
 
@@ -720,7 +814,9 @@ impl PvManager {
         Some(match name.scheme {
             Scheme::Sim => pvws::spawn(sim::run(name.clone(), shared)),
             Scheme::Ca | Scheme::Pva => pvws::subscribe(name, shared),
-            Scheme::Loc | Scheme::Unsupported => unreachable!("no task"),
+            Scheme::Loc | Scheme::Formula | Scheme::Unsupported => {
+                unreachable!("local, formula and unsupported PVs have no task")
+            }
         })
     }
 
@@ -752,7 +848,9 @@ impl PvManager {
                     pva::run(client, &pv, shared).await
                 }))
             }
-            Scheme::Loc | Scheme::Unsupported => unreachable!("no task"),
+            Scheme::Loc | Scheme::Formula | Scheme::Unsupported => {
+                unreachable!("local, formula and unsupported PVs have no task")
+            }
         }
     }
 }
@@ -776,6 +874,15 @@ mod tests {
         drop(listener);
         pv.write("4");
         assert_eq!(*seen.lock(), [Some(1.0), Some(2.0), Some(3.0)]);
+    }
+
+    #[test]
+    fn local_writes_are_time_stamped() {
+        let pvs = PvManager::new();
+        let pv = pvs.subscribe("loc://stamp_test(1)");
+        assert_eq!(pv.state().timestamp, None);
+        pv.write("1");
+        assert!(pv.state().timestamp.is_some());
     }
 
     #[test]
@@ -856,6 +963,7 @@ mod tests {
             shared,
             task: None,
             rt: pvs.runtime().handle().clone(),
+            formula: None,
         };
         (Pv(Arc::new(entry)), rx)
     }
@@ -1053,9 +1161,9 @@ mod tests {
     }
 
     #[test]
-    fn formulas_never_connect_and_refuse_writes() {
+    fn unsupported_pvs_never_connect_and_refuse_writes() {
         let pvs = PvManager::new();
-        let pv = pvs.subscribe("=pv0 + 1");
+        let pv = pvs.subscribe("sys://time");
         let s = pv.state();
         assert!(!s.connected);
         assert!(s.error.is_some());

@@ -5,8 +5,9 @@
 //! properties are renamed and converted as Phoebus's own legacy import does
 //! it (in its widgets' `CustomConfigurator`s), so nothing downstream needs to
 //! know where a display came from. Scripts are not translated, except the
-//! DLS `get_pv_name.py` widget script (see [`crate::group_link`]); script
-//! actions stay as unsupported actions unless [`action`] recognises them.
+//! DLS `get_pv_name.py` widget script (see [`crate::group_link`]) and the
+//! scripts that choose a linking container's display (see
+//! [`crate::opi_file_script`]); script actions stay as unsupported actions unless [`action`] recognises them.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -15,9 +16,13 @@ use crate::Element;
 
 const PREFIX: &str = "org.csstudio.opibuilder.widgets.";
 
-/// Phoebus divides legacy font heights given in points by this
-/// (`legacy_font_calibration`) to get pixels.
-const FONT_CALIBRATION: f64 = 1.01;
+/// BOY font heights not given in pixels are points, which CS-Studio draws
+/// at the 96 DPI of a Linux desktop, 4/3 of a pixel each. egui's text
+/// looks a little larger than SWT's at the same size, so a point is 1.27
+/// pixels here: side by side with CS-Studio, the text matches. (Phoebus
+/// divides points by its `legacy_font_calibration`, 1.01 by default,
+/// which leaves these screens' text far smaller than CS-Studio showed it.)
+const PIXELS_PER_POINT: f64 = 1.27;
 
 /// Fonts Phoebus defines itself; a BOY font with one of these names uses
 /// the Phoebus definition rather than the height in the file.
@@ -122,7 +127,7 @@ fn font(el: &Element) -> Element {
     let size = if el.attr("pixels") == Some("true") {
         height
     } else {
-        height.map(|h| h / FONT_CALIBRATION)
+        height.map(|h| h * PIXELS_PER_POINT)
     };
     out.with_attr("family", el.attr("fontName").unwrap_or("Liberation Sans"))
         .with_attr("style", style)
@@ -295,6 +300,12 @@ fn renames(short: &str, kind: &str) -> &'static [(&'static str, &'static str)] {
             ("color_lolo", "major_warning_color"),
             ("color_lo", "minor_warning_color"),
         ],
+        (_, "scaledslider") => &[
+            ("level_lo", "level_low"),
+            ("level_hi", "level_high"),
+            ("show_lo", "show_low"),
+            ("show_hi", "show_high"),
+        ],
         (_, "textentry") => &[("multiline_input", "multi_line")],
         (_, "progressbar") => &[("color_fillbackground", "background_color")],
         (_, "picture") => &[("image_file", "file"), ("stretch_to_fit", "stretch_image")],
@@ -397,6 +408,19 @@ fn pv_less(kind: &str) -> bool {
     )
 }
 
+/// A BOY `pv_name` as the widget's `pv_name` macro, unless empty.
+fn pv_macro(el: &mut Element, pv: Element) {
+    if pv.text.is_empty() {
+        return;
+    }
+    // As Phoebus `MacroWidget.importPVName`: rules and tooltips use it.
+    let mut macros = el
+        .take_child("macros")
+        .unwrap_or_else(|| Element::new("macros"));
+    macros.children.insert(0, pv);
+    el.children.push(macros);
+}
+
 /// Widgets that run their actions themselves, so BOY's click hooks don't apply.
 fn is_button(kind: &str) -> bool {
     matches!(kind, "action_button" | "bool_button" | "combo" | "choice")
@@ -406,38 +430,66 @@ fn is_button(kind: &str) -> bool {
 /// label) or are wrapped (a linking container in a group box).
 fn widget(mut el: Element) -> Vec<Element> {
     let type_id = el.attr("typeId").unwrap_or("").to_string();
-    let short = type_id.strip_prefix(PREFIX).unwrap_or(&type_id).to_string();
+    let short = match type_id.strip_prefix(PREFIX).unwrap_or(&type_id) {
+        // DAWN's XY and intensity graphs have the BOY ones' properties, and
+        // Phoebus reads them as those.
+        "dawn.xygraph" => "xyGraph",
+        "dawn.intensitygraph" => "intensityGraph",
+        s => s,
+    }
+    .to_string();
     let (kids, props): (Vec<Element>, Vec<Element>) =
         el.children.drain(..).partition(|c| c.name == "widget");
     el.children = props;
     // Read before the scripts and widget type are dropped as noise.
     let group_link = crate::group_link::from_opi(&el);
-    // Kept for `has_scripts` unless bobview runs them as a group link.
+    let opi_file = (short == "linkingContainer")
+        .then(|| crate::opi_file_script::from_opi(&el))
+        .flatten();
+    let shown_by = visible_scripts(&mut el);
+    // Kept for `has_scripts` unless bobview runs them as a group link, or
+    // knows the display they choose.
     let scripts = el
         .child("scripts")
-        .filter(|s| group_link.is_none() && !s.children.is_empty())
+        .filter(|s| group_link.is_none() && opi_file.is_none() && !s.children.is_empty())
         .cloned();
+    if let Some((file, macros)) = opi_file {
+        el.set_child(Element::with_text("opi_file", file));
+        // The script's macros replace the container's own.
+        if let Some(macros) = macros {
+            el.set_child(macros);
+        }
+    }
     remove(&mut el, NOISE);
     el.children.extend(group_link);
     el.children.extend(scripts);
     let mut children: Vec<Element> = kids.into_iter().flat_map(widget).collect();
 
+    alarm_sensitive(&mut el);
     let kind = kind(&short, &el);
     for (from, to) in renames(&short, &kind) {
         rename(&mut el, from, to);
     }
     rules(&mut el);
+    if !shown_by.is_empty() {
+        // As the script's first line: hidden until its PV says otherwise.
+        set(&mut el, "visible", false);
+        let rules = match el.child_mut("rules") {
+            Some(r) => r,
+            None => {
+                el.children.push(Element::new("rules"));
+                el.children.last_mut().unwrap()
+            }
+        };
+        rules
+            .children
+            .extend(shown_by.into_iter().flatten().map(visible_rule));
+    }
     actions(&mut el, &kind);
     if pv_less(&kind)
         && let Some(pv) = el.take_child("pv_name")
-        && !pv.text.is_empty()
     {
-        // As Phoebus `MacroWidget.importPVName`: rules and tooltips use it.
-        let mut macros = el
-            .take_child("macros")
-            .unwrap_or_else(|| Element::new("macros"));
-        macros.children.insert(0, pv);
-        el.children.push(macros);
+        pv_macro(&mut el, pv);
     }
 
     let mut extra = Vec::new();
@@ -472,6 +524,7 @@ fn widget(mut el: Element) -> Vec<Element> {
             }
         }
         (_, "polyline" | "polygon") => points(&mut el),
+        (_, "scaledslider") => scaled_slider(&mut el, &short),
         ("arc", _) => {
             if let Some(fill) = flag(&el, "fill") {
                 set(&mut el, "transparent", !fill);
@@ -516,7 +569,11 @@ fn widget(mut el: Element) -> Vec<Element> {
             }
             stretch(&mut el);
         }
-        (_, "action_button") if short == "MenuButton" => rename(&mut el, "label", "text"),
+        (_, "action_button") if short == "MenuButton" => {
+            rename(&mut el, "label", "text");
+            // BOY showed no label, not Phoebus' default `$(actions)`.
+            default(&mut el, "text", "");
+        }
         (_, "action_button") if short == "BoolButton" => {
             // Writes with its push action, labelled as the button was.
             let label = text(&el, "off_label").unwrap_or("").to_string();
@@ -527,6 +584,7 @@ fn widget(mut el: Element) -> Vec<Element> {
             }
         }
         (_, "action_button") => {
+            default(&mut el, "text", "");
             push_first(&mut el, "push_action_index");
             if let Some(t) = el.child_mut("tooltip") {
                 t.text = t.text.replace("$(pv_value)", "$(actions)");
@@ -582,7 +640,11 @@ fn widget(mut el: Element) -> Vec<Element> {
         }
         (_, "multi_state_led") => {
             led_border(&mut el);
-            led_states(&mut el);
+            let labels = flag(&el, "show_boolean_label") != Some(false);
+            led_states(&mut el, labels);
+            if !labels {
+                set(&mut el, "fallback_label", "");
+            }
         }
         (_, "choice" | "radio" | "combo") => items(&mut el),
         (_, "bool_button") => {
@@ -603,6 +665,27 @@ fn widget(mut el: Element) -> Vec<Element> {
     let mut all = vec![out];
     all.extend(extra);
     all
+}
+
+/// A scaled slider or knob. BOY's `show_markers` (true unless given)
+/// hides all four level markers, which Phoebus shows by their own
+/// `show_*` alone, and its major ticks are 50 pixels apart unless given,
+/// not Phoebus' 40. BOY's scale ran an inverted range backwards and
+/// widened an empty one by one, where Phoebus falls back to 0 to 100: the
+/// bobview-only `<boy_range>` keeps BOY's.
+fn scaled_slider(el: &mut Element, short: &str) {
+    default(el, "major_tick_step_hint", "50");
+    set(el, "boy_range", true);
+    if short == "scaledslider" {
+        // BOY's slider fills its box with its background colour; Phoebus'
+        // is transparent unless told otherwise.
+        default(el, "transparent", "false");
+    }
+    if flag(el, "show_markers") == Some(false) {
+        for show in ["show_lolo", "show_low", "show_high", "show_hihi"] {
+            set(el, show, false);
+        }
+    }
 }
 
 /// The most axes, traces or LED states a widget may have: more than BOY
@@ -643,6 +726,11 @@ fn xy_graph(el: &mut Element) {
         ("line_width", "line_width"),
         ("point_size", "point_size"),
         ("visible", "visible"),
+        // BOY plots the last `buffer_size` updates when concatenating;
+        // Phoebus has no such properties, so only bobview reads these.
+        ("concatenate_data", "concatenate_data"),
+        ("buffer_size", "buffer_size"),
+        ("update_mode", "update_mode"),
     ];
     // Counts are bounded (NaN is 0 as usize), so a bad file can't hang us.
     let axes = num(el, "axis_count").unwrap_or(2.0).clamp(1.0, MAX_COUNT) as usize;
@@ -731,6 +819,21 @@ fn xy_graph(el: &mut Element) {
             rule.set_attr("prop_id", prop);
         }
     }
+    // Phoebus' XY plot has no PV of its own; BOY's is usually
+    // `$(trace_0_y_pv)`, which no macro defines, so it is that trace's PV,
+    // kept for rules and tooltips that use `$(pv_name)`.
+    if let Some(mut pv) = el.take_child("pv_name") {
+        for (i, trace) in el
+            .child("traces")
+            .into_iter()
+            .flat_map(|t| &t.children)
+            .enumerate()
+        {
+            let y_pv = trace.child_text("y_pv").unwrap_or("");
+            pv.text = pv.text.replace(&format!("$(trace_{i}_y_pv)"), y_pv);
+        }
+        pv_macro(el, pv);
+    }
 }
 
 /// `trace_N_prop` in `text` as `traces[N].prop`, for the trace properties
@@ -804,11 +907,16 @@ fn items(el: &mut Element) {
 }
 
 /// An EDM menu mux, a drop-down that sets local PVs that stand in for
-/// macros: a combo on the first target. It writes the item's label, not the
-/// mux's value for it.
+/// macros: a combo on its own PV or, without one, its first target, with
+/// the sets kept in a `<menu_mux>` (see [`crate::menu_mux`]).
 fn menu_mux(el: &mut Element) {
+    let mux = crate::menu_mux::from_opi(el);
     if text(el, "pv_name").is_none_or(str::is_empty)
-        && let Some(target) = text(el, "target0").map(str::to_string)
+        && let Some(target) = mux
+            .children
+            .iter()
+            .find_map(|s| s.child_text("target"))
+            .map(str::to_string)
     {
         set(el, "pv_name", target);
     }
@@ -818,6 +926,7 @@ fn menu_mux(el: &mut Element) {
         !(c.name.starts_with("target") || c.name.starts_with("values"))
             && !["initial", "num_sets"].contains(&c.name.as_str())
     });
+    el.children.push(mux);
 }
 
 /// A DLS detail panel's rows: each child is a row's (already placed)
@@ -1232,8 +1341,9 @@ fn led_border(el: &mut Element) {
     add(el, "height", -2.0 * b);
 }
 
-/// A BOY multi-state LED's numbered state properties as Phoebus `<states>`.
-fn led_states(el: &mut Element) {
+/// A BOY multi-state LED's numbered state properties as Phoebus `<states>`,
+/// with blank labels when BOY hid them (`show_boolean_label` false).
+fn led_states(el: &mut Element, labels: bool) {
     let n = num(el, "state_count").unwrap_or(0.0).clamp(0.0, MAX_COUNT) as usize;
     let mut states = Element::new("states");
     for i in 0..n {
@@ -1247,7 +1357,7 @@ fn led_states(el: &mut Element) {
         ));
         state.children.push(Element::with_text(
             "label",
-            label.map(|l| l.text).unwrap_or_default(),
+            label.filter(|_| labels).map(|l| l.text).unwrap_or_default(),
         ));
         if let Some(mut c) = color {
             c.name = "color".into();
@@ -1366,6 +1476,111 @@ fn closes_display(a: &Element) -> bool {
     )
 }
 
+/// Take the DLS `visible.py` scripts out of `el`'s scripts, giving the PV
+/// each shows the widget by. The script hides the widget, reads a PV name
+/// from the initial value of its local trigger PV, and shows the widget
+/// while that PV is true:
+///
+/// ```xml
+/// <path pathString="visible.py">
+///   <pv trig="true">loc://$(DID)eloss1("='$(motor):ELOSS' == 1 || '$(motor):ELOSS' == 3")</pv>
+/// </path>
+/// ```
+///
+/// `None` for a script whose local PV names nothing: it only hides the
+/// widget. A script whose first PV is not such a local PV is left alone,
+/// and the widget shown: what it reads at run time is not known here. (The
+/// DLS corpus has `visible.py` only in the motor module, every copy the
+/// same, with local trigger PVs.)
+fn visible_scripts(el: &mut Element) -> Vec<Option<String>> {
+    let Some(scripts) = el.child_mut("scripts") else {
+        return Vec::new();
+    };
+    let named = |p: &Element| {
+        let visible = p.name == "path"
+            && p.attr("pathString")
+                .is_some_and(|s| s.rsplit(['/', '\\']).next() == Some("visible.py"));
+        let pv = p.children.iter().find(|c| c.name == "pv")?;
+        visible
+            .then(|| crate::opi_file_script::loc_initial(pv.text.trim()))
+            .flatten()
+    };
+    let mut shown_by = Vec::new();
+    scripts.children.retain(|p| match named(p) {
+        Some(name) => {
+            shown_by.push(Some(name).filter(|n| !n.is_empty()));
+            false
+        }
+        None => true,
+    });
+    shown_by
+}
+
+/// A rule showing a widget while `pv` is true, as a `visible.py` script.
+fn visible_rule(pv: String) -> Element {
+    Element::new("rule")
+        .with_attr("name", "visible.py")
+        .with_attr("prop_id", "visible")
+        .with_attr("out_exp", "false")
+        .with_child(
+            Element::new("exp")
+                .with_attr("bool_exp", "pv0")
+                .with_child(Element::with_text("value", "true")),
+        )
+        .with_child(Element::with_text("pv_name", pv))
+}
+
+/// BOY's alarm-sensitive foreground and background colours as rules on the
+/// widget's PV (as Phoebus imports them), in DLS's BOY alarm colours:
+/// MINOR yellow, MAJOR red and INVALID (or disconnected) white. Written as
+/// BOY rules, before [`rules`] and the renames translate them. An
+/// alarm-sensitive border gets the bobview-only `<boy_alarm_border>`, which
+/// draws INVALID and disconnected solid white rather than Phoebus's dashed
+/// DISCONNECTED.
+fn alarm_sensitive(el: &mut Element) {
+    if !text(el, "pv_name").is_some_and(|p| !p.is_empty()) {
+        return;
+    }
+    if flag(el, "border_alarm_sensitive") != Some(false) {
+        set(el, "boy_alarm_border", true);
+    }
+    for (sensitive, prop) in [
+        ("forecolor_alarm_sensitive", "foreground_color"),
+        ("backcolor_alarm_sensitive", "background_color"),
+    ] {
+        if el.take_child(sensitive).map(|f| f.text.trim() == "true") != Some(true) {
+            continue;
+        }
+        let mut rule = Element::new("rule")
+            .with_attr("name", sensitive)
+            .with_attr("prop_id", prop)
+            .with_attr("out_exp", "false");
+        // BOY's numbering: 1 MAJOR, 2 MINOR, -1 INVALID.
+        for (sev, name, [r, g, b]) in [
+            (1, "Major", [255, 0, 0]),
+            (2, "Minor", [255, 241, 0]),
+            (-1, "Invalid", [255, 255, 255]),
+        ] {
+            let color = Element::new("color")
+                .with_attr("name", name)
+                .with_attr("red", r.to_string())
+                .with_attr("green", g.to_string())
+                .with_attr("blue", b.to_string());
+            rule.children.push(
+                Element::new("exp")
+                    .with_attr("bool_exp", format!("pvSev0=={sev}"))
+                    .with_child(Element::new("value").with_child(color)),
+            );
+        }
+        rule.children
+            .push(Element::with_text("pv", "$(pv_name)").with_attr("trig", "true"));
+        match el.child_mut("rules") {
+            Some(rules) => rules.children.push(rule),
+            None => el.children.push(Element::new("rules").with_child(rule)),
+        }
+    }
+}
+
 /// BOY rules as `.bob` rules: `<pv>` is `<pv_name>`, BOY severities are
 /// `pvLegacySev` (as Phoebus patches them), the widget's own value
 /// (`widget.getValue()`) is its PV as one more rule PV (or 0 if it has
@@ -1376,6 +1591,9 @@ fn rules(el: &mut Element) {
         return;
     };
     for rule in rules.children.iter_mut().filter(|r| r.name == "rule") {
+        // BOY runs a rule while its PVs are disconnected, so that an alarm
+        // rule shows them as INVALID.
+        rule.set_attr("check_connections", "false");
         let own = format!(
             "pv{}",
             rule.children.iter().filter(|c| c.name == "pv").count()
@@ -1497,7 +1715,7 @@ menumap {
     }
 
     #[test]
-    fn fonts_follow_phoebus() {
+    fn fonts_follow_boy() {
         let w = one(
             "Label",
             r#"<font><opifont.name fontName="Liberation Sans" height="15" style="0" pixels="true">Default</opifont.name></font>
@@ -1514,9 +1732,9 @@ menumap {
         let f = w.font("scale_font").unwrap();
         assert_eq!((f.size, f.style), (16.0, FontStyle::Bold));
         let f = w.font("title_font").unwrap();
-        assert_eq!((f.size, f.style), (9.9, FontStyle::BoldItalic));
+        assert_eq!((f.size, f.style), (12.7, FontStyle::BoldItalic));
         let f = w.font("other_font").unwrap();
-        assert_eq!((f.size, f.family.as_str()), (19.8, "Arial"));
+        assert_eq!((f.size, f.family.as_str()), (25.4, "Arial"));
         assert_eq!(f.name.as_deref(), Some("Site Big"));
         let f = w.font("pixel_font").unwrap();
         assert_eq!((f.size, f.family.as_str()), (20.0, "Arial"));
@@ -1550,6 +1768,8 @@ menumap {
             ("ImageBoolIndicator", "symbol"),
             ("scaledslider", "scaledslider"),
             ("xyGraph", "xyplot"),
+            ("dawn.xygraph", "xyplot"),
+            ("dawn.intensitygraph", "image"),
             ("tab", "tabs"),
             ("edm.menumux", "combo"),
             ("NoSuchWidget", "NoSuchWidget"),
@@ -1613,6 +1833,49 @@ menumap {
     }
 
     #[test]
+    fn alarm_sensitive_colours_are_rules_on_the_pv() {
+        let w = one(
+            "TextUpdate",
+            r#"<pv_name>X</pv_name><forecolor_alarm_sensitive>true</forecolor_alarm_sensitive>
+            <backcolor_alarm_sensitive>false</backcolor_alarm_sensitive><border_alarm_sensitive>true</border_alarm_sensitive>
+            <rules><rule name="r" prop_id="visible" out_exp="false"><exp bool_exp="pv0==1"><value>false</value></exp><pv trig="true">Y</pv></rule></rules>"#,
+        );
+        assert_eq!(w.bool("boy_alarm_border"), Some(true));
+        let rules = w.rules();
+        assert_eq!(rules.len(), 2);
+        let r = &rules[1];
+        assert_eq!(r.prop_id, "foreground_color");
+        assert_eq!(r.pv_names, ["$(pv_name)"]);
+        assert!(!r.check_connections);
+        let sev: Vec<_> = r.exprs.iter().map(|e| e.condition.as_str()).collect();
+        assert_eq!(
+            sev,
+            ["pvLegacySev0==1", "pvLegacySev0==2", "pvLegacySev0==-1"]
+        );
+        let rgba =
+            |i: usize| crate::Color::from_element(r.exprs[i].value.child("color").unwrap()).rgba();
+        assert_eq!(rgba(0), [255, 0, 0, 255]);
+        assert_eq!(rgba(1), [255, 241, 0, 255]);
+        assert_eq!(rgba(2), [255, 255, 255, 255]);
+
+        // A polyline's background is its line, and the rule follows it.
+        let w = one(
+            "polyline",
+            r#"<pv_name>X</pv_name><backcolor_alarm_sensitive>true</backcolor_alarm_sensitive>
+            <border_alarm_sensitive>false</border_alarm_sensitive>"#,
+        );
+        assert_eq!(w.rules()[0].prop_id, "line_color");
+        assert_eq!(w.get("boy_alarm_border"), None);
+        // Without a PV there is no alarm.
+        let w = one(
+            "TextUpdate",
+            r#"<pv_name></pv_name><forecolor_alarm_sensitive>true</forecolor_alarm_sensitive>"#,
+        );
+        assert!(w.rules().is_empty());
+        assert_eq!(w.get("boy_alarm_border"), None);
+    }
+
+    #[test]
     fn polylines_are_relative_and_use_background_for_the_line() {
         let w = one(
             "polyline",
@@ -1627,6 +1890,7 @@ menumap {
         assert_eq!(r.prop_id, "line_color");
         assert_eq!(r.pv_names, ["X"]);
         assert_eq!(r.exprs[0].condition, "pvLegacySev0==1");
+        assert!(!r.check_connections);
         let c = crate::Color::from_element(r.exprs[0].value.child("color").unwrap());
         assert_eq!(c.rgba(), [200, 200, 200, 255]);
         let w = one(
@@ -1912,6 +2176,68 @@ ScriptUtil.executeEclipseCommand(command_id, ['pvnames', '$(dom)-VA-GAUGE-01:PLO
     }
 
     #[test]
+    fn unlabelled_buttons_stay_unlabelled() {
+        // Without the empty text, Phoebus' default `$(actions)` would name
+        // the first action.
+        let actions =
+            r#"<actions><action type="OPEN_DISPLAY"><path>a.opi</path></action></actions>"#;
+        for (type_id, props) in [
+            ("MenuButton", "<actions_from_pv>false</actions_from_pv>"),
+            ("ActionButton", ""),
+        ] {
+            let w = one(type_id, &format!("{props}{actions}"));
+            assert_eq!(
+                (w.kind.as_str(), w.text("text")),
+                ("action_button", Some("")),
+                "{type_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn linking_container_scripts_choose_the_display() {
+        let script = |text: &str, pv: &str| {
+            format!(
+                r#"<macros><include_parent_macros>true</include_parent_macros><a>1</a></macros>
+                <scripts><path pathString="EmbeddedJs" checkConnect="true"><scriptName>OPIFileScript</scriptName>
+                <scriptText><![CDATA[{text}]]></scriptText><pv trig="true">{pv}</pv></path></scripts>"#
+            )
+        };
+        // The EDM converter's script, at its PV's initial value.
+        let w = one(
+            "linkingContainer",
+            &script(
+                r#"var pv0 = PVUtil.getLong(pvs[0]);
+if(pv0==0){
+var macroInput = DataUtil.createMacrosInput(true);
+macroInput.put("device", "LI-DI-YAG-01");
+widget.setPropertyValue("macros", macroInput);
+widget.setPropertyValue("opi_file","../xbpm/xbpmsi.opi");
+}"#,
+                "loc://menu0&lt;VDouble&gt;(0)",
+            ),
+        );
+        assert_eq!(w.text("file"), Some("../xbpm/xbpmsi.opi"));
+        assert_eq!(
+            (w.macros().get("device"), w.macros().get("a")),
+            (Some("LI-DI-YAG-01"), None)
+        );
+        assert!(!w.has_scripts());
+        // A file named by a macro, through the PV.
+        let w = one(
+            "linkingContainer",
+            &script(
+                r#"var pv0 = PVUtil.getString(pvs[0]);
+widget.setPropertyValue("opi_file", pv0 + ".opi");"#,
+                r#"loc://$(DID)dummy&lt;VString&gt;("$(control)")"#,
+            ),
+        );
+        assert_eq!(w.text("file"), Some("$(control).opi"));
+        assert_eq!(w.macros().get("a"), Some("1"));
+        assert!(!w.has_scripts());
+    }
+
+    #[test]
     fn linking_containers_embed() {
         let w = one(
             "linkingContainer",
@@ -1994,6 +2320,16 @@ ScriptUtil.executeEclipseCommand(command_id, ['pvnames', '$(dom)-VA-GAUGE-01:PLO
         );
         assert_eq!(w.color("fallback_color").unwrap().r, 2);
         let w = one(
+            "LED",
+            r#"<state_count>1</state_count><state_label_0>Idle</state_label_0><state_label_fallback>Err</state_label_fallback>
+            <show_boolean_label>false</show_boolean_label>"#,
+        );
+        assert_eq!(
+            w.get("states").unwrap().children[0].child_text("label"),
+            Some("")
+        );
+        assert_eq!(w.text("fallback_label"), Some(""));
+        let w = one(
             "bytemonitor",
             "<square_led>true</square_led><numBits>4</numBits><label><s>a</s><s>b</s></label>",
         );
@@ -2069,6 +2405,8 @@ ScriptUtil.executeEclipseCommand(command_id, ['pvnames', '$(dom)-VA-GAUGE-01:PLO
             <trace_0_trace_color><color red="21" green="21" blue="196"/></trace_0_trace_color>
             <trace_1_y_pv>G2</trace_1_y_pv><trace_1_y_axis_index>2</trace_1_y_axis_index>
             <trace_1_trace_type>2</trace_1_trace_type><trace_1_point_style>9</trace_1_point_style>
+            <trace_1_concatenate_data>true</trace_1_concatenate_data>
+            <trace_1_buffer_size>250</trace_1_buffer_size><trace_1_update_mode>3</trace_1_update_mode>
             <trace_2_y_pv>unused</trace_2_y_pv>
             <plot_area_background_color><color red="255" green="255" blue="255"/></plot_area_background_color>
             <tooltip>$(trace_0_y_pv)</tooltip>
@@ -2094,6 +2432,10 @@ ScriptUtil.executeEclipseCommand(command_id, ['pvnames', '$(dom)-VA-GAUGE-01:PLO
             ["axis", "trace_type", "point_type"].map(|k| t[1].child_text(k)),
             [Some("1"), Some("0"), Some("4")]
         );
+        assert_eq!(
+            ["concatenate_data", "buffer_size", "update_mode"].map(|k| t[1].child_text(k)),
+            [Some("true"), Some("250"), Some("3")]
+        );
         assert_eq!(w.text("tooltip"), Some("$(traces[0].y_pv)"));
         assert_eq!(w.rules()[0].prop_id, "traces[1].visible");
         assert_eq!(w.color("background_color").unwrap().r, 255);
@@ -2105,6 +2447,21 @@ ScriptUtil.executeEclipseCommand(command_id, ['pvnames', '$(dom)-VA-GAUGE-01:PLO
             ),
             "traces[10].visible, trace_x, trace_0_other"
         );
+    }
+
+    #[test]
+    fn xy_graphs_keep_their_pv_as_a_macro() {
+        let w = one(
+            "xyGraph",
+            r#"<pv_name>$(trace_1_y_pv)</pv_name><trace_count>2</trace_count>
+            <trace_0_y_pv>G1</trace_0_y_pv><trace_1_y_pv>$(P):G2</trace_1_y_pv>
+            <tooltip>$(pv_name)</tooltip>"#,
+        );
+        assert!(w.get("pv_name").is_none());
+        assert_eq!(w.macros().get("pv_name"), Some("$(P):G2"));
+        let w = one("xyGraph", "<pv_name></pv_name>");
+        assert!(w.get("pv_name").is_none());
+        assert_eq!(w.macros().get("pv_name"), None);
     }
 
     #[test]
@@ -2146,6 +2503,94 @@ ScriptUtil.executeEclipseCommand(command_id, ['pvnames', '$(dom)-VA-GAUGE-01:PLO
         assert_eq!(w.list("items", "item"), ["NORMAL", "BL"]);
         assert_eq!(w.bool("items_from_pv"), Some(false));
         assert!(w.get("values0").is_none());
+        // The sets are kept: picking an item writes its value to each target.
+        let mux = w.menu_mux().unwrap();
+        assert!(!mux.index);
+        assert_eq!(mux.writes(1), [("loc://$(DID)CON<VString>", "BLCON")]);
+        assert_eq!(mux.current(None, "BLCON"), Some(1));
+    }
+
+    #[test]
+    fn menu_muxes_write_every_target_and_their_initial_item() {
+        let w = one(
+            "edm.menumux",
+            r#"<pv_name></pv_name><initial>1</initial><num_sets>2</num_sets>
+            <items><s>Rate 1s</s><s>Log Rate 1s</s></items>
+            <target0>loc://$(DID)ll&lt;VString&gt;</target0><target1>loc://$(DID)lld&lt;VString&gt;</target1>
+            <target2></target2>
+            <values0><s>RATE</s><s>LOG</s></values0><values1><s>LOG</s><s>LOG</s></values1><values2 />"#,
+        );
+        let mux = w.menu_mux().unwrap();
+        assert_eq!(mux.initial, Some(1));
+        assert_eq!(
+            mux.writes(0),
+            [
+                ("loc://$(DID)ll<VString>", "RATE"),
+                ("loc://$(DID)lld<VString>", "LOG")
+            ]
+        );
+        assert_eq!(mux.current(None, "LOG"), Some(1));
+        assert_eq!(mux.current(None, "DID"), None);
+    }
+
+    #[test]
+    fn menu_muxes_with_their_own_pv_write_the_index() {
+        let w = one(
+            "edm.menumux",
+            r#"<initial></initial><num_sets>1</num_sets>
+            <items><s>Hide Required BPMs</s><s>Show Required BPMs</s></items>
+            <pv_name>loc://show-required&lt;VEnum&gt;(0, "hide", "show")</pv_name>
+            <target0></target0><values0><s>0</s><s>1</s></values0>"#,
+        );
+        assert_eq!(
+            w.text("pv_name"),
+            Some(r#"loc://show-required<VEnum>(0, "hide", "show")"#)
+        );
+        let mux = w.menu_mux().unwrap();
+        assert!(mux.index && mux.sets.is_empty() && mux.initial.is_none());
+        assert_eq!(mux.current(Some(1), "show"), Some(1));
+    }
+
+    #[test]
+    fn visible_scripts_become_rules_on_their_formula() {
+        // As motor.opi's alarm labels, stacked at one place.
+        let script = |pv: &str| {
+            format!(
+                r#"<rules /><visible>true</visible><scripts>
+                <path pathString="visible.py" checkConnect="true"><pv trig="true">{pv}</pv></path>
+                </scripts>"#
+            )
+        };
+        let w = one(
+            "Label",
+            &script(r#"loc://$(DID)eloss2("='$(motor):ELOSS' == 2 || '$(motor):ELOSS' == 3")"#),
+        );
+        assert!(!w.has_scripts());
+        assert_eq!(w.text("visible"), Some("false"));
+        let r = &w.rules()[0];
+        assert_eq!(r.prop_id, "visible");
+        assert!(!r.out_exp && r.check_connections);
+        assert_eq!(
+            r.pv_names,
+            ["='$(motor):ELOSS' == 2 || '$(motor):ELOSS' == 3"]
+        );
+        assert_eq!(r.exprs[0].condition, "pv0");
+        assert_eq!(r.exprs[0].value.text, "true");
+        // A local PV that names nothing: hidden, as the script's first line.
+        let w = one("Label", &script("loc://$(DID)none(\"\")"));
+        assert!(!w.has_scripts() && w.rules().is_empty());
+        assert_eq!(w.text("visible"), Some("false"));
+        // Another PV, read at run time: the script is kept, and the
+        // widget shown.
+        let w = one("Label", &script("X:Y"));
+        assert!(w.has_scripts() && w.rules().is_empty());
+        assert_eq!(w.text("visible"), Some("true"));
+        // Other scripts are kept.
+        let w = one(
+            "Label",
+            r#"<scripts><path pathString="scripts/visible.py.bak"><pv>A</pv></path></scripts>"#,
+        );
+        assert!(w.has_scripts() && w.text("visible").is_none());
     }
 
     #[test]
@@ -2215,5 +2660,38 @@ ScriptUtil.executeEclipseCommand(command_id, ['pvnames', '$(dom)-VA-GAUGE-01:PLO
         // Those ignored scripts are still counted; a group link's are not.
         assert!(none.has_scripts());
         assert!(!sym.has_scripts() && !label.has_scripts());
+    }
+
+    #[test]
+    fn scaled_slider_fills_its_background() {
+        let w = one("scaledslider", "<horizontal>true</horizontal>");
+        assert_eq!(w.bool("transparent"), Some(false));
+        assert_eq!(w.bool("horizontal"), Some(true));
+    }
+
+    #[test]
+    fn scaled_slider_markers_follow_show_markers() {
+        let w = one(
+            "scaledslider",
+            "<level_lo>3</level_lo><level_hi>7</level_hi><show_hi>false</show_hi>",
+        );
+        assert_eq!(w.f64("level_low"), Some(3.0));
+        assert_eq!(w.f64("level_high"), Some(7.0));
+        assert_eq!(w.bool("show_high"), Some(false));
+        assert_eq!(w.get("show_lolo"), None);
+        assert_eq!(w.f64("major_tick_step_hint"), Some(50.0));
+        assert_eq!(w.bool("boy_range"), Some(true));
+        let hint = one(
+            "scaledslider",
+            "<major_tick_step_hint>20</major_tick_step_hint>",
+        );
+        assert_eq!(hint.f64("major_tick_step_hint"), Some(20.0));
+        let hidden = one(
+            "scaledslider",
+            "<show_markers>false</show_markers><show_lo>true</show_lo>",
+        );
+        for show in ["show_lolo", "show_low", "show_high", "show_hihi"] {
+            assert_eq!(hidden.bool(show), Some(false), "{show}");
+        }
     }
 }
