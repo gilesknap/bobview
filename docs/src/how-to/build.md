@@ -36,11 +36,13 @@ The docs are an [mdBook](https://rust-lang.github.io/mdBook/):
 
 ```bash
 cargo install mdbook
-mdbook serve docs --open
+scripts/build-docs.sh serve --open
 ```
 
-`mdbook serve` rebuilds and reloads the page as you edit. The Rust API docs
-are built separately with `cargo doc --workspace --no-deps --open`.
+This builds the Rust API docs into the book under `api/`, then serves it;
+`mdbook serve` rebuilds and reloads the page as you edit. Run it again to
+pick up changes to the API docs. `scripts/build-docs.sh` alone builds the
+book into `docs/book`.
 
 ## Checks CI runs
 

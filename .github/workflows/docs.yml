@@ -37,13 +37,15 @@ jobs:
         env:
           MDBOOK_OUTPUT__HTML__SITE_URL: /${{ github.event.repository.name }}/${{ env.DOCS_VERSION }}/
         run: |
-          mdbook build docs
-          cargo doc --workspace --no-deps
+          scripts/build-docs.sh
+          # the book's links to the API docs
+          for crate in bob pv testioc; do
+            test -f "docs/book/api/${crate}/index.html"
+          done
 
       - name: Move to versioned directory
         run: |
           mv docs/book ".github/pages/${DOCS_VERSION}"
-          cp -r target/doc ".github/pages/${DOCS_VERSION}/api"
 
       - name: Write switcher.json
         if: github.event_name == 'push'
