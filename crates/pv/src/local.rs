@@ -12,6 +12,7 @@ pub(crate) fn create(name: &PvName, shared: Arc<Shared>) -> Arc<Shared> {
     shared.update(|s| {
         s.connected = true;
         s.writable = true;
+        s.writable_known = true;
         if vtype == "VEnum" {
             s.value = Value::Enum(args.first().and_then(|a| a.parse().ok()).unwrap_or(0));
             s.labels = args.iter().skip(1).map(|a| unquote(a)).collect();

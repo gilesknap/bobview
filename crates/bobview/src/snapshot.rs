@@ -36,12 +36,14 @@ pub struct Options {
     /// (such as a trend window) to fill.
     pub settle: Duration,
     pub keypad: bool,
+    pub read_only: bool,
 }
 
 pub fn run(start: Location, opts: &Options, out: &Path) -> Result<(), String> {
     let ctx = egui::Context::default();
     let mut app = BobApp::new(&ctx, Some(start), opts.zoom, opts.ui_scale);
     app.set_keypad(opts.keypad);
+    app.set_read_only(opts.read_only);
     let mut textures: HashMap<TextureId, ColorImage> = HashMap::new();
     let begin = Instant::now();
     let native = opts.scale_factor;
@@ -346,6 +348,7 @@ mod tests {
                 clicks: Vec::new(),
                 settle: Duration::ZERO,
                 keypad: false,
+                read_only: false,
             };
             run(start, &opts, &out).unwrap();
             assert!(
@@ -385,6 +388,7 @@ mod tests {
                 clicks: Vec::new(),
                 settle: Duration::ZERO,
                 keypad: false,
+                read_only: false,
             };
             let start = Location {
                 source: bob::Source::File(bob.clone()),

@@ -290,6 +290,12 @@ fn run_in(
     args: &[&str],
     deadline: Instant,
 ) -> std::io::Result<Option<Vec<String>>> {
+    // A process forked while a file is open for writing holds it open until
+    // it calls exec, and until then the file cannot be run ("text file
+    // busy"). So launchers are not started while another's files are being
+    // written.
+    static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let writing = WRITING.lock().unwrap_or_else(|e| e.into_inner());
     let launcher = dir.join("launcher");
     write_executable(&launcher, script)?;
     write_executable(&dir.join("runcss.sh"), STUB.as_bytes())?;
@@ -299,7 +305,8 @@ fn run_in(
         path.push(":");
         path.push(p);
     }
-    let mut child = Command::new(&launcher)
+    let mut command = Command::new(&launcher);
+    command
         .args(args)
         .current_dir(dir)
         .env("PATH", path)
@@ -308,8 +315,17 @@ fn run_in(
         .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
+        .stderr(Stdio::null());
+    let mut child = loop {
+        match command.spawn() {
+            // Busy, as above, through a process forked elsewhere in bobview.
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            result => break result?,
+        }
+    };
+    drop(writing);
     loop {
         match child.try_wait()? {
             Some(_) => break,

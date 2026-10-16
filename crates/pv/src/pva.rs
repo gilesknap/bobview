@@ -21,11 +21,11 @@ pub(crate) async fn run(client: &PvaClient, pv: &str, shared: Arc<Shared>) {
     // Writes run beside the monitor, each as its own put.
     let put_client = client.clone();
     let put_pv = pv.to_string();
+    let put_shared = shared.clone();
     tokio::spawn(async move {
         while let Some(text) = writes.recv().await {
-            if let Err(e) = put_client.pvput(&put_pv, &text).await {
-                log::warn!("{put_pv}: write '{text}' failed: {e}");
-            }
+            let result = put_client.pvput(&put_pv, &text).await;
+            put_shared.write_result(&text, result.err().map(|e| e.to_string()));
         }
     });
 
@@ -119,6 +119,9 @@ fn apply(s: &mut PvState, field: &PvField) {
         s.alarm_range = pair("lowAlarmLimit", "highAlarmLimit");
         s.warning_range = pair("lowWarningLimit", "highWarningLimit");
     }
+    // PV Access does not report access rights per channel, so every PV is
+    // assumed writable (`writable_known` stays false); the server refuses a
+    // put it does not allow, and that is shown as a write error.
     s.writable = true;
 }
 
@@ -321,6 +324,15 @@ mod tests {
         );
         assert_eq!(img.data.get(1, true), 255.0);
         assert_eq!(img.data.get(1, false), -1.0);
+    }
+
+    #[test]
+    fn writability_is_optimistic_but_not_known() {
+        let mut nt = PvStructure::new("epics:nt/NTScalar:1.0");
+        nt.set("value", PvField::Scalar(ScalarValue::Double(1.0)));
+        let mut s = PvState::default();
+        apply(&mut s, &PvField::Structure(nt));
+        assert!(s.writable && !s.writable_known);
     }
 
     #[test]
