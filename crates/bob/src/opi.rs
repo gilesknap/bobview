@@ -440,6 +440,7 @@ fn widget(mut el: Element) -> Vec<Element> {
     let opi_file = (short == "linkingContainer")
         .then(|| crate::opi_file_script::from_opi(&el))
         .flatten();
+    let shown_by = visible_scripts(&mut el);
     // Kept for `has_scripts` unless bobview runs them as a group link, or
     // knows the display they choose.
     let scripts = el
@@ -463,6 +464,20 @@ fn widget(mut el: Element) -> Vec<Element> {
         rename(&mut el, from, to);
     }
     rules(&mut el);
+    if !shown_by.is_empty() {
+        // As the script's first line: hidden until its PV says otherwise.
+        set(&mut el, "visible", false);
+        let rules = match el.child_mut("rules") {
+            Some(r) => r,
+            None => {
+                el.children.push(Element::new("rules"));
+                el.children.last_mut().unwrap()
+            }
+        };
+        rules
+            .children
+            .extend(shown_by.into_iter().flatten().map(visible_rule));
+    }
     actions(&mut el, &kind);
     if pv_less(&kind)
         && let Some(pv) = el.take_child("pv_name")
@@ -1422,6 +1437,53 @@ fn closes_display(a: &Element) -> bool {
     )
 }
 
+/// Take the DLS `visible.py` scripts out of `el`'s scripts, giving the PV
+/// each shows the widget by. The script hides the widget, reads a PV name
+/// from the initial value of its local trigger PV, and shows the widget
+/// while that PV is true:
+///
+/// ```xml
+/// <path pathString="visible.py">
+///   <pv trig="true">loc://$(DID)eloss1("='$(motor):ELOSS' == 1 || '$(motor):ELOSS' == 3")</pv>
+/// </path>
+/// ```
+///
+/// `None` for a script whose PV names nothing: it only hides the widget.
+fn visible_scripts(el: &mut Element) -> Vec<Option<String>> {
+    let Some(scripts) = el.child_mut("scripts") else {
+        return Vec::new();
+    };
+    let (visible, others): (Vec<Element>, Vec<Element>) = std::mem::take(&mut scripts.children)
+        .into_iter()
+        .partition(|p| {
+            p.name == "path"
+                && p.attr("pathString")
+                    .is_some_and(|s| s.rsplit(['/', '\\']).next() == Some("visible.py"))
+        });
+    scripts.children = others;
+    visible
+        .iter()
+        .map(|p| {
+            let pv = p.children.iter().find(|c| c.name == "pv")?;
+            crate::opi_file_script::loc_initial(pv.text.trim()).filter(|n| !n.is_empty())
+        })
+        .collect()
+}
+
+/// A rule showing a widget while `pv` is true, as a `visible.py` script.
+fn visible_rule(pv: String) -> Element {
+    Element::new("rule")
+        .with_attr("name", "visible.py")
+        .with_attr("prop_id", "visible")
+        .with_attr("out_exp", "false")
+        .with_child(
+            Element::new("exp")
+                .with_attr("bool_exp", "pv0")
+                .with_child(Element::with_text("value", "true")),
+        )
+        .with_child(Element::with_text("pv_name", pv))
+}
+
 /// BOY rules as `.bob` rules: `<pv>` is `<pv_name>`, BOY severities are
 /// `pvLegacySev` (as Phoebus patches them), the widget's own value
 /// (`widget.getValue()`) is its PV as one more rule PV (or 0 if it has
@@ -2322,6 +2384,43 @@ widget.setPropertyValue("opi_file", pv0 + ".opi");"#,
         let mux = w.menu_mux().unwrap();
         assert!(mux.index && mux.sets.is_empty() && mux.initial.is_none());
         assert_eq!(mux.current(Some(1), "show"), Some(1));
+    }
+
+    #[test]
+    fn visible_scripts_become_rules_on_their_formula() {
+        // As motor.opi's alarm labels, stacked at one place.
+        let script = |pv: &str| {
+            format!(
+                r#"<rules /><visible>true</visible><scripts>
+                <path pathString="visible.py" checkConnect="true"><pv trig="true">{pv}</pv></path>
+                </scripts>"#
+            )
+        };
+        let w = one(
+            "Label",
+            &script(r#"loc://$(DID)eloss2("='$(motor):ELOSS' == 2 || '$(motor):ELOSS' == 3")"#),
+        );
+        assert!(!w.has_scripts());
+        assert_eq!(w.text("visible"), Some("false"));
+        let r = &w.rules()[0];
+        assert_eq!(r.prop_id, "visible");
+        assert!(!r.out_exp && r.check_connections);
+        assert_eq!(
+            r.pv_names,
+            ["='$(motor):ELOSS' == 2 || '$(motor):ELOSS' == 3"]
+        );
+        assert_eq!(r.exprs[0].condition, "pv0");
+        assert_eq!(r.exprs[0].value.text, "true");
+        // A PV that names nothing: hidden, as the script's first line.
+        let w = one("Label", &script("X:Y"));
+        assert!(!w.has_scripts() && w.rules().is_empty());
+        assert_eq!(w.text("visible"), Some("false"));
+        // Other scripts are kept.
+        let w = one(
+            "Label",
+            r#"<scripts><path pathString="scripts/visible.py.bak"><pv>A</pv></path></scripts>"#,
+        );
+        assert!(w.has_scripts() && w.text("visible").is_none());
     }
 
     #[test]
