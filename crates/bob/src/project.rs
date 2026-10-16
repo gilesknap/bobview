@@ -214,49 +214,34 @@ fn launcher_projects(script: &Path) -> Projects {
     projects
 }
 
+/// DLS's table of named paths, which `configure-ioc s -p NAME` looks up.
+const REDIRECT_TABLE: &str = "/dls_sw/prod/etc/redirector/redirect_table";
+
 /// The linked folders that the launcher `text`, in `dir`, passes CS-Studio
 /// as `links="REAL=/PROJECT/NAME,…"`, by project, in order. The script is
-/// not run: its plain `name=value` lines are evaluated, with `SCRIPT_DIR`
-/// as `dir`, `TOP` as `dir/../../..` and `version` from
-/// `$TOP/configure/VERSION` (else `dev`), as the generated scripts set them.
+/// not run but read by [`Shell`], with `SCRIPT_DIR` as `dir`, `TOP` as
+/// `dir/../../..` unless the script sets it, and `version` from
+/// `$TOP/configure/VERSION` (else `dev`), as the DLS scripts set them.
 fn parse_launcher(text: &str, dir: &Path) -> Projects {
+    parse_launcher_with(text, dir, Path::new(REDIRECT_TABLE))
+}
+
+fn parse_launcher_with(text: &str, dir: &Path, table: &Path) -> Projects {
     let dir = normalize(&std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf()));
-    let top = dir.join("../../..");
-    let version = std::fs::read_to_string(top.join("configure/VERSION"))
-        .map(|v| v.trim().to_string())
-        .unwrap_or_else(|_| "dev".into());
-    let mut vars: HashMap<String, String> = HashMap::from([
-        ("SCRIPT_DIR".into(), dir.display().to_string()),
-        ("TOP".into(), top.display().to_string()),
-        ("version".into(), version),
-    ]);
-    let text = text.replace("\\\n", "");
-    for line in text.lines() {
-        let Some((name, value)) = line.trim().split_once('=') else {
-            continue;
-        };
-        let plain = !name.is_empty()
-            && !name.starts_with(|c: char| c.is_ascii_digit())
-            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-        // Command substitutions are not run, and the variables set above
-        // keep their values.
-        let fixed = ["SCRIPT_DIR", "TOP", "version"].contains(&name);
-        if !plain || fixed || value.contains("$(") || value.contains('`') {
-            continue;
-        }
-        let value = match value.strip_prefix('\'') {
-            Some(v) => v.strip_suffix('\'').unwrap_or(v).to_string(),
-            None => {
-                let v = value
-                    .strip_prefix('"')
-                    .map_or(value, |v| v.strip_suffix('"').unwrap_or(v));
-                expand_vars(v, &vars)
-            }
-        };
-        vars.insert(name.to_string(), value);
-    }
+    let mut shell = Shell {
+        vars: HashMap::from([("SCRIPT_DIR".into(), dir.display().to_string())]),
+        functions: HashMap::new(),
+        table: table.to_path_buf(),
+    };
+    shell.set_top(&dir.join("../../.."));
+    shell.run(text, SOURCE_DEPTH);
     let mut projects = Projects::new();
-    for entry in vars.get("links").map_or("", String::as_str).split(',') {
+    for entry in shell
+        .vars
+        .get("links")
+        .map_or("", String::as_str)
+        .split(',')
+    {
         let Some((real, virt)) = entry.trim().split_once('=') else {
             continue;
         };
@@ -264,7 +249,7 @@ fn parse_launcher(text: &str, dir: &Path) -> Projects {
             continue;
         };
         let name = name.trim_end_matches('/');
-        let real = PathBuf::from(real);
+        let real = normalize(Path::new(real));
         if project.is_empty() || name.is_empty() || name.contains('/') || !real.is_absolute() {
             continue;
         }
@@ -277,34 +262,237 @@ fn parse_launcher(text: &str, dir: &Path) -> Projects {
     projects
 }
 
-/// `text` with `$name` and `${name}` replaced by their `vars` (empty when
-/// unset), as the shell would in double quotes.
-fn expand_vars(text: &str, vars: &HashMap<String, String>) -> String {
-    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(i) = rest.find('$') {
-        out.push_str(&rest[..i]);
-        let after = &rest[i + 1..];
-        let (name, next) = match after.strip_prefix('{') {
-            Some(braced) => match braced.split_once('}') {
-                Some((name, next)) => (name, next),
-                None => ("", after),
-            },
-            None => {
-                let end = after.find(|c| !word(c)).unwrap_or(after.len());
-                (&after[..end], &after[end..])
-            }
-        };
-        if name.is_empty() {
-            out.push('$');
-        } else {
-            out.push_str(vars.get(name).map_or("", String::as_str));
-        }
-        rest = next;
+/// How deep `source` may nest in a launcher.
+const SOURCE_DEPTH: usize = 4;
+
+/// How deep `$(…)` commands may nest, functions calling functions.
+const CALL_DEPTH: usize = 16;
+
+/// Just enough of the shell to read a launcher without running it: plain
+/// `name=value` lines, `source FILE`, and in `$(…)` the commands `join SEP
+/// ARG…` (as `opi-versions` defines it), `configure-ioc s -p NAME` and the
+/// script's functions whose body is one `echo`. Other commands (and so the
+/// assignments using them) are skipped, as are function bodies.
+struct Shell {
+    vars: HashMap<String, String>,
+    /// Each one-`echo` function's text.
+    functions: HashMap<String, String>,
+    table: PathBuf,
+}
+
+impl Shell {
+    /// Set `TOP`, and `version` from its `configure/VERSION`.
+    fn set_top(&mut self, top: &Path) {
+        let version = std::fs::read_to_string(top.join("configure/VERSION"))
+            .map(|v| v.trim().to_string())
+            .unwrap_or_else(|_| "dev".into());
+        self.vars.insert("TOP".into(), top.display().to_string());
+        self.vars.insert("version".into(), version);
     }
-    out.push_str(rest);
-    out
+
+    fn run(&mut self, text: &str, depth: usize) {
+        let text = text.replace("\\\n", "");
+        let mut lines = text.lines().map(str::trim);
+        while let Some(line) = lines.next() {
+            if let Some(name) = function_name(line) {
+                let mut body = Vec::new();
+                if !line.ends_with('{') && lines.next() != Some("{") {
+                    continue;
+                }
+                for l in lines.by_ref() {
+                    if l == "}" {
+                        break;
+                    }
+                    if !l.is_empty() && !l.starts_with('#') {
+                        body.push(l);
+                    }
+                }
+                if let [echo] = body.as_slice()
+                    && let Some(out) = echo.strip_prefix("echo ")
+                {
+                    self.functions
+                        .insert(name.to_string(), out.trim().to_string());
+                }
+                continue;
+            }
+            let source = line
+                .strip_prefix("source ")
+                .or_else(|| line.strip_prefix(". "));
+            if let Some(file) = source {
+                if depth > 0
+                    && let Some(file) = self.expand(unquote(file.trim()))
+                    && let Ok(text) = std::fs::read_to_string(&file)
+                {
+                    self.run(&text, depth - 1);
+                }
+                continue;
+            }
+            let Some((name, value)) = line.split_once('=') else {
+                continue;
+            };
+            let plain = !name.is_empty()
+                && !name.starts_with(|c: char| c.is_ascii_digit())
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            // `SCRIPT_DIR` and `version` keep the values set above, and
+            // backquoted commands are not run.
+            let fixed = ["SCRIPT_DIR", "version"].contains(&name);
+            if !plain || fixed || value.contains('`') {
+                continue;
+            }
+            let value = match value.strip_prefix('\'') {
+                Some(v) => v.strip_suffix('\'').unwrap_or(v).to_string(),
+                None => match self.expand(unquote(value)) {
+                    Some(v) => v,
+                    None => continue,
+                },
+            };
+            if name == "TOP" {
+                self.set_top(&normalize(Path::new(&value)));
+            } else {
+                self.vars.insert(name.to_string(), value);
+            }
+        }
+    }
+
+    /// `text` with `$name`, `${name}` (empty when unset) and `$(command)`
+    /// replaced, as the shell would in double quotes; `None` when a command
+    /// is not one [`Shell::command`] knows.
+    fn expand(&self, text: &str) -> Option<String> {
+        self.expand_with(text, &HashMap::new(), CALL_DEPTH)
+    }
+
+    /// [`Shell::expand`] with the positional `args` (`$1`…) too.
+    fn expand_with(
+        &self,
+        text: &str,
+        args: &HashMap<String, String>,
+        depth: usize,
+    ) -> Option<String> {
+        let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(i) = rest.find('$') {
+            out.push_str(&rest[..i]);
+            let after = &rest[i + 1..];
+            if let Some(inner) = after.strip_prefix('(') {
+                let end = closing_paren(inner)?;
+                out.push_str(self.command(&inner[..end], depth)?.trim_end_matches('\n'));
+                rest = &inner[end + 1..];
+                continue;
+            }
+            let (name, next) = match after.strip_prefix('{') {
+                Some(braced) => match braced.split_once('}') {
+                    Some((name, next)) => (name, next),
+                    None => ("", after),
+                },
+                None => {
+                    let end = after.find(|c| !word(c)).unwrap_or(after.len());
+                    (&after[..end], &after[end..])
+                }
+            };
+            if name.is_empty() {
+                out.push('$');
+            } else {
+                let value = args.get(name).or_else(|| self.vars.get(name));
+                out.push_str(value.map_or("", String::as_str));
+            }
+            rest = next;
+        }
+        out.push_str(rest);
+        Some(out)
+    }
+
+    /// The output of the simple command `text`, if it is one we know.
+    fn command(&self, text: &str, depth: usize) -> Option<String> {
+        // A function calling itself must end.
+        let depth = depth.checked_sub(1)?;
+        let words = split_words(text)
+            .into_iter()
+            .map(|w| self.expand_with(unquote(w), &HashMap::new(), depth))
+            .collect::<Option<Vec<_>>>()?;
+        let (name, args) = words.split_first()?;
+        match (name.as_str(), args) {
+            ("join", [sep, rest @ ..]) => Some(rest.join(sep)),
+            ("configure-ioc", [mode, flag, key])
+                if ["s", "show"].contains(&mode.as_str()) && flag == "-p" =>
+            {
+                let table = std::fs::read_to_string(&self.table).ok()?;
+                table.lines().find_map(|l| {
+                    let (k, v) = l.split_once(' ')?;
+                    (k == key).then(|| v.trim().to_string())
+                })
+            }
+            _ => {
+                let echo = self.functions.get(name)?;
+                let args = args
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| ((i + 1).to_string(), a.clone()))
+                    .collect();
+                self.expand_with(unquote(echo), &args, depth)
+            }
+        }
+    }
+}
+
+/// The function a line such as `name()`, `name() {` or `function name()`
+/// starts.
+fn function_name(line: &str) -> Option<&str> {
+    let line = line.strip_prefix("function ").unwrap_or(line);
+    let (name, rest) = line.split_once("()")?;
+    let name = name.trim();
+    let ok = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        && matches!(rest.trim(), "" | "{");
+    ok.then_some(name)
+}
+
+/// `text` without one pair of surrounding double quotes.
+fn unquote(text: &str) -> &str {
+    text.strip_prefix('"')
+        .and_then(|t| t.strip_suffix('"'))
+        .unwrap_or(text)
+}
+
+/// Where the `)` closing a `$(` is in `text`, the text after the `(`.
+fn closing_paren(text: &str) -> Option<usize> {
+    let mut depth = 0;
+    for (i, c) in text.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' if depth == 0 => return Some(i),
+            ')' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The words of a command: split at blanks outside `$(…)` and double quotes.
+fn split_words(text: &str) -> Vec<&str> {
+    let mut words = Vec::new();
+    let (mut start, mut depth, mut quoted) = (None, 0, false);
+    for (i, c) in text.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            c if c.is_whitespace() && depth == 0 && !quoted => {
+                if let Some(s) = start.take() {
+                    words.push(&text[s..i]);
+                }
+                continue;
+            }
+            _ => {}
+        }
+        start.get_or_insert(i);
+    }
+    if let Some(s) = start {
+        words.push(&text[s..]);
+    }
+    words
 }
 
 /// `<link><name>…</name><location>…</location></link>` entries of the
@@ -401,11 +589,15 @@ pub fn normalize(path: &Path) -> PathBuf {
     for c in path.components() {
         match c {
             Component::CurDir => {}
-            Component::ParentDir => {
-                if !out.pop() {
-                    out.push("..");
+            // `..` above the root is the root; above a relative start it
+            // stays.
+            Component::ParentDir => match out.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
                 }
-            }
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+                _ => out.push(".."),
+            },
             c => out.push(c),
         }
     }
@@ -613,6 +805,60 @@ $CSS_RUN_SCRIPT -o "${launch_opi}" -s -l "$links" "$@"
     }
 
     #[test]
+    fn reads_a_launcher_that_sources_versions_and_calls_functions() {
+        // diagOpi 2-90's, verbatim: its links come from `opi-versions`,
+        // functions, `join` and `configure-ioc`.
+        let top = tmp("diag-runcss");
+        std::fs::create_dir_all(top.join("configure")).unwrap();
+        std::fs::write(top.join("configure/VERSION"), "2-90\n").unwrap();
+        std::fs::write(
+            top.join("opi-versions"),
+            include_str!("testdata/diag-opi-versions"),
+        )
+        .unwrap();
+        let table = top.join("redirect_table");
+        std::fs::write(
+            &table,
+            "CSS-gui /x/css.sh\nDI-EBPM-gui-dir /ioc/Libera/2-05-17\nDI-MBF-gui-dir /ioc/MBF/1\n",
+        )
+        .unwrap();
+        let text = include_str!("testdata/diag-runcss.sh");
+        let projects = parse_launcher_with(text, &top, &table);
+        let [(project, links)] = projects.as_slice() else {
+            panic!("{projects:?}")
+        };
+        assert_eq!(project, "diagOpi_2-90");
+        let support = Path::new("/dls_sw/prod/R3.14.12.3/support");
+        let names: Vec<&str> = links.iter().map(|l| l.0.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "diagOpi",
+                "motor",
+                "devIocStats",
+                "enzLoCuM4",
+                "pmacUtil",
+                "TimingTemplates",
+                "4chTimer",
+                "dlsPLC",
+                "Libera",
+                "IsaPBPM",
+                "MBF",
+            ]
+        );
+        assert_eq!(links[0].1, normalize(&top));
+        assert_eq!(
+            links[2].1,
+            support.join("devIocStats/3-1-14dls2-0/devIocStatsApp/opi/opi")
+        );
+        assert_eq!(links[8].1, Path::new("/ioc/Libera/2-05-17/opi"));
+        // As in the shell, a name not in the table leaves its variable empty.
+        assert_eq!(links[9].1, Path::new("/opi"));
+        assert_eq!(links[10].1, Path::new("/ioc/MBF/1/opi"));
+        std::fs::remove_dir_all(&top).unwrap();
+    }
+
+    #[test]
     fn only_boy_screens_go_through_a_launcher() {
         let (root, opi, _) = module("runcss-bob", Some("1-2"));
         let boy = r#"<display typeId="org.csstudio.opibuilder.Display" version="1.0.0"/>"#;
@@ -751,9 +997,20 @@ $CSS_RUN_SCRIPT -o "${launch_opi}" -s -l "$links" "$@"
     }
 
     #[test]
+    fn a_function_calling_itself_ends() {
+        let text = "f()\n{\n    echo \"$(f)\"\n}\nx=$(f)\nlinks=\"/a=/p/n\"\n";
+        let projects = parse_launcher_with(text, Path::new("/nowhere"), Path::new("/no/table"));
+        assert_eq!(projects.len(), 1);
+    }
+
+    #[test]
     fn expands_shell_variables() {
-        let vars = HashMap::from([("a".to_string(), "1".to_string())]);
-        let e = |t: &str| expand_vars(t, &vars);
+        let shell = Shell {
+            vars: HashMap::from([("a".to_string(), "1".to_string())]),
+            functions: HashMap::new(),
+            table: PathBuf::new(),
+        };
+        let e = |t: &str| shell.expand(t).unwrap();
         assert_eq!(e("x${a}y$a/$b.$"), "x1y1/.$");
         assert_eq!(e("${a"), "${a");
     }
@@ -765,5 +1022,8 @@ $CSS_RUN_SCRIPT -o "${launch_opi}" -s -l "$links" "$@"
             PathBuf::from("/a/c/d")
         );
         assert_eq!(normalize(Path::new("../x")), PathBuf::from("../x"));
+        assert_eq!(normalize(Path::new("../../x")), PathBuf::from("../../x"));
+        assert_eq!(normalize(Path::new("a/../../x")), PathBuf::from("../x"));
+        assert_eq!(normalize(Path::new("/../x")), PathBuf::from("/x"));
     }
 }

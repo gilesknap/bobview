@@ -34,6 +34,11 @@ pub enum Request {
     },
     /// Close the display: go back to the one before, or close the window.
     Close,
+    /// Bring every window to the front, the one asking last.
+    RaiseAll,
+    /// Close every display and trend window but the main one and the one
+    /// asking.
+    CloseOthers,
     /// Run a command action of the display at `base` (see
     /// [`crate::launch::command_target`]) and open the display it names.
     Command {
@@ -143,6 +148,9 @@ fn draw_node(ui: &mut Ui, node: &mut Node, cx: &mut Cx, id: Id) {
     update_rules(node);
     if node.w.bool("visible") == Some(false) {
         return;
+    }
+    if node.w.kind == "label" && node.w.bool("auto_size") == Some(true) {
+        auto_size(ui.painter(), node, cx.view.zoom);
     }
     let rect = cx.view.rect(&node.rect);
     if !rect.intersects(cx.clip) {
@@ -748,6 +756,21 @@ fn label(painter: &egui::Painter, node: &Node, rect: Rect, z: f32) {
     );
 }
 
+/// Size an `auto_size` label to its text, as Phoebus does: the width and
+/// height become those of the expanded text on one row per line, with x and
+/// y kept. Done each frame, so a rule that changes the text resizes it too.
+fn auto_size(painter: &egui::Painter, node: &mut Node, z: f32) {
+    let w = &node.w;
+    let galley = painter.layout_no_wrap(node.prop("text"), font(w, z), fg(w));
+    let size = galley.size() / z;
+    let (width, height) = match w.i64("rotation_step") {
+        Some(1 | 3) => (size.y, size.x),
+        _ => (size.x, size.y),
+    };
+    node.rect[2] = width.ceil() as f64;
+    node.rect[3] = height.ceil() as f64;
+}
+
 fn text_update(painter: &egui::Painter, node: &Node, state: Option<&PvState>, rect: Rect, z: f32) {
     let w = &node.w;
     if w.bool("transparent") != Some(true) {
@@ -1138,7 +1161,7 @@ fn text_entry(
         .margin(margin)
         .interactive(enabled)
         .min_size(rect.size());
-    let resp = put_clipped(ui, rect, cx.clip, edit);
+    let resp = put_clipped(ui, id, rect, cx.clip, edit);
     if resp.has_focus() {
         node.edit = Some(buf);
     } else if resp.lost_focus() {
@@ -1174,11 +1197,19 @@ fn entry_job(
     job
 }
 
-fn put_clipped(ui: &mut Ui, rect: Rect, clip: Rect, widget: impl egui::Widget) -> Response {
-    ui.scope(|ui| {
-        ui.set_clip_rect(clip.intersect(ui.clip_rect()));
-        ui.put(rect, widget)
-    })
+/// Put a widget at `rect`, clipped. The scope starts at `rect`, not at the
+/// cursor: one there would take in the space after the last widget each
+/// time, and grow the display's scrolled size below its bottom. Its ids
+/// derive from `id`, so a widget keeps its edit state (a drag, typing)
+/// however many widgets came before it.
+fn put_clipped(ui: &mut Ui, id: Id, rect: Rect, clip: Rect, widget: impl egui::Widget) -> Response {
+    ui.scope_builder(
+        egui::UiBuilder::new().max_rect(rect).id(id.with("clipped")),
+        |ui| {
+            ui.set_clip_rect(clip.intersect(ui.clip_rect()));
+            ui.put(rect, widget)
+        },
+    )
     .inner
 }
 
@@ -1186,20 +1217,17 @@ fn action_button(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut Cx, id: Id) 
     let w = &node.w;
     let actions = w.actions();
     let resp = ui.interact(rect.intersect(cx.clip), id, Sense::click());
-    button_box(
-        ui.painter(),
-        rect,
-        bg(w, "Button_Background"),
-        resp.is_pointer_button_down_on(),
-        cx.view.zoom,
-    );
-    let mut text = node.prop("text");
-    if text.is_empty() || text.contains("$(actions)") {
-        text = actions
-            .first()
-            .map(|a| node.expand(a.description()))
-            .unwrap_or_default();
+    // A transparent button draws only its text, over what lies beneath.
+    if w.bool("transparent") != Some(true) {
+        button_box(
+            ui.painter(),
+            rect,
+            bg(w, "Button_Background"),
+            resp.is_pointer_button_down_on(),
+            cx.view.zoom,
+        );
     }
+    let text = button_text(node, &actions);
     let painter = ui.painter().with_clip_rect(cx.clip);
     text_in(
         &painter,
@@ -1218,13 +1246,29 @@ fn action_button(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut Cx, id: Id) 
     } else if allowed && actions.len() > 1 {
         egui::Popup::menu(&resp).show(|ui| {
             for a in &actions {
-                if ui.button(node.expand(a.description())).clicked() {
+                if ui.button(node.expand(a.label())).clicked() {
                     run_action(node, a, cx);
                 }
             }
         });
     }
     resp
+}
+
+/// An action button's label, as Phoebus' `makeButtonText`: text that is
+/// exactly `$(actions)` (the default when there is none) names the one
+/// action, or says how many there are; other text, empty too, is shown.
+fn button_text(node: &Node, actions: &[Action]) -> String {
+    if node.w.text("text").is_some_and(|t| t != "$(actions)") {
+        return node.prop("text");
+    }
+    let as_one = node.w.get("actions").and_then(|a| a.attr("execute_as_one")) == Some("true");
+    match actions {
+        [] => "EMPTY".into(),
+        [one] => node.expand(one.label()),
+        _ if as_one => format!("{} actions", actions.len()),
+        _ => format!("Choose 1 of {}", actions.len()),
+    }
 }
 
 pub(crate) fn run_action(node: &Node, action: &Action, cx: &mut Cx) {
@@ -1248,16 +1292,8 @@ pub(crate) fn run_action(node: &Node, action: &Action, cx: &mut Cx) {
             });
         }
         Action::WritePv { pv_name, value, .. } => {
-            let name = node.expand(pv_name);
+            let pv = action_pv(node, cx.pvs, &node.expand(pv_name));
             let value = node.expand(value);
-            let pv = match node
-                .action_pvs
-                .iter()
-                .find(|p| p.name().to_string() == pv::PvName::parse(&name).to_string())
-            {
-                Some(pv) => pv.clone(),
-                None => cx.pvs.subscribe(&name),
-            };
             if write_needs_confirmation(node.base.as_ref()) && !cx.pvs.read_only() {
                 cx.requests.push(Request::ConfirmWrite { pv, value });
             } else {
@@ -1569,11 +1605,16 @@ fn combo(
     id: Id,
 ) -> Response {
     let w = node.w.clone();
-    let (items, _) = choices(&w, s);
+    let (items, current) = choices(&w, s);
+    let mux = w.menu_mux();
     // Like Phoebus, show the PV's value whatever the items are; the items
-    // only fill the dropdown.
+    // only fill the dropdown. A menu mux shows the item the value is for.
     let text = match s {
-        Some(s) if s.connected => s.format(None, false),
+        Some(s) if s.connected => mux
+            .as_ref()
+            .and_then(|m| m.current(current, &s.format(None, false)))
+            .and_then(|i| items.get(i).cloned())
+            .unwrap_or_else(|| s.format(None, false)),
         _ => format!("<{}>", node.pv_name),
     };
     let resp = ui.interact(rect.intersect(cx.clip), id, Sense::click());
@@ -1618,16 +1659,44 @@ fn combo(
     let row_h = if cx.touch { TOUCH_TARGET } else { 0.0 };
     egui::Popup::menu(&resp).width(rect.width()).show(|ui| {
         ui.set_min_width(rect.width() - ui.spacing().menu_margin.sum().x);
-        for item in &items {
+        for (i, item) in items.iter().enumerate() {
             let label = egui::RichText::new(item).font(item_font.clone());
             let button = egui::Button::selectable(*item == text, label)
                 .min_size(Vec2::new(ui.available_width(), row_h));
             if ui.add(button).clicked() {
-                write(node, item.clone());
+                match &mux {
+                    Some(mux) => mux_pick(node, cx.pvs, mux, i),
+                    None => write(node, item.clone()),
+                }
             }
         }
     });
     resp
+}
+
+/// Pick item `i` of a menu mux: write its value to each target, and its
+/// index to the mux's own PV.
+fn mux_pick(node: &Node, pvs: &pv::PvManager, mux: &bob::MenuMux, i: usize) {
+    for (target, value) in mux.writes(i) {
+        action_pv(node, pvs, &node.expand(target)).write(node.expand(value));
+    }
+    if mux.index {
+        write(node, i.to_string());
+    }
+}
+
+/// The PV `name` that an action of `node` writes: the one connected in
+/// advance, or else a new one.
+fn action_pv(node: &Node, pvs: &pv::PvManager, name: &str) -> pv::Pv {
+    let parsed = pv::PvName::parse(name).to_string();
+    match node
+        .action_pvs
+        .iter()
+        .find(|p| p.name().to_string() == parsed)
+    {
+        Some(pv) => pv.clone(),
+        None => pvs.subscribe(name),
+    }
 }
 
 /// The font for a combo's dropdown rows: the widget's, unless that is
@@ -1784,7 +1853,9 @@ fn slide_layout(rect: Rect, z: f32, has_label: bool) -> (Rect, Option<Rect>) {
     (track, label)
 }
 
-fn slider(
+/// Phoebus Spinner: the value, dragged or typed, kept within the range and
+/// stepped by `increment`.
+fn spinner(
     ui: &mut Ui,
     node: &mut Node,
     s: Option<&PvState>,
@@ -1793,35 +1864,337 @@ fn slider(
     id: Id,
 ) -> Response {
     let w = node.w.clone();
-    let (min, max) = s
-        .filter(|_| w.bool("limits_from_pv").unwrap_or(true))
-        .and_then(|s| s.range())
-        .unwrap_or((
-            w.f64("minimum").unwrap_or(0.0),
-            w.f64("maximum").unwrap_or(100.0),
-        ));
+    let (min, max) = crate::meter::limits(&w, s);
+    let (min, max) = (min.min(max), max.max(min));
     let mut v = s.and_then(|s| s.value.as_f64()).unwrap_or(min);
-    let resp = ui
-        .scope(|ui| {
-            ui.set_clip_rect(cx.clip.intersect(ui.clip_rect()));
-            ui.scope_builder(egui::UiBuilder::new().max_rect(rect).id_salt(id), |ui| {
-                ui.spacing_mut().slider_width = (rect.width() - 60.0 * cx.view.zoom).max(20.0);
-                if w.kind == "spinner" {
-                    let step = w.f64("increment").unwrap_or(1.0);
-                    ui.add_sized(
-                        rect.size(),
-                        egui::DragValue::new(&mut v).range(min..=max).speed(step),
-                    )
-                } else {
-                    ui.add(egui::Slider::new(&mut v, min..=max))
-                }
-            })
-            .inner
-        })
-        .inner;
+    let step = w.f64("increment").unwrap_or(1.0);
+    let drag = egui::DragValue::new(&mut v).range(min..=max).speed(step);
+    let resp = put_clipped(ui, id, rect, cx.clip.intersect(rect), drag);
     if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
         write(node, v.to_string());
     }
+    resp
+}
+
+/// Where a slider's parts go, along its length and across it.
+#[derive(Debug)]
+struct SliderLayout {
+    /// The band the thumb slides along.
+    band: Rect,
+    /// The thumb's length along the slider.
+    thumb: f32,
+    /// The thumb's centre at the minimum and at the maximum.
+    from: f32,
+    to: f32,
+    /// The band on the far side of the thumb's for the scale's ticks, and
+    /// whether its labels fit in it too.
+    scale: Option<Rect>,
+    labels: bool,
+    /// The band on the near side for the alarm level markers.
+    markers: Option<Rect>,
+}
+
+/// Lay out a slider in `rect`: the thumb's band, the scale on its far side
+/// (below a horizontal slider, right of a vertical one) and the level
+/// markers on its near side, all centred across it, as a JavaFX Slider
+/// centres its track and tick marks. `scale` is the room the scale's
+/// labels take across the slider and half of their length along it, and
+/// `markers` the room the markers' labels take across it; `None` leaves
+/// either out. What the box has no room for is left out, the markers
+/// first, then the scale's labels and then its ticks, before the thumb
+/// gets thin.
+fn slider_layout(
+    rect: Rect,
+    horizontal: bool,
+    z: f32,
+    scale: Option<(f32, f32)>,
+    markers: Option<f32>,
+) -> SliderLayout {
+    let (along, across) = if horizontal {
+        (rect.x_range(), rect.y_range())
+    } else {
+        (rect.y_range(), rect.x_range())
+    };
+    let pad = 2.0 * z;
+    let tick = 5.0 * z;
+    let room = (across.span() - 2.0 * pad).max(1.0);
+    let (full, thin) = (16.0 * z, 8.0 * z);
+    let ticks = scale.is_some();
+    let label = scale.map_or(0.0, |(l, _)| l);
+    let (mark, depth, labels) = [
+        (markers.map(|m| m + tick), ticks, ticks),
+        (None, ticks, ticks),
+        (None, ticks, false),
+        (None, false, false),
+    ]
+    .into_iter()
+    .map(|(m, t, l)| {
+        let depth = if t { tick } else { 0.0 } + if l { label } else { 0.0 };
+        (m.unwrap_or(0.0), depth, l)
+    })
+    .find(|(m, depth, _)| room - m - depth >= thin)
+    .unwrap_or((0.0, 0.0, false));
+    let thick = (room - mark - depth).clamp(1.0, full);
+    let start = across.center() - (mark + thick + depth) / 2.0;
+    let thumb = (thick * 0.6).max(1.0);
+    let half_label = scale.filter(|_| labels).map_or(0.0, |(_, half)| half);
+    let end = (thumb / 2.0).max(half_label) + pad;
+    let (lo, hi) = if along.span() > 2.0 * end {
+        (along.min + end, along.max - end)
+    } else {
+        (along.center(), along.center())
+    };
+    let band = (start + mark, start + mark + thick);
+    let part = |(a, b): (f32, f32)| {
+        if horizontal {
+            Rect::from_x_y_ranges(along, a..=b)
+        } else {
+            Rect::from_x_y_ranges(a..=b, along)
+        }
+    };
+    // A vertical slider has its minimum at the bottom.
+    let (from, to) = if horizontal { (lo, hi) } else { (hi, lo) };
+    SliderLayout {
+        band: part(band),
+        thumb,
+        from,
+        to,
+        scale: (depth > 0.0).then(|| part((band.1, band.1 + depth))),
+        labels,
+        markers: (mark > 0.0).then(|| part((start, band.0))),
+    }
+}
+
+/// The range a slider runs over, from its `minimum` and `maximum` or its
+/// PV's: as Phoebus, 0 to 100 for one that is empty or inverted. A BOY
+/// slider (the bobview-only `<boy_range>` from the `.opi` import) keeps
+/// an inverted range, running from the maximum, and widens an empty one
+/// to the minimum plus one, as BOY's scale did.
+fn slider_range(w: &Widget, (min, max): (f64, f64)) -> (f64, f64) {
+    if w.bool("boy_range") == Some(true) {
+        return if min == max {
+            (min, min + 1.0)
+        } else {
+            (min, max)
+        };
+    }
+    if min < max { (min, max) } else { (0.0, 100.0) }
+}
+
+/// A scaled slider's alarm level markers, as Phoebus': each of LOLO, LOW,
+/// HIGH and HIHI there is a level for, unless its `show_*` is false. The
+/// levels are the PV's with `limits_from_pv` while it is connected, else
+/// the widget's `level_*` (10, 20, 80 and 90 unless given). Room is kept
+/// for them all; those outside the range are not drawn.
+fn slider_markers(w: &Widget, s: Option<&PvState>) -> Vec<(f64, &'static str)> {
+    let from_pv = w.bool("limits_from_pv").unwrap_or(true) && s.is_some_and(|s| s.connected);
+    let mut levels = if from_pv {
+        crate::meter::levels(w, s)
+    } else {
+        ["level_lolo", "level_low", "level_high", "level_hihi"]
+            .map(|k| w.f64(k).filter(|v| v.is_finite()))
+    };
+    if !from_pv {
+        for (level, default) in levels.iter_mut().zip([10.0, 20.0, 80.0, 90.0]) {
+            level.get_or_insert(default);
+        }
+    }
+    levels
+        .into_iter()
+        .zip([
+            ("LOLO", "show_lolo"),
+            ("LOW", "show_low"),
+            ("HIGH", "show_high"),
+            ("HIHI", "show_hihi"),
+        ])
+        .filter(|(_, (_, show))| w.bool(show).unwrap_or(true))
+        .filter_map(|(level, (name, _))| Some((level?, name)))
+        .collect()
+}
+
+/// Phoebus ScaledSlider and ScrollBar: a groove along the widget with a
+/// thumb at the value, and for a scaled slider with `show_scale` labelled
+/// ticks on one side and its alarm level markers on the other, as
+/// Phoebus' JavaFX Slider; no value box. A click or drag moves the thumb,
+/// and its value is written when the button is let go, over the range
+/// [`slider_range`] gives.
+fn slider(
+    ui: &mut Ui,
+    node: &mut Node,
+    s: Option<&PvState>,
+    rect: Rect,
+    cx: &mut Cx,
+    id: Id,
+) -> Response {
+    if node.w.kind == "spinner" {
+        return spinner(ui, node, s, rect, cx, id);
+    }
+    let w = node.w.clone();
+    let z = cx.view.zoom;
+    let (min, max) = slider_range(&w, crate::meter::limits(&w, s));
+    // Only a range too large to widen is still empty.
+    let live = min != max;
+    let horizontal = w.bool("horizontal").unwrap_or(true);
+    let show_scale = w.kind == "scaledslider" && w.bool("show_scale").unwrap_or(true) && live;
+    let painter = ui.painter().with_clip_rect(cx.clip.intersect(rect));
+    if w.kind == "scaledslider" && w.bool("transparent") == Some(false) {
+        fill(&painter, rect, bg(&w, "Background"));
+    }
+    let fnt = font(&w, z);
+    let text = fg(&w);
+    let size_of = |s: &str| {
+        painter
+            .layout_no_wrap(s.to_string(), fnt.clone(), text)
+            .size()
+    };
+    let guess = (max - min).abs() / 10.0;
+    let size = |v: f64| size_of(&crate::axis::label(v, guess));
+    let (lo_size, hi_size) = (size(min), size(max));
+    let widest = lo_size.x.max(hi_size.x);
+    let line_h = lo_size.y;
+    let room = if horizontal {
+        (line_h, widest / 2.0)
+    } else {
+        (widest + 2.0 * z, line_h / 2.0)
+    };
+    let markers = if w.kind == "scaledslider" {
+        slider_markers(&w, s)
+    } else {
+        Vec::new()
+    };
+    let mark_room = (!markers.is_empty() && live).then(|| {
+        if horizontal {
+            line_h
+        } else {
+            size_of("HIHI").x + 2.0 * z
+        }
+    });
+    let lay = slider_layout(rect, horizontal, z, show_scale.then_some(room), mark_room);
+    let scale = crate::axis::Scale {
+        lo: min,
+        hi: max,
+        log: false,
+        from: lay.from,
+        to: lay.to,
+    };
+
+    // Follow the pointer while it is down on an enabled slider, and write
+    // where it was let go.
+    let resp = ui.interact(rect.intersect(cx.clip), id, Sense::click_and_drag());
+    let mut v = s
+        .and_then(|s| s.value.as_f64())
+        .filter(|v| v.is_finite())
+        .unwrap_or(min);
+    let enabled = live && !is_disabled(&w, s);
+    if enabled && let Some(p) = resp.interact_pointer_pos() {
+        let at = if horizontal { p.x } else { p.y };
+        let t = if lay.to != lay.from {
+            ((at - lay.from) / (lay.to - lay.from)).clamp(0.0, 1.0) as f64
+        } else {
+            0.0
+        };
+        v = min + (max - min) * t;
+        ui.data_mut(|d| d.insert_temp(id, v));
+    }
+    if (resp.drag_stopped() || resp.clicked())
+        && let Some(v) = ui.data_mut(|d| d.remove_temp::<f64>(id))
+    {
+        write(node, v.to_string());
+    }
+
+    // The groove, then the scale, then the thumb over both.
+    let band = lay.band;
+    let groove_w = (band.height().min(band.width()) / 4.0).max(2.0 * z);
+    let groove = if horizontal {
+        Rect::from_center_size(
+            Pos2::new((lay.from + lay.to) / 2.0, band.center().y),
+            Vec2::new((lay.to - lay.from).abs() + lay.thumb, groove_w),
+        )
+    } else {
+        Rect::from_center_size(
+            Pos2::new(band.center().x, (lay.from + lay.to) / 2.0),
+            Vec2::new(groove_w, (lay.to - lay.from).abs() + lay.thumb),
+        )
+    };
+    painter.rect(
+        groove,
+        CornerRadius::same((groove_w / 2.0).min(255.0) as u8),
+        Color32::from_gray(225),
+        Stroke::new(1.0, Color32::from_gray(150)),
+        StrokeKind::Inside,
+    );
+    // A tick at `p` along the slider, out from `edge` across it (`out` is
+    // 1 to the far side, -1 to the near one), with its label beyond.
+    let stroke = Stroke::new(1.0, text);
+    let tick_at = |edge: f32, p: f32, out: f32, label: Option<String>| {
+        let len = 5.0 * z * out;
+        let (a, b) = if horizontal {
+            (Pos2::new(p, edge), Pos2::new(p, edge + len))
+        } else {
+            (Pos2::new(edge, p), Pos2::new(edge + len, p))
+        };
+        painter.line_segment([a, b], stroke);
+        if let Some(label) = label {
+            let (align, gap) = match (horizontal, out > 0.0) {
+                (true, true) => (Align2::CENTER_TOP, 0.0),
+                (true, false) => (Align2::CENTER_BOTTOM, 0.0),
+                (false, true) => (Align2::LEFT_CENTER, 2.0 * z),
+                (false, false) => (Align2::RIGHT_CENTER, -2.0 * z),
+            };
+            painter.text(b + Vec2::new(gap, 0.0), align, label, fnt.clone(), text);
+        }
+    };
+    if let Some(area) = lay.scale {
+        // Major ticks at least `major_tick_step_hint` apart, and far
+        // enough apart for their labels.
+        let hint = w.f64("major_tick_step_hint").unwrap_or(40.0) as f32 * z;
+        let label_len = if horizontal {
+            widest + 8.0 * z
+        } else {
+            line_h * 1.5
+        };
+        let gaps = ((lay.to - lay.from).abs() / hint.max(label_len)).floor();
+        let (ticks, step) = crate::axis::ticks(min, max, gaps as usize + 1);
+        let edge = if horizontal { area.top() } else { area.left() };
+        for t in ticks {
+            let label = lay.labels.then(|| crate::axis::label(t, step));
+            tick_at(edge, scale.pos(t), 1.0, label);
+        }
+    }
+    if let Some(area) = lay.markers {
+        let edge = if horizontal {
+            area.bottom()
+        } else {
+            area.right()
+        };
+        let range = min.min(max)..=max.max(min);
+        for (level, name) in markers.iter().filter(|(l, _)| range.contains(l)) {
+            tick_at(edge, scale.pos(*level), -1.0, Some(name.to_string()));
+        }
+    }
+    let at = if live {
+        scale.pos(v.clamp(min.min(max), max.max(min)))
+    } else {
+        lay.from
+    };
+    let thumb = if horizontal {
+        Rect::from_center_size(
+            Pos2::new(at, band.center().y),
+            Vec2::new(lay.thumb, band.height()),
+        )
+    } else {
+        Rect::from_center_size(
+            Pos2::new(band.center().x, at),
+            Vec2::new(band.width(), lay.thumb),
+        )
+    };
+    button_box(
+        &painter,
+        thumb,
+        named("Button_Background"),
+        enabled && resp.is_pointer_button_down_on(),
+        z,
+    );
     resp
 }
 
@@ -2078,6 +2451,15 @@ pub(crate) fn alarm_border(painter: &egui::Painter, w: &Widget, s: &PvState, rec
     if w.bool("border_alarm_sensitive") == Some(false) {
         return;
     }
+    // A BOY widget (from an `.opi` file) drew INVALID and disconnected
+    // solid white, DLS's BOY INVALID colour.
+    if w.bool("boy_alarm_border") == Some(true)
+        && (!s.connected || s.severity == pv::Severity::Invalid)
+    {
+        let width = (2.0 * z).max(1.0);
+        outline(painter, rect.expand(width), width, Color32::WHITE);
+        return;
+    }
     let c = if s.connected {
         severity_color(s.severity)
     } else {
@@ -2196,6 +2578,88 @@ mod tests {
 
     use std::sync::Arc;
 
+    /// An action button with properties `props` and one action, "Go".
+    fn button_screen(pvs: &PvManager, props: &str) -> crate::screen::Screen {
+        let d = bob::Display::parse(&format!(
+            "<display><widget type='action_button'>{props}<actions>
+            <action type='open_display'><file>a.bob</file><description>Go</description>
+            </action></actions></widget></display>"
+        ))
+        .unwrap();
+        crate::screen::Builder::new(pvs).screen(d, &Macros::default(), None, 0)
+    }
+
+    #[test]
+    fn only_action_button_text_naming_actions_shows_them() {
+        let pvs = PvManager::new();
+        for (props, shown) in [
+            ("", "Go"),
+            ("<text>$(actions)</text>", "Go"),
+            ("<text></text>", ""),
+            ("<text>Open</text>", "Open"),
+        ] {
+            let screen = button_screen(&pvs, props);
+            let node = &screen.nodes[0];
+            assert_eq!(button_text(node, &node.w.actions()), shown, "{props}");
+        }
+        // As Phoebus' messages: none, several, several run as one, and an
+        // action without a description.
+        let text = |actions: &str| {
+            let d = bob::Display::parse(&format!(
+                "<display><widget type='action_button'>{actions}</widget></display>"
+            ))
+            .unwrap();
+            let screen = crate::screen::Builder::new(&pvs).screen(d, &Macros::default(), None, 0);
+            let node = &screen.nodes[0];
+            button_text(node, &node.w.actions())
+        };
+        let two = "<action type='write_pv'><pv_name>loc://a</pv_name></action>
+            <action type='open_display'><file>a.bob</file></action>";
+        assert_eq!(text(""), "EMPTY");
+        assert_eq!(text(&format!("<actions>{two}</actions>")), "Choose 1 of 2");
+        assert_eq!(
+            text(&format!("<actions execute_as_one='true'>{two}</actions>")),
+            "2 actions"
+        );
+        assert_eq!(
+            text("<actions><action type='write_pv'><pv_name>loc://a</pv_name></action></actions>"),
+            "Write PV"
+        );
+    }
+
+    #[test]
+    fn transparent_action_buttons_have_no_face() {
+        let pvs = PvManager::new();
+        let filled = |props: &str| {
+            let mut screen = button_screen(&pvs, props);
+            let ctx = egui::Context::default();
+            let mut requests = Vec::new();
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let mut cx = Cx {
+                    view: View {
+                        origin: Pos2::ZERO,
+                        zoom: 1.0,
+                    },
+                    clip: Rect::EVERYTHING,
+                    pvs: &pvs,
+                    requests: &mut requests,
+                    depth: 0,
+                    touch: false,
+                    trends: &[],
+                    window: WindowKey::Main,
+                };
+                let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 30.0));
+                action_button(ui, &mut screen.nodes[0], rect, &mut cx, Id::new("b"));
+            });
+            out.textures_delta.clear();
+            out.shapes
+                .iter()
+                .any(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.fill.a() > 0))
+        };
+        assert!(filled("<text></text>"));
+        assert!(!filled("<text></text><transparent>true</transparent>"));
+    }
+
     #[test]
     fn arcs_go_anticlockwise_from_three_o_clock() {
         let rect = Rect::from_center_size(Pos2::ZERO, Vec2::new(20.0, 10.0));
@@ -2243,6 +2707,55 @@ mod tests {
     }
 
     const PV: &str = "<BL01T-DI-CAM-01:DET:PortName_RBV>";
+
+    #[test]
+    fn auto_size_labels_fit_their_expanded_text() {
+        let xml = r#"<display><macros><camera>LI-DI-CAMERA-01</camera></macros>
+            <widget type="label"><x>10</x><y>20</y><width>66</width><height>20</height>
+              <text>$(camera)</text><auto_size>true</auto_size></widget>
+            <widget type="label"><x>10</x><y>50</y><width>66</width><height>20</height>
+              <text>$(camera)</text></widget></display>"#;
+        let pvs = PvManager::new();
+        let display = bob::Display::parse(xml).unwrap();
+        let mut screen = Builder::new(&pvs).screen(display, &Macros::default(), None, 0);
+        let ctx = egui::Context::default();
+        style::install_fonts(&ctx);
+        let mut natural = 0.0;
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let mut requests = Vec::new();
+            let mut cx = Cx {
+                view: View {
+                    origin: Pos2::ZERO,
+                    zoom: 1.0,
+                },
+                clip: Rect::EVERYTHING,
+                pvs: &pvs,
+                requests: &mut requests,
+                depth: 0,
+                touch: false,
+                trends: &[],
+                window: WindowKey::Main,
+            };
+            draw_screen(ui, &mut screen, &mut cx, Id::new("auto_size"));
+            let font = font(&screen.nodes[0].w, 1.0);
+            natural = ui
+                .painter()
+                .layout_no_wrap("LI-DI-CAMERA-01".into(), font, Color32::BLACK)
+                .size()
+                .x;
+        });
+        out.textures_delta.clear();
+        let [x, y, w, h] = screen.nodes[0].rect;
+        assert_eq!((x, y), (10.0, 20.0));
+        // Wide enough for the whole text, so nothing is elided.
+        assert!(
+            w > 66.0 && w >= natural as f64 && w < natural as f64 + 1.0,
+            "{w} {natural}"
+        );
+        assert!(h > 0.0);
+        // Without auto_size the label keeps its size.
+        assert_eq!(screen.nodes[1].rect, [10.0, 50.0, 66.0, 20.0]);
+    }
 
     /// Lay out a text entry's text `w` wide, as `text_entry` does.
     fn entry(text: &str, w: f32, editing: bool) -> Arc<egui::Galley> {
@@ -2553,6 +3066,51 @@ mod tests {
     }
 
     #[test]
+    fn text_entries_and_sliders_take_no_space_below_the_display() {
+        // Each used to take the space from the cursor, below the display, so
+        // a display with many of them could scroll past its bottom.
+        let mut xml = String::from("<display><width>300</width><height>100</height>");
+        for (i, kind) in ["textentry", "spinner", "scaledslider"].iter().enumerate() {
+            for j in 0..4 {
+                xml += &format!(
+                    r#"<widget type="{kind}"><x>{}</x><y>{}</y><width>60</width><height>20</height></widget>"#,
+                    70 * j,
+                    30 * i
+                );
+            }
+        }
+        xml += "</display>";
+        let pvs = PvManager::new();
+        let display = bob::Display::parse(&xml).unwrap();
+        let mut screen = Builder::new(&pvs).screen(display, &Macros::default(), None, 0);
+        let ctx = egui::Context::default();
+        let mut used = None;
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let size = Vec2::new(screen.width as f32, screen.height as f32);
+            let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+            let mut requests = Vec::new();
+            let mut cx = Cx {
+                view: View {
+                    origin: rect.min,
+                    zoom: 1.0,
+                },
+                clip: rect,
+                pvs: &pvs,
+                requests: &mut requests,
+                depth: 0,
+                touch: false,
+                trends: &[],
+                window: WindowKey::Main,
+            };
+            draw_screen(ui, &mut screen, &mut cx, Id::new("display"));
+            used = Some((rect, ui.min_rect()));
+        });
+        out.textures_delta.clear();
+        let (rect, used) = used.unwrap();
+        assert_eq!(used, rect);
+    }
+
+    #[test]
     fn trend_actions_and_strip_tool_commands_open_trends() {
         let xml = r#"<display><macros><dom>BL01T</dom></macros>
             <widget type="action_button"><actions>
@@ -2718,5 +3276,159 @@ pv.setValue(pv_value);
         assert!(track.right() < label.left());
         assert_eq!(label.right(), rect.right());
         assert_eq!(track.height(), 16.0);
+    }
+
+    #[test]
+    fn slider_is_centred_in_its_box() {
+        // sr/pinger.opi: a tall slider with no scale sits in the middle of
+        // its box, not at the top.
+        let rect = Rect::from_min_size(Pos2::new(64.0, 3.0), Vec2::new(384.0, 76.0));
+        let lay = slider_layout(rect, true, 1.0, None, None);
+        assert_eq!(lay.band.center().y, rect.center().y);
+        assert!(lay.scale.is_none());
+        assert!(rect.contains_rect(lay.band));
+        assert!(lay.from - lay.thumb / 2.0 >= rect.left());
+        assert!(lay.to + lay.thumb / 2.0 <= rect.right());
+    }
+
+    #[test]
+    fn slider_scale_sits_beside_the_thumb() {
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(384.0, 76.0));
+        let lay = slider_layout(rect, true, 1.0, Some((14.0, 20.0)), None);
+        let scale = lay.scale.unwrap();
+        assert!(lay.labels);
+        assert_eq!(scale.top(), lay.band.bottom());
+        assert!(rect.contains_rect(scale) && rect.contains_rect(lay.band));
+        // Room at the ends for the first and last labels.
+        assert!(lay.from >= 20.0 && lay.to <= 364.0);
+        // The two together are centred.
+        assert_eq!((lay.band.top() + scale.bottom()) / 2.0, rect.center().y);
+        // Vertical: the minimum at the bottom, the scale to the right.
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(76.0, 384.0));
+        let lay = slider_layout(rect, false, 1.0, Some((30.0, 7.0)), None);
+        assert!(lay.from > lay.to);
+        assert_eq!(lay.scale.unwrap().left(), lay.band.right());
+    }
+
+    #[test]
+    fn small_slider_drops_labels_before_its_thumb() {
+        // cameraControl-gige.opi: 168x24, no room for labels under the thumb.
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(168.0, 24.0));
+        let lay = slider_layout(rect, true, 1.0, Some((14.0, 20.0)), None);
+        assert!(!lay.labels);
+        assert!(lay.scale.is_some());
+        assert!(lay.band.height() >= 8.0);
+        assert!(rect.contains_rect(lay.band) && rect.contains_rect(lay.scale.unwrap()));
+        // Too narrow for any travel: the thumb stays in the middle.
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(6.0, 24.0));
+        let lay = slider_layout(rect, true, 1.0, None, None);
+        assert_eq!((lay.from, lay.to), (3.0, 3.0));
+        // Markers go before the scale's labels.
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(168.0, 40.0));
+        let lay = slider_layout(rect, true, 1.0, Some((14.0, 20.0)), Some(14.0));
+        assert!(lay.markers.is_none() && lay.labels);
+    }
+
+    #[test]
+    fn slider_markers_sit_on_the_near_side() {
+        // sr/pinger.opi: markers above the thumb and the scale below it,
+        // the three centred, so the thumb is clear of the title label that
+        // covers the top 29px of the box.
+        let rect = Rect::from_min_size(Pos2::new(64.0, 3.0), Vec2::new(384.0, 76.0));
+        let lay = slider_layout(rect, true, 1.0, Some((14.0, 20.0)), Some(14.0));
+        let (markers, scale) = (lay.markers.unwrap(), lay.scale.unwrap());
+        assert_eq!(markers.bottom(), lay.band.top());
+        assert_eq!(scale.top(), lay.band.bottom());
+        assert!(rect.contains_rect(markers) && rect.contains_rect(scale));
+        assert_eq!(lay.band.center().y, rect.center().y);
+        assert!(lay.band.top() > rect.top() + 29.0);
+        // Vertical: markers to the left.
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(120.0, 300.0));
+        let lay = slider_layout(rect, false, 1.0, Some((40.0, 7.0)), Some(36.0));
+        assert_eq!(lay.markers.unwrap().right(), lay.band.left());
+    }
+
+    #[test]
+    fn scaled_slider_markers_follow_the_show_flags() {
+        let slider = |props: &str| {
+            let xml = format!(r#"<display><widget type="scaledslider">{props}</widget></display>"#);
+            bob::Display::parse(&xml).unwrap().widgets.remove(0)
+        };
+        let names = |w: &Widget, s| -> Vec<&str> {
+            slider_markers(w, s).into_iter().map(|(_, n)| n).collect()
+        };
+        // Phoebus' default levels, all shown, without `show_markers`.
+        let own = slider("<limits_from_pv>false</limits_from_pv>");
+        assert_eq!(
+            slider_markers(&own, None),
+            [
+                (10.0, "LOLO"),
+                (20.0, "LOW"),
+                (80.0, "HIGH"),
+                (90.0, "HIHI")
+            ]
+        );
+        let some = slider(
+            "<limits_from_pv>false</limits_from_pv><level_low>30</level_low>
+            <show_lolo>false</show_lolo><show_hihi>false</show_hihi>",
+        );
+        assert_eq!(slider_markers(&some, None), [(30.0, "LOW"), (80.0, "HIGH")]);
+        // From the PV: only the limits it has.
+        let pv = PvState {
+            connected: true,
+            warning_range: Some((2.0, 8.0)),
+            ..Default::default()
+        };
+        assert_eq!(names(&slider(""), Some(&pv)), ["LOW", "HIGH"]);
+        // Without a connected PV, the widget's own levels.
+        assert_eq!(names(&slider(""), None).len(), 4);
+        let gone = PvState {
+            connected: false,
+            ..pv.clone()
+        };
+        assert_eq!(names(&slider(""), Some(&gone)).len(), 4);
+        assert!(
+            names(
+                &slider("<show_low>false</show_low><show_high>false</show_high>"),
+                Some(&pv)
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn slider_ranges_fall_back_as_phoebus_or_boy() {
+        let slider = |props: &str| {
+            let xml = format!(r#"<display><widget type="scaledslider">{props}</widget></display>"#);
+            bob::Display::parse(&xml).unwrap().widgets.remove(0)
+        };
+        let bob = slider("");
+        assert_eq!(slider_range(&bob, (-5.0, 5.0)), (-5.0, 5.0));
+        assert_eq!(slider_range(&bob, (3.0, 3.0)), (0.0, 100.0));
+        assert_eq!(slider_range(&bob, (10.0, 1.0)), (0.0, 100.0));
+        let boy = slider("<boy_range>true</boy_range>");
+        assert_eq!(slider_range(&boy, (-5.0, 5.0)), (-5.0, 5.0));
+        assert_eq!(slider_range(&boy, (3.0, 3.0)), (3.0, 4.0));
+        assert_eq!(slider_range(&boy, (10.0, 1.0)), (10.0, 1.0));
+    }
+
+    #[test]
+    fn clipped_widgets_are_keyed_by_their_id() {
+        // The same widget after one or two others has the same id.
+        let ctx = egui::Context::default();
+        let rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(60.0, 20.0));
+        let mut ids = Vec::new();
+        for before in [1, 2] {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                for _ in 0..before {
+                    ui.label("before");
+                }
+                let mut v = 1.0;
+                let drag = egui::DragValue::new(&mut v);
+                ids.push(put_clipped(ui, Id::new("spinner"), rect, Rect::EVERYTHING, drag).id);
+            });
+            out.textures_delta.clear();
+        }
+        assert_eq!(ids[0], ids[1]);
     }
 }

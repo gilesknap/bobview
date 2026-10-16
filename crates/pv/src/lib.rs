@@ -10,6 +10,7 @@
 //! | `pva://`  | PV Access                               |
 //! | `loc://`  | local PVs held in this process          |
 //! | `sim://`  | simulated signals (sine, ramp, noise …) |
+//! | `=`, `eq://` | formulas over other PVs              |
 //!
 //! In a browser (wasm32) there is no runtime: `sim://` runs on the page's
 //! event loop, and `ca://` and `pva://` PVs come over a PV Web Socket
@@ -17,6 +18,7 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 mod ca;
+mod formula;
 mod local;
 mod name;
 mod origin;
@@ -85,13 +87,21 @@ pub(crate) struct Control {
     /// The latest message for the user (a refused or failed write), with a
     /// number that changes with each one.
     notice: Mutex<(u64, String)>,
+    /// The UI's repaint callback (see [`PvManager::set_notifier`]), so a
+    /// new notice is shown without waiting for some PV to change.
+    repaint: Arc<RwLock<Option<Notifier>>>,
 }
 
 impl Control {
     pub(crate) fn notify(&self, text: String) {
         log::warn!("{text}");
-        let mut n = self.notice.lock();
-        *n = (n.0 + 1, text);
+        {
+            let mut n = self.notice.lock();
+            *n = (n.0 + 1, text);
+        }
+        if let Some(n) = self.repaint.read().as_ref() {
+            n();
+        }
     }
 }
 
@@ -104,6 +114,69 @@ pub(crate) const WRITE_QUEUE: usize = 16;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn write_queue() -> (mpsc::Sender<Put>, mpsc::Receiver<Put>) {
     mpsc::channel(WRITE_QUEUE)
+}
+
+thread_local! {
+    /// How many PVs' listeners this thread is calling, under their locks.
+    static CALLING: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Work a listener left for when this thread holds no PV's lock.
+    static DEFERRED: std::cell::RefCell<std::collections::VecDeque<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+    /// Whether this thread is running that work, and how many times it has
+    /// begun to (see [`drain_number`]).
+    static DRAINING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static DRAINS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Call listeners in `f`, under a PV's lock; [`after_listeners`] once the
+/// lock is let go.
+fn calling_listeners<R>(f: impl FnOnce() -> R) -> R {
+    struct Calling;
+    impl Drop for Calling {
+        fn drop(&mut self) {
+            CALLING.with(|c| c.set(c.get() - 1));
+        }
+    }
+    CALLING.with(|c| c.set(c.get() + 1));
+    let _calling = Calling;
+    f()
+}
+
+/// Run the work listeners left, once this thread holds no PV's lock. Work
+/// that leaves more (and updates within it) joins this loop rather than
+/// nesting, so the stack stays flat however long a chain of formulas is.
+fn after_listeners() {
+    if CALLING.with(|c| c.get()) != 0 || DRAINING.with(|d| d.get()) {
+        return;
+    }
+    struct Draining;
+    impl Drop for Draining {
+        fn drop(&mut self) {
+            DRAINING.with(|d| d.set(false));
+        }
+    }
+    DRAINING.with(|d| d.set(true));
+    DRAINS.with(|n| n.set(n.get() + 1));
+    let _draining = Draining;
+    // One at a time, so a panic leaves the rest for the next time.
+    while let Some(work) = DEFERRED.with(|d| d.borrow_mut().pop_front()) {
+        work();
+    }
+}
+
+/// Which run of left work this thread is in: work it leaves for itself
+/// (one formula evaluating another) stays in the same one.
+pub(crate) fn drain_number() -> u64 {
+    DRAINS.with(|n| n.get())
+}
+
+/// Run `work` once this thread holds no PV's lock: now, unless it is in a
+/// listener. Work that locks a PV (subscribing, listening, publishing)
+/// could otherwise wait for one this thread holds, or take two in another
+/// thread's order.
+pub(crate) fn outside_listeners(work: Box<dyn FnOnce()>) {
+    DEFERRED.with(|d| d.borrow_mut().push_back(work));
+    after_listeners();
 }
 
 /// State shared between a [`Pv`] handle and the task serving it.
@@ -148,18 +221,21 @@ impl Shared {
             // task (or the UI thread writing a local PV) for good. Release
             // builds abort on any panic instead (`panic = "abort"`).
             let mut listeners = self.listeners.lock();
-            listeners.retain(|l| match l.upgrade() {
-                Some(l) => {
-                    let call = std::panic::AssertUnwindSafe(|| l(&state));
-                    let ok = std::panic::catch_unwind(call).is_ok();
-                    if !ok {
-                        log::error!("{}: a listener panicked and was removed", self.name);
+            calling_listeners(|| {
+                listeners.retain(|l| match l.upgrade() {
+                    Some(l) => {
+                        let call = std::panic::AssertUnwindSafe(|| l(&state));
+                        let ok = std::panic::catch_unwind(call).is_ok();
+                        if !ok {
+                            log::error!("{}: a listener panicked and was removed", self.name);
+                        }
+                        ok
                     }
-                    ok
-                }
-                None => false,
+                    None => false,
+                })
             });
         }
+        after_listeners();
         if let Some(n) = self.notify.read().as_ref() {
             n();
         }
@@ -184,6 +260,16 @@ impl Shared {
                 .notify(format!("{}: write '{text}' failed: {e}", self.name));
         }
         self.update(|s| s.write_error = error);
+    }
+
+    /// A put that the server does not answer was sent, or failed to be: a
+    /// failure is remembered as [`Shared::write_result`] does, but a send
+    /// confirms nothing, so it leaves an earlier failure shown.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn write_sent(&self, text: &str, error: Option<String>) {
+        if error.is_some() {
+            self.write_result(text, error);
+        }
     }
 
     /// Whether a write taken from the queue can go now; if not, say why.
@@ -214,6 +300,9 @@ struct Entry {
     name: PvName,
     shared: Arc<Shared>,
     task: Option<Task>,
+    /// A formula's inputs, followed for as long as it is held.
+    #[cfg_attr(not(test), allow(dead_code, reason = "only held"))]
+    formula: Option<Arc<formula::Formula>>,
 }
 
 impl Drop for Entry {
@@ -281,12 +370,15 @@ impl Pv {
     /// frame, this sees every monitor update.
     pub fn listen(&self, listener: &Listener) {
         let shared = &self.0.shared;
-        let state = shared.state.lock();
-        listener(&state);
-        let mut listeners = shared.listeners.lock();
-        // Drop dead ones here too: a PV that never changes is never updated.
-        listeners.retain(|l| l.strong_count() > 0);
-        listeners.push(Arc::downgrade(listener));
+        {
+            let state = shared.state.lock();
+            calling_listeners(|| listener(&state));
+            let mut listeners = shared.listeners.lock();
+            // Drop dead ones here too: a PV that never changes is never updated.
+            listeners.retain(|l| l.strong_count() > 0);
+            listeners.push(Arc::downgrade(listener));
+        }
+        after_listeners();
     }
 
     /// Write a value given as text; the backend converts it to the PV's type.
@@ -356,6 +448,8 @@ impl Pv {
             Some(Writer::Local) => {
                 drop(writer);
                 shared.update(|s| {
+                    // Each write is a new sample, though its value be the same.
+                    s.timestamp = Some(web_time::SystemTime::now());
                     s.value = if long_string && s.value.is_numeric_array() {
                         Value::LongArray(
                             long_string_bytes(&value, None)
@@ -436,12 +530,13 @@ impl Default for PvManager {
 impl PvManager {
     #[cfg(target_arch = "wasm32")]
     pub fn new() -> Self {
+        let ctl = Arc::new(Control::default());
         Self {
             inner: Arc::new(Inner {
                 entries: Mutex::default(),
                 locals: Mutex::new(HashMap::new()),
-                notify: Arc::new(RwLock::new(None)),
-                ctl: Arc::default(),
+                notify: ctl.repaint.clone(),
+                ctl,
             }),
         }
     }
@@ -454,6 +549,7 @@ impl PvManager {
             .enable_all()
             .build()
             .expect("failed to start the PV runtime");
+        let ctl = Arc::new(Control::default());
         Self {
             inner: Arc::new(Inner {
                 rt: Some(rt),
@@ -461,8 +557,8 @@ impl PvManager {
                 locals: Mutex::new(HashMap::new()),
                 ca: Arc::new(tokio::sync::OnceCell::new()),
                 pva: Arc::new(std::sync::OnceLock::new()),
-                notify: Arc::new(RwLock::new(None)),
-                ctl: Arc::default(),
+                notify: ctl.repaint.clone(),
+                ctl,
             }),
         }
     }
@@ -502,17 +598,38 @@ impl PvManager {
         if let Some(entry) = entries.map.get(&key).and_then(Weak::upgrade) {
             return Pv(entry);
         }
+        // A macro left unexpanded makes a name that is not what was meant,
+        // and a local one would share its state with every other such PV.
+        if name.pv.contains("$(") || name.pv.contains("${") {
+            log::warn!("{}: PV name has an undefined macro", name.pv);
+        }
 
-        let (shared, task) = match name.scheme {
-            Scheme::Loc => (self.local(&name), None),
+        let shared = || Shared::new(&name, self.inner.notify.clone(), self.inner.ctl.clone());
+        let (shared, task, formula) = match name.scheme {
+            Scheme::Loc => (self.local(&name), None, None),
+            Scheme::Formula => {
+                let shared = shared();
+                let f = formula::Formula::new(&name, shared.clone(), Arc::downgrade(&self.inner));
+                (shared, None, Some(f))
+            }
             _ => {
-                let shared = Shared::new(&name, self.inner.notify.clone(), self.inner.ctl.clone());
+                let shared = shared();
                 let task = self.spawn_backend(&name, shared.clone());
-                (shared, task)
+                (shared, task, None)
             }
         };
-        let entry = Arc::new(Entry { name, shared, task });
+        let entry = Arc::new(Entry {
+            name,
+            shared,
+            task,
+            formula: formula.clone(),
+        });
         entries.insert(key, Arc::downgrade(&entry));
+        // Its inputs are subscribed to with the entries unlocked.
+        drop(entries);
+        if let Some(f) = formula {
+            f.start();
+        }
         Pv(entry)
     }
 
@@ -534,7 +651,7 @@ impl PvManager {
         Some(match name.scheme {
             Scheme::Sim => pvws::spawn(sim::run(name.clone(), shared)),
             Scheme::Ca | Scheme::Pva => pvws::subscribe(name, shared),
-            Scheme::Loc => unreachable!("local PVs have no task"),
+            Scheme::Loc | Scheme::Formula => unreachable!("local PVs and formulas have no task"),
         })
     }
 
@@ -566,7 +683,7 @@ impl PvManager {
                     pva::run(client, &pv, shared).await
                 }))
             }
-            Scheme::Loc => unreachable!("local PVs have no task"),
+            Scheme::Loc | Scheme::Formula => unreachable!("local PVs and formulas have no task"),
         }
     }
 }
@@ -590,6 +707,15 @@ mod tests {
         drop(listener);
         pv.write("4");
         assert_eq!(*seen.lock(), [Some(1.0), Some(2.0), Some(3.0)]);
+    }
+
+    #[test]
+    fn local_writes_are_time_stamped() {
+        let pvs = PvManager::new();
+        let pv = pvs.subscribe("loc://stamp_test(1)");
+        assert_eq!(pv.state().timestamp, None);
+        pv.write("1");
+        assert!(pv.state().timestamp.is_some());
     }
 
     #[test]
@@ -628,6 +754,36 @@ mod tests {
         assert_eq!(pv.state().write_error, None);
     }
 
+    #[test]
+    fn a_sent_put_leaves_an_earlier_failure_shown() {
+        let pvs = PvManager::new();
+        let pv = pvs.subscribe("sim://sine");
+        let shared = &pv.0.shared;
+        shared.write_sent("3", Some("not connected".into()));
+        assert_eq!(pv.state().write_error.as_deref(), Some("not connected"));
+        assert_eq!(pvs.notice().0, 1);
+        // A CA put with no reply was only sent, not confirmed.
+        shared.write_sent("4", None);
+        assert_eq!(pv.state().write_error.as_deref(), Some("not connected"));
+        assert_eq!(pvs.notice().0, 1);
+    }
+
+    #[test]
+    fn a_new_notice_asks_for_a_repaint() {
+        let pvs = PvManager::new();
+        // No backend task, so nothing else changes the PV's state.
+        let (pv, _rx) = queued(&pvs, true);
+        let calls = Arc::new(AtomicU64::new(0));
+        let c = calls.clone();
+        pvs.set_notifier(Arc::new(move || {
+            c.fetch_add(1, Ordering::Relaxed);
+        }));
+        pvs.set_read_only(true);
+        pv.write("1");
+        assert_eq!(pvs.notice().0, 1);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
     /// A PV whose writes go to a queue no backend reads.
     fn queued(pvs: &PvManager, connected: bool) -> (Pv, mpsc::Receiver<Put>) {
         let name = PvName::parse("ca://QUEUED");
@@ -639,6 +795,7 @@ mod tests {
             name,
             shared,
             task: None,
+            formula: None,
         };
         (Pv(Arc::new(entry)), rx)
     }

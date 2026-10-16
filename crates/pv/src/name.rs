@@ -7,6 +7,8 @@ pub enum Scheme {
     Pva,
     Loc,
     Sim,
+    /// A formula over other PVs: `=expr` as in BOY, or `eq://expr`.
+    Formula,
 }
 
 impl Scheme {
@@ -16,6 +18,7 @@ impl Scheme {
             Scheme::Pva => "pva",
             Scheme::Loc => "loc",
             Scheme::Sim => "sim",
+            Scheme::Formula => "eq",
         }
     }
 }
@@ -29,10 +32,23 @@ pub struct PvName {
 }
 
 impl PvName {
-    /// Parse a name; one without a known prefix is Channel Access, as in Phoebus.
+    /// Parse a name; one without a known prefix is Channel Access, as in
+    /// Phoebus, and one starting `=` is a formula, as in BOY.
     pub fn parse(name: &str) -> Self {
         let name = name.trim();
-        for scheme in [Scheme::Ca, Scheme::Pva, Scheme::Loc, Scheme::Sim] {
+        if let Some(expr) = name.strip_prefix('=') {
+            return Self {
+                scheme: Scheme::Formula,
+                pv: expr.trim().to_string(),
+            };
+        }
+        for scheme in [
+            Scheme::Ca,
+            Scheme::Pva,
+            Scheme::Loc,
+            Scheme::Sim,
+            Scheme::Formula,
+        ] {
             if let Some(rest) = name
                 .strip_prefix(scheme.prefix())
                 .and_then(|r| r.strip_prefix("://"))
@@ -73,6 +89,7 @@ impl PvName {
     pub fn key(&self) -> String {
         match self.scheme {
             Scheme::Loc => format!("loc://{}", self.base()),
+            Scheme::Formula => self.to_string(),
             _ => format!("{}://{}", self.scheme.prefix(), self.pv),
         }
     }
@@ -80,7 +97,10 @@ impl PvName {
 
 impl fmt::Display for PvName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}://{}", self.scheme.prefix(), self.pv)
+        match self.scheme {
+            Scheme::Formula => write!(f, "={}", self.pv),
+            _ => write!(f, "{}://{}", self.scheme.prefix(), self.pv),
+        }
     }
 }
 
@@ -132,5 +152,14 @@ mod tests {
         assert_eq!(n.base(), "sine");
         assert_eq!(split_args(n.args().unwrap()), vec!["0", "10", "0.5"]);
         assert!(PvName::parse("sim://ramp").args().is_none());
+    }
+
+    #[test]
+    fn formulas() {
+        let n = PvName::parse(" =(pv(\"X\")*1000)");
+        assert_eq!(n.scheme, Scheme::Formula);
+        assert_eq!(n.pv, "(pv(\"X\")*1000)");
+        assert_eq!(n.to_string(), "=(pv(\"X\")*1000)");
+        assert_eq!(n.key(), PvName::parse("eq://(pv(\"X\")*1000)").key());
     }
 }
