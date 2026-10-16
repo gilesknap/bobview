@@ -139,26 +139,24 @@ impl View {
         self.open_path = loc.source.to_string();
         #[cfg(target_arch = "wasm32")]
         set_page_url(&loc);
-        self.loading = None;
         // In a browser `poll_loading` fetches and builds every display.
-        #[cfg(target_arch = "wasm32")]
-        let fetch_first = true;
-        #[cfg(not(target_arch = "wasm32"))]
-        let fetch_first = loc.source.is_url();
-        if fetch_first {
-            self.loading = Some(self.start_loading(&loc));
-            self.error = None;
-            self.current = Some(loc);
-            return;
-        }
-        let loaded = Screen::load(&loc.source, &loc.macros, &self.pvs);
+        self.loading = Some(self.start_loading(&loc));
+        self.error = None;
         self.current = Some(loc);
-        self.loaded(loaded);
+        // A local or already fetched display is usually built at once: show
+        // it without a frame of "Loading".
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(rx) = &self.loading
+            && let Ok(loaded) = rx.recv_timeout(crate::screen::QUICK)
+        {
+            self.loading = None;
+            self.loaded(loaded);
+        }
     }
 
-    /// Build a fetched display on a thread, embedded displays and all, so a
-    /// slow server doesn't freeze the window; `poll_loading` shows it once
-    /// it arrives.
+    /// Build the display on a thread, embedded displays and all, so a slow
+    /// server or file system doesn't freeze the window; `poll_loading`
+    /// shows it once it arrives.
     #[cfg(not(target_arch = "wasm32"))]
     fn start_loading(&self, loc: &Location) -> Loading {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -226,6 +224,12 @@ impl View {
     /// Show the display being fetched, or its error, once the fetch is done.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn poll_loading(&mut self, ctx: &egui::Context) {
+        // Embedded displays built on threads, including ones not drawn.
+        if let Some(screen) = &mut self.screen
+            && crate::screen::poll_built(&mut screen.nodes)
+        {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
         let Some(rx) = &self.loading else { return };
         match rx.try_recv() {
             Err(TryRecvError::Empty) => {
@@ -235,8 +239,42 @@ impl View {
                 self.loading = None;
                 self.loaded(loaded);
             }
-            Err(TryRecvError::Disconnected) => self.loading = None,
+            Err(TryRecvError::Disconnected) => {
+                // The thread panicked building it: say so, not a blank view.
+                self.loading = None;
+                if let Some(cur) = &self.current {
+                    let e = crate::screen::build_failed(&cur.source);
+                    self.loaded(Err(e));
+                }
+            }
         }
+    }
+
+    /// Whether this shows `loc`: the same display with the same macros, its
+    /// own defaults under both, as a link on it has them (while it loads,
+    /// as it was opened). Macros from a link's group or widget still count.
+    pub fn shows(&self, loc: &Location) -> bool {
+        let Some(cur) = &self.current else {
+            return false;
+        };
+        let Some(screen) = &self.screen else {
+            return cur.same_display(loc);
+        };
+        let defaults = |l: &Location| Location {
+            source: l.source.clone(),
+            macros: screen.display.macros.with(&l.macros),
+        };
+        defaults(cur).same_display(&defaults(loc))
+    }
+
+    /// The display to keep in a layout: the one shown, unless it was refused
+    /// for a display from a public address naming it (which the user did
+    /// not choose), when it is the last one shown before it.
+    pub fn saved_location(&self) -> Option<&Location> {
+        self.current
+            .iter()
+            .chain(self.back.iter().rev())
+            .find(|l| !crate::fetch::refused(&l.source))
     }
 
     /// Navigate to a display, recording where we came from.
@@ -433,13 +471,12 @@ impl View {
 /// How many of the distinct PVs that widgets, plots and rules use are
 /// connected, and how many there are.
 fn count_pvs(nodes: &[Node]) -> (usize, usize) {
-    fn walk(nodes: &[Node], seen: &mut std::collections::HashMap<String, bool>) {
+    fn walk<'a>(nodes: &'a [Node], seen: &mut std::collections::HashMap<&'a pv::PvName, bool>) {
         for n in nodes {
             let traces = n.traces.iter().flat_map(|t| t.x.iter().chain(&t.y));
             let rules = n.rules.iter().flat_map(|r| r.pvs());
             for pv in n.pv.iter().chain(traces).chain(rules) {
-                seen.entry(pv.name().to_string())
-                    .or_insert_with(|| pv.state().connected);
+                seen.entry(pv.name()).or_insert_with(|| pv.connected());
             }
             walk(&n.children, seen);
             n.tabs.iter().for_each(|t| walk(t, seen));
@@ -490,5 +527,53 @@ fn set_page_url(loc: &Location) {
     }
     if let Ok(history) = window.history() {
         let _ = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&url.href()));
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_panicked_build_shows_an_error() {
+        let ctx = egui::Context::default();
+        let mut view = View::new(&PvManager::new(), Some(1.0));
+        view.current = Some(Location {
+            source: bob::Source::File("/x/a.bob".into()),
+            macros: Default::default(),
+        });
+        // The thread's sender dropped without sending, as when it panics.
+        let (_, rx) = std::sync::mpsc::channel();
+        view.loading = Some(rx);
+        view.poll_loading(&ctx);
+        assert!(!view.is_loading() && view.screen.is_none());
+        assert_eq!(
+            view.error.as_deref(),
+            Some("cannot read /x/a.bob: the build failed (see the log)")
+        );
+    }
+
+    #[test]
+    fn a_refused_display_is_not_kept_in_a_layout() {
+        use crate::fetch::{self, tests};
+        let (private, _) = tests::serve();
+        let (public, _) = tests::serve_public("/opi/a.bob");
+        let at = |source: bob::Source| Location {
+            source,
+            macros: Default::default(),
+        };
+        let mut view = View::new(&PvManager::new(), Some(1.0));
+        assert_eq!(view.saved_location(), None);
+        let page = fetch::user_named(&format!("{public}/opi/a.bob"));
+        let d = fetch::load(&page).unwrap();
+        // A link on the public display to a private one, refused.
+        let link = fetch::resolve(d.source.as_ref(), &format!("{private}/opi/a.bob"));
+        assert!(fetch::load(&link).is_err());
+        view.current = Some(at(link.clone()));
+        view.back = vec![at(page.clone())];
+        assert_eq!(view.saved_location(), Some(&at(page)));
+        // Once the user names it, it is theirs.
+        fetch::user_named(&link.to_string());
+        assert_eq!(view.saved_location(), Some(&at(link)));
     }
 }

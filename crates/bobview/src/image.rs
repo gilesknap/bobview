@@ -43,9 +43,9 @@ pub struct ImageCache {
 }
 
 struct Texture {
-    /// Identifies what is on the texture: frame unique id, data pointer and
-    /// the display settings, so a rule changing the colour map redraws it.
-    key: (i64, usize, String),
+    /// What is on the texture, so a new frame or a rule changing the colour
+    /// map redraws it.
+    key: TexKey,
     texture: TextureHandle,
     /// The data range the colours were scaled to.
     range: (f64, f64),
@@ -213,18 +213,37 @@ fn image_of(w: &Widget, s: &PvState) -> Option<Arc<Image>> {
     }
 }
 
-fn data_key(img: &Image) -> usize {
-    match &img.data {
-        ImageData::I8(a) => a.as_ptr() as usize,
-        ImageData::U8(a) => a.as_ptr() as usize,
-        ImageData::I16(a) => a.as_ptr() as usize,
-        ImageData::U16(a) => a.as_ptr() as usize,
-        ImageData::I32(a) => a.as_ptr() as usize,
-        ImageData::U32(a) => a.as_ptr() as usize,
-        ImageData::I64(a) => a.as_ptr() as usize,
-        ImageData::U64(a) => a.as_ptr() as usize,
-        ImageData::F32(a) => a.as_ptr() as usize,
-        ImageData::F64(a) => a.as_ptr() as usize,
+/// Identifies what a texture shows: the frame's unique id, its data and the
+/// display settings. The data is held, not just its address: a CA array is
+/// freed when the next one arrives, and an allocator may give the next one
+/// the same address, which would leave the old picture on screen.
+struct TexKey {
+    unique_id: i64,
+    data: ImageData,
+    settings: String,
+}
+
+impl TexKey {
+    fn matches(&self, unique_id: i64, data: &ImageData, settings: &str) -> bool {
+        self.unique_id == unique_id && same_data(&self.data, data) && self.settings == settings
+    }
+}
+
+/// Whether two images' pixels are the same allocation.
+fn same_data(a: &ImageData, b: &ImageData) -> bool {
+    use ImageData as D;
+    match (a, b) {
+        (D::I8(a), D::I8(b)) => Arc::ptr_eq(a, b),
+        (D::U8(a), D::U8(b)) => Arc::ptr_eq(a, b),
+        (D::I16(a), D::I16(b)) => Arc::ptr_eq(a, b),
+        (D::U16(a), D::U16(b)) => Arc::ptr_eq(a, b),
+        (D::I32(a), D::I32(b)) => Arc::ptr_eq(a, b),
+        (D::U32(a), D::U32(b)) => Arc::ptr_eq(a, b),
+        (D::I64(a), D::I64(b)) => Arc::ptr_eq(a, b),
+        (D::U64(a), D::U64(b)) => Arc::ptr_eq(a, b),
+        (D::F32(a), D::F32(b)) => Arc::ptr_eq(a, b),
+        (D::F64(a), D::F64(b)) => Arc::ptr_eq(a, b),
+        _ => false,
     }
 }
 
@@ -413,8 +432,16 @@ pub fn draw(
         )
     });
     let settings = format!("{:?}{unsigned}{fixed:?}", w.get("color_map"));
-    let key = (img.unique_id, data_key(&img), settings);
-    if cache.tex.as_ref().map(|c| &c.key) != Some(&key) {
+    if !cache
+        .tex
+        .as_ref()
+        .is_some_and(|c| c.key.matches(img.unique_id, &img.data, &settings))
+    {
+        let key = TexKey {
+            unique_id: img.unique_id,
+            data: img.data.clone(),
+            settings,
+        };
         let (pixels, range) = colorize(&img, unsigned, fixed, &lut);
         match cache.tex.as_mut() {
             Some(tex) => {
@@ -808,6 +835,28 @@ fn colour_bar(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_frame_in_a_reused_allocation_is_redrawn() {
+        // CA arrays all have unique id 0, so only the data tells frames apart.
+        let first: Arc<[f64]> = Arc::from(vec![0.0; 64]);
+        let key = TexKey {
+            unique_id: 0,
+            data: ImageData::F64(first.clone()),
+            settings: "viridis".into(),
+        };
+        let addr = first.as_ptr();
+        // The PV drops the first frame when the second arrives, which is the
+        // same size: the allocator would happily hand back the same block.
+        drop(first);
+        let second: Arc<[f64]> = Arc::from(vec![1.0; 64]);
+        assert_ne!(second.as_ptr(), addr, "the key keeps the first frame alive");
+        assert!(!key.matches(0, &ImageData::F64(second), "viridis"));
+        // The same frame, cloned as each paint does, matches; new settings do not.
+        assert!(key.matches(0, &key.data.clone(), "viridis"));
+        assert!(!key.matches(0, &key.data, "gray"));
+        assert!(!key.matches(1, &key.data, "viridis"));
+    }
 
     #[test]
     fn viridis_ends() {

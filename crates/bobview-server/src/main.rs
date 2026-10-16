@@ -6,6 +6,7 @@
 //! and reaches PVs through bobview's own CA/PVA layer. Run it anywhere
 //! `caget` works and point a browser at it.
 
+mod files;
 mod pvws;
 
 use std::net::SocketAddr;
@@ -15,7 +16,8 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::extract::Request;
-use axum::http::StatusCode;
+use axum::http::header::{CONTENT_SECURITY_POLICY, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS};
+use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -34,12 +36,14 @@ Open http://HOST:PORT/?display=FILE.bob in a browser (default index.bob).
                          ../share/bobview/web next to this binary, else dist/web)
   --opi DIR              serve .bob files from here; they take precedence over
                          files of the same name in the web build
+  --follow-symlinks      serve files through symbolic links that lead out of
+                         --opi or --web (refused by default)
   --write                let browsers write to PVs (off by default, as in PVWS);
                          every write must carry the write token
-  --write-token TOKEN    the token --write wants (default: $BOBVIEW_WRITE_TOKEN,
-                         else a random one printed at startup); a page passes
-                         it as &token=TOKEN. Prefer the variable: arguments
-                         show in `ps`
+  --write-token TOKEN    the token --write wants (default: $BOBVIEW_WRITE_TOKEN
+                         if set and not empty, else a random one printed at
+                         startup); a page passes it as &token=TOKEN. Prefer
+                         the variable: arguments show in `ps`
   --allow-origin ORIGIN  also let pages from ORIGIN connect, e.g.
                          https://host.example.com (may be repeated); other
                          pages than this server's own are refused
@@ -48,7 +52,9 @@ Open http://HOST:PORT/?display=FILE.bob in a browser (default index.bob).
                          of --allow-origin (may be repeated)
   --max-per-ip N         most clients at once from one address (default 10;
                          raise it behind a reverse proxy, which is one address)
-  --throttle-ms MS       least time between updates of one PV (default 100)
+  --throttle-ms MS       least time between two batches of updates to one
+                         client (default 100); a PV that changes faster sends
+                         only its latest value
   -h, --help             show this help
   -V, --version          show the version
 ";
@@ -64,7 +70,13 @@ fn main() {
     let mut bind = "127.0.0.1".to_string();
     let mut web = None;
     let mut opi = None;
-    let mut token = std::env::var("BOBVIEW_WRITE_TOKEN").ok();
+    let mut follow_symlinks = false;
+    // The token and where it came from, for messages about it. An empty
+    // variable is as good as unset.
+    let mut token = std::env::var(TOKEN_VAR)
+        .ok()
+        .filter(|t| !t.is_empty())
+        .map(|t| (t, TOKEN_VAR));
     let mut config = pvws::Config {
         write: false,
         write_token: String::new(),
@@ -82,7 +94,8 @@ fn main() {
             "--web" => web = Some(PathBuf::from(args.next().unwrap_or_default())),
             "--opi" => opi = args.next().map(PathBuf::from),
             "--write" => config.write = true,
-            "--write-token" => token = args.next(),
+            "--write-token" => token = args.next().map(|t| (t, "--write-token")),
+            "--follow-symlinks" => follow_symlinks = true,
             "--allow-origin" => config.allow_origins.extend(args.next()),
             "--host" => config.hosts.extend(args.next()),
             "--max-per-ip" => config.max_per_ip = parse(&arg, args.next()),
@@ -103,9 +116,9 @@ fn main() {
     }
     if config.write {
         config.write_token = match token {
-            Some(token) if !token.is_empty() => token,
-            Some(_) => {
-                eprintln!("--write-token: the token is empty");
+            Some((token, _)) if !token.is_empty() => token,
+            Some((_, from)) => {
+                eprintln!("{from}: the token is empty");
                 std::process::exit(2);
             }
             None => {
@@ -116,8 +129,13 @@ fn main() {
             }
         };
         log::info!("writes are on, and need the write token");
-    } else if token.is_some() {
-        log::warn!("--write-token does nothing without --write");
+    } else if let Some((_, from)) = token {
+        // A variable exported for every start is no mistake; a flag is.
+        if from == TOKEN_VAR {
+            log::debug!("{TOKEN_VAR} is set, but writes are off (--write)");
+        } else {
+            log::warn!("{from} does nothing without --write");
+        }
     }
     let web = web.unwrap_or_else(default_web);
     if !web.join("index.html").is_file() {
@@ -141,10 +159,18 @@ fn main() {
         .route("/pvws/pv", get(pvws::socket))
         .route("/pvws/info", get(pvws::info));
     let app = match &opi {
-        Some(opi) => app.fallback_service(ServeDir::new(opi).fallback(ServeDir::new(&web))),
-        None => app.fallback_service(ServeDir::new(&web)),
+        Some(opi) if follow_symlinks => {
+            app.fallback_service(ServeDir::new(opi).fallback(ServeDir::new(&web)))
+        }
+        None if follow_symlinks => app.fallback_service(ServeDir::new(&web)),
+        _ => {
+            let dirs: Vec<PathBuf> = opi.iter().chain([&web]).cloned().collect();
+            let roots = Arc::new(files::Roots::new(&dirs));
+            app.fallback(move |request: Request| files::serve(roots.clone(), request))
+        }
     }
     .layer(middleware::from_fn(hide_dot_files))
+    .layer(middleware::from_fn(no_framing))
     .with_state(hub);
 
     manager.runtime().block_on(async move {
@@ -165,6 +191,9 @@ fn main() {
         }
     });
 }
+
+/// The environment variable holding the write token.
+const TOKEN_VAR: &str = "BOBVIEW_WRITE_TOKEN";
 
 /// 128 random bits as hex, from the operating system.
 fn random_token() -> String {
@@ -204,6 +233,20 @@ fn is_hidden(path: &str) -> bool {
         .decode_utf8_lossy()
         .split('/')
         .any(|segment| segment.starts_with('.'))
+}
+
+/// Stop other sites' pages framing this server's (clickjacking: a page
+/// could lay its own over a display's buttons).
+async fn no_framing(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(X_FRAME_OPTIONS, HeaderValue::from_static("SAMEORIGIN"));
+    headers.insert(
+        CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("frame-ancestors 'self'"),
+    );
+    headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    response
 }
 
 fn parse<T: std::str::FromStr>(flag: &str, value: Option<String>) -> T {

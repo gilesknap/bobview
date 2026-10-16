@@ -9,9 +9,13 @@ license.workspace = true
 axum = { version = "0.8.9", features = ["ws"] }
 base64 = "0.23.1"
 env_logger = { version = "0.11", default-features = false, features = ["humantime"] }
+httpdate = "1.0.3"
+libc = "0.2.190"
 log = "0.4.34"
+mime_guess = "2.0.5"
 percent-encoding = "2.3.2"
 pv = { path = "../pv" }
 serde_json = "1.0.154"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "fs", "sync", "time", "macros"] }
+tokio-util = { version = "0.7.20", features = ["io"] }
 tower-http = { version = "0.6", features = ["fs"] }

@@ -28,7 +28,7 @@ pub struct Location {
 impl Location {
     /// The same display with the same effective macros, however they were
     /// layered (later definitions win).
-    fn same_display(&self, other: &Location) -> bool {
+    pub(crate) fn same_display(&self, other: &Location) -> bool {
         fn effective(m: &Macros) -> std::collections::BTreeMap<&str, &str> {
             m.iter().collect()
         }
@@ -75,10 +75,11 @@ pub struct BobApp {
     monitors_at: Option<f64>,
     /// Where the main window is on the desktop, to open windows beside it.
     main_frame: Option<Frame>,
-    /// The main window's place and size from a layout, until it has them:
-    /// a window manager that sized it before moving it may have cut it to
-    /// the monitor it was on.
-    restoring: Option<Geometry>,
+    /// The main window's place and size from a layout, and when (input
+    /// time) the wait for them began, until it has them or `RESTORE_WAIT`
+    /// has passed: a window manager that sized it before moving it may have
+    /// cut it to the monitor it was on.
+    restoring: Option<(Geometry, Option<f64>)>,
     settings: layout::Settings,
     /// The Save as… dialog, when open.
     save_as: Option<SaveAs>,
@@ -313,7 +314,8 @@ enum Route {
 /// Where a link from `origin` goes, whatever its target, since most links
 /// are `replace`. Ctrl+click navigates in place, as every link does where
 /// displays have no `windows` of their own. Otherwise a display already
-/// open with the same macros is raised (`showing`); shift+click opens a new
+/// open with the same macros is raised (`showing`), or shown again in place
+/// when that is the link's own window; shift+click opens a new
 /// window; a link in an unpinned window navigates in place, and one in a
 /// `pinned` window opens in the `viewer`, or a new window when every window
 /// is pinned.
@@ -328,6 +330,8 @@ fn route(
         return Route::InPlace;
     }
     match (showing, viewer) {
+        // Shown again, with fresh PVs, as a Refresh button wants.
+        (Some(window), _) if window == origin.window => Route::InPlace,
         (Some(window), _) => Route::Raise(window),
         _ if origin.shift => Route::NewWindow,
         _ if !pinned => Route::InPlace,
@@ -499,15 +503,15 @@ impl BobApp {
             .map(|(window, _)| window)
     }
 
-    /// The window showing `loc` (the same display and macros), if any.
+    /// The window showing `loc` (the same display and macros, see
+    /// `View::shows`), if any.
     fn showing(&self, loc: &Location) -> Option<WindowKey> {
-        let same = |cur: Option<&Location>| cur.is_some_and(|c| c.same_display(loc));
-        if same(self.main.current.as_ref()) {
+        if self.main.shows(loc) {
             return Some(WindowKey::Main);
         }
         self.windows
             .iter()
-            .find(|w| !w.close && same(w.view.current.as_ref()))
+            .find(|w| !w.close && w.view.shows(loc))
             .map(|w| WindowKey::Child(w.id))
     }
 
@@ -515,8 +519,23 @@ impl BobApp {
     /// viewer or in a window of its own (see `route`).
     fn follow(&mut self, ctx: &egui::Context, origin: Origin, loc: Location, target: &str) {
         let pinned = self.pinned(origin.window);
-        let (showing, viewer) = (self.showing(&loc), self.viewer());
+        // The link's own window first: another may show the display too.
+        let own = self.view_mut(origin.window).is_some_and(|v| v.shows(&loc));
+        let showing = if own {
+            Some(origin.window)
+        } else {
+            self.showing(&loc)
+        };
+        let viewer = self.viewer();
         match route(self.can_windows, origin, pinned, showing, viewer) {
+            // The display it shows: read again, as a Refresh button wants,
+            // without adding to Back.
+            Route::InPlace if own => {
+                log::info!("reload {} ({target})", loc.source);
+                if let Some(view) = self.view_mut(origin.window) {
+                    view.reload();
+                }
+            }
             Route::InPlace => {
                 log::info!("open {} ({target})", loc.source);
                 if let Some(view) = self.view_mut(origin.window) {
@@ -643,7 +662,9 @@ impl BobApp {
     /// worked out.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn is_loading(&self) -> bool {
-        self.main.is_loading() || self.windows.iter().any(|w| w.view.is_loading())
+        self.main.is_loading()
+            || self.windows.iter().any(|w| w.view.is_loading())
+            || crate::screen::building()
     }
 
     /// Run a command action on a thread, so a slow launcher script or file
@@ -956,7 +977,7 @@ impl BobApp {
     /// The open windows as a layout.
     fn layout(&self) -> Layout {
         let mut windows = Vec::new();
-        if let Some(loc) = &self.main.current {
+        if let Some(loc) = self.main.saved_location() {
             let mut w = WindowLayout::new(loc, self.geometry);
             w.main = true;
             w.pinned = Some(self.main_pinned);
@@ -965,7 +986,7 @@ impl BobApp {
             windows.push(w);
         }
         for dw in self.windows.iter().filter(|w| !w.close) {
-            if let Some(loc) = &dw.view.current {
+            if let Some(loc) = dw.view.saved_location() {
                 let mut w = WindowLayout::new(loc, dw.geometry);
                 w.toolbar = dw.toolbar;
                 w.pinned = Some(dw.pinned);
@@ -997,9 +1018,20 @@ impl BobApp {
     /// layout's size if it hasn't that: a window manager may have cut it to
     /// fit the monitor the window started on.
     fn finish_restoring(&mut self, ctx: &egui::Context) {
-        let Some(want) = self.restoring else {
+        let Some((want, since)) = self.restoring else {
             return;
         };
+        // One that never gets there (kept on screen, fullscreen, tiled) is
+        // given up, so a later move across that place doesn't resize it.
+        // The wait begins on the first frame after the layout was applied,
+        // not in it: that frame loads every display, which may take a while.
+        let time = ctx.input(|i| i.time);
+        let since = since.unwrap_or(time);
+        self.restoring = Some((want, Some(since)));
+        if time - since > RESTORE_WAIT {
+            self.restoring = None;
+            return;
+        }
         let (Some(size), Some(now)) = (want.size, self.geometry.size) else {
             return;
         };
@@ -1027,6 +1059,7 @@ impl BobApp {
         let zoom = ctx.zoom_factor();
         let monitors = self.monitors(ctx);
         self.windows.clear();
+        self.restoring = None;
         for w in &layout.windows {
             let geometry = w.geometry(&monitors);
             if w.position.is_some() && geometry.position.is_none() {
@@ -1054,8 +1087,8 @@ impl BobApp {
             if let Some(size) = geometry.size {
                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size / zoom));
                 self.chrome.hold_size();
-                self.restoring = Some(geometry);
             }
+            self.restoring = geometry.size.map(|_| (geometry, None));
             if let Some(z) = &w.zoom {
                 self.main.fit = z.factor().is_none();
                 self.main.zoom = z.factor().unwrap_or(self.main.zoom);
@@ -1141,7 +1174,7 @@ impl BobApp {
             ui.label("File or URL:");
             let edit = ui.add(egui::TextEdit::singleline(&mut *path).desired_width(f32::INFINITY));
             if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                chosen = Some(Source::parse(path));
+                chosen = Some(crate::fetch::user_named(path));
             }
         });
         // Nothing to list for a URL (an empty path lists nothing).
@@ -1215,6 +1248,10 @@ fn can_multi_window(ctx: &egui::Context, touch: bool) -> bool {
     !cfg!(target_arch = "wasm32") && !ctx.embed_viewports() && !touch && !small
 }
 
+/// How long (seconds) the main window has to reach a layout's place before
+/// `finish_restoring` gives up on it.
+const RESTORE_WAIT: f64 = 2.0;
+
 /// What the navigator shows.
 const NAVIGATOR_HELP: &str = "Navigator: a tree of the displays the home display links to, \
      and those they link to. Click one to open it as a link would (shift and ctrl too).";
@@ -1222,7 +1259,8 @@ const NAVIGATOR_HELP: &str = "Navigator: a tree of the displays the home display
 /// What a window's pin does.
 const PIN_HELP: &str = "Pinned: links open their displays in the unpinned window used last, \
      or a new one (shift+click: a new window, ctrl+click: in place). \
-     Unpinned: links open in place.";
+     Unpinned: links open in place. \
+     A display already open in another window is raised.";
 
 /// What the main toolbar's layout controls ask for.
 enum LayoutAction {
@@ -1418,6 +1456,10 @@ impl BobApp {
         self.main_used
             .focus(ui.input(|i| i.focused), &mut self.clock);
         self.chrome.begin(ui.ctx());
+        // Before a layout is applied, so the wait for one applied this
+        // frame begins on the next, after this frame's loading.
+        self.geometry = geometry(ui);
+        self.finish_restoring(&ctx);
         // Once the controls' scale has settled, as positions and sizes
         // depend on it.
         if self.chrome.settled()
@@ -1428,8 +1470,6 @@ impl BobApp {
         if shortcuts(ui, &mut self.main).close {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        self.geometry = geometry(ui);
-        self.finish_restoring(&ctx);
         self.main_frame = frame(ui);
         self.main
             .update_title(ui.ctx(), self.main_pinned && self.can_windows);
@@ -1527,10 +1567,13 @@ impl BobApp {
         let Some(root) = root.filter(|_| self.tree.open) else {
             return (0.0, None);
         };
-        let here: Vec<Location> = std::iter::once(&self.main)
-            .chain(self.windows.iter().map(|w| &w.view))
-            .filter_map(|v| v.current.clone())
-            .collect();
+        // Shown in bold by the same test a click makes (see `View::shows`).
+        let (main, windows) = (&self.main, &self.windows);
+        let here = |loc: &Location| {
+            std::iter::once(main)
+                .chain(windows.iter().filter(|w| !w.close).map(|w| &w.view))
+                .any(|v| v.shows(loc))
+        };
         let panel = egui::Panel::left("navigator")
             .resizable(true)
             .default_size(220.0)
@@ -1538,7 +1581,8 @@ impl BobApp {
         (panel.response.rect.width(), panel.inner)
     }
 
-    /// Open what a navigator node names, as a link in the main window would.
+    /// Open what a navigator node names, as a link in the main window would;
+    /// the display the main window shows is not opened again.
     fn open_from_tree(&mut self, ctx: &egui::Context, clicked: tree::Clicked) {
         let origin = Origin {
             window: WindowKey::Main,
@@ -1546,6 +1590,9 @@ impl BobApp {
             shift: clicked.shift,
         };
         match clicked.target {
+            // The main window's own display (shown bold) is left as it is,
+            // its PVs connected, whatever the modifiers.
+            tree::Target::Display(loc) if self.main.shows(&loc) => {}
             tree::Target::Display(loc) => self.follow(ctx, origin, loc, "navigator"),
             tree::Target::Command {
                 base,
@@ -1963,6 +2010,10 @@ fn child_ui(
         // sized to the next.
         let fit = w.fit_next;
         w.fit_next = auto_size || fit && display.is_none();
+        // Taken with the display it was for, sized or not (the window may
+        // be maximized, or the display failed), so it can't move the window
+        // later.
+        let origin = w.beside.take();
         if fit
             && chrome::can_resize(&info, zoom)
             && let Some(display) = display
@@ -1974,7 +2025,7 @@ fn child_ui(
                     .send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
             }
             // Beside the window it was opened from, at its new size.
-            if let Some(origin) = w.beside.take()
+            if let Some(origin) = origin
                 && let Some(pos) = beside(origin, &desk.clear_of(w.id), size * zoom, &desk.monitors)
             {
                 ui.ctx()
@@ -2205,8 +2256,10 @@ mod tests {
         app.launch(&ctx, main, None, None, "no-such-launcher".into());
         app.launch(&ctx, main, None, None, "no-such-launcher".into());
         assert_eq!(app.main.launching.len(), 1);
-        assert!(app.is_loading());
-        while app.is_loading() {
+        // The main view's own loading: app.is_loading() also counts tab
+        // builds of other tests running at the same time.
+        assert!(app.main.is_loading());
+        while app.main.is_loading() {
             std::thread::sleep(std::time::Duration::from_millis(5));
             app.poll_launched(&ctx);
         }
@@ -2229,7 +2282,7 @@ mod tests {
             })
             .unwrap();
         app.poll_launched(&ctx);
-        assert!(app.main.current.is_none() && !app.is_loading());
+        assert!(app.main.current.is_none() && !app.main.is_loading());
         // In the pinned main window a ctrl+clicked command opens in place,
         // as a ctrl+clicked link does.
         app.launched
@@ -2290,9 +2343,25 @@ mod tests {
                 Route::Raise(child)
             );
         }
+        let from_child = Origin {
+            window: child,
+            ..plain
+        };
         assert_eq!(
-            route(true, plain, true, Some(WindowKey::Main), None),
+            route(true, from_child, true, Some(WindowKey::Main), None),
             Route::Raise(WindowKey::Main)
+        );
+        // A link to the display its own window shows: shown again in place,
+        // as a Refresh button wants.
+        for (origin, pinned) in [(plain, true), (plain, false), (shift, true)] {
+            assert_eq!(
+                route(true, origin, pinned, Some(WindowKey::Main), Some(viewer)),
+                Route::InPlace
+            );
+        }
+        assert_eq!(
+            route(true, from_child, true, Some(child), None),
+            Route::InPlace
         );
         // Ctrl+click navigates in place, even to a display already open.
         assert_eq!(
@@ -2509,6 +2578,117 @@ mod tests {
     }
 
     #[test]
+    fn a_link_to_its_own_windows_display_reloads_it() {
+        use super::{BobApp, Location, Origin, WindowKey};
+        use crate::tree::{Clicked, Target};
+        use crate::widgets::Request;
+        // Following a link to the display shown reloads it, clearing the
+        // fetch cache.
+        let _cache = crate::fetch::tests::CACHE_USERS.lock();
+        let ctx = eframe::egui::Context::default();
+        let mut app = BobApp::new(&ctx, None, Some(1.0), crate::chrome::UiScale::Auto);
+        let display = |name: &str| Location {
+            source: bob::Source::File(format!("/no/such/{name}.bob").into()),
+            macros: bob::Macros::from_pairs([("P", name)]),
+        };
+        let open = |app: &mut BobApp, window, ctrl, loc: Location| {
+            let req = Request::Open {
+                source: loc.source,
+                macros: loc.macros,
+                target: "replace".into(),
+            };
+            let origin = Origin {
+                window,
+                ctrl,
+                shift: false,
+            };
+            app.request(&ctx, origin, req);
+        };
+        let main = WindowKey::Main;
+        // The main window and a child both show a; the child came from b.
+        open(&mut app, main, true, display("a"));
+        open(&mut app, main, false, display("b"));
+        let child = WindowKey::Child(app.windows[0].id);
+        open(&mut app, child, true, display("a"));
+        assert_eq!(app.windows[0].view.back, [display("b")]);
+        // The child's link to a reloads the child, not raising the main
+        // window, and adds nothing to Back however often it is pressed.
+        let shown = (app.main.shown, app.windows[0].view.shown);
+        open(&mut app, child, false, display("a"));
+        open(&mut app, child, false, display("a"));
+        assert_eq!(app.windows[0].view.current, Some(display("a")));
+        assert_eq!(app.windows[0].view.back, [display("b")]);
+        assert_eq!(app.windows[0].view.shown, shown.1 + 2);
+        assert_eq!(app.main.shown, shown.0);
+        assert_eq!(app.windows.len(), 1);
+        // The main window's from its own link too.
+        open(&mut app, main, false, display("a"));
+        assert!(app.main.back.is_empty());
+        assert_eq!(app.main.shown, shown.0 + 1);
+
+        // A navigator click on the main window's display leaves it be.
+        for (ctrl, shift) in [(false, false), (true, false), (false, true)] {
+            app.open_from_tree(
+                &ctx,
+                Clicked {
+                    target: Target::Display(display("a")),
+                    ctrl,
+                    shift,
+                },
+            );
+        }
+        assert_eq!(app.main.shown, shown.0 + 1);
+        assert!(app.main.back.is_empty());
+        assert_eq!(app.windows.len(), 1);
+    }
+
+    #[test]
+    fn a_link_to_its_own_display_counts_the_displays_own_macros() {
+        use super::{BobApp, Location, Origin, WindowKey};
+        use crate::widgets::Request;
+        let dir = std::env::temp_dir().join(format!("bobview-own-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("own.bob");
+        std::fs::write(
+            &file,
+            r#"<display version="2.0.0"><name>Own</name><macros><X>1</X></macros></display>"#,
+        )
+        .unwrap();
+        let at = |pairs: &[(&str, &str)]| Location {
+            source: bob::Source::File(file.clone()),
+            macros: bob::Macros::from_pairs(pairs.iter().copied()),
+        };
+        // Following a link to the display shown reloads it, clearing the
+        // fetch cache.
+        let _cache = crate::fetch::tests::CACHE_USERS.lock();
+        let ctx = eframe::egui::Context::default();
+        let mut app = BobApp::new(&ctx, None, Some(1.0), crate::chrome::UiScale::Auto);
+        let open = |app: &mut BobApp, ctrl, loc: Location| {
+            let req = Request::Open {
+                source: loc.source,
+                macros: loc.macros,
+                target: "replace".into(),
+            };
+            let origin = Origin {
+                window: WindowKey::Main,
+                ctrl,
+                shift: false,
+            };
+            app.request(&ctx, origin, req);
+        };
+        open(&mut app, true, at(&[("P", "a")]));
+        assert!(app.main.screen.is_some());
+        let shown = app.main.shown;
+        // Its link has the display's own macros too: reloaded in place, in
+        // the pinned main window, not opened in a new one.
+        open(&mut app, false, at(&[("X", "1"), ("P", "a")]));
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(app.main.back.is_empty());
+        assert_eq!(app.main.shown, shown + 1);
+        assert!(app.windows.is_empty());
+    }
+
+    #[test]
     fn plain_names_drop_the_ca_prefix_and_type() {
         let t = |n: &str| plain_name(&PvName::parse(n));
         assert_eq!(t("loc://t1<VDouble>(1.5)"), "loc://t1");
@@ -2596,13 +2776,42 @@ mod tests {
         let mut app = BobApp::new(&ctx, None, None, crate::chrome::UiScale::Fixed(1.0));
         // The layout's place reached, but the width cut to a 1200 wide
         // monitor the window started on.
-        app.restoring = Some(Geometry {
-            position: Some(Pos2::ZERO),
-            size: Some(Vec2::new(1471.0, 900.0)),
-        });
+        app.restoring = Some((
+            Geometry {
+                position: Some(Pos2::ZERO),
+                size: Some(Vec2::new(1471.0, 900.0)),
+            },
+            None,
+        ));
         let mut size = Vec2::new(1200.0, 900.0);
         run(&ctx, &mut app, &mut size, 3);
         assert_eq!(size, Vec2::new(1471.0, 900.0));
         assert!(app.restoring.is_none());
+    }
+
+    #[test]
+    fn a_restored_window_that_never_gets_there_is_left_alone() {
+        use super::{BobApp, RESTORE_WAIT};
+        use crate::layout::Geometry;
+        use eframe::egui::{Pos2, Vec2};
+        let ctx = eframe::egui::Context::default();
+        let mut app = BobApp::new(&ctx, None, None, crate::chrome::UiScale::Fixed(1.0));
+        // Kept away from the layout's place (by the window manager, or
+        // fullscreen): not sized while it waits, then given up.
+        app.restoring = Some((
+            Geometry {
+                position: Some(Pos2::new(500.0, 300.0)),
+                size: Some(Vec2::new(1471.0, 900.0)),
+            },
+            None,
+        ));
+        let mut size = Vec2::new(1200.0, 900.0);
+        run(&ctx, &mut app, &mut size, 3);
+        assert!(app.restoring.is_some());
+        // Frames are 1/60 s apart when the input gives no time.
+        let frames = (RESTORE_WAIT * 60.0) as usize + 10;
+        run(&ctx, &mut app, &mut size, frames);
+        assert!(app.restoring.is_none());
+        assert_eq!(size, Vec2::new(1200.0, 900.0));
     }
 }

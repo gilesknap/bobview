@@ -44,11 +44,9 @@ pub(crate) fn format_value(w: &Widget, s: &PvState) -> String {
         (DEFAULT | STRING, Value::Enum(_)) => s.format(precision, false),
         (_, Value::Enum(i)) => i.to_string(),
         (DEFAULT | DECIMAL, _) => s.format(precision, show_units),
-        (STRING, Value::LongArray(a)) => a
-            .iter()
-            .take_while(|c| **c != 0)
-            .map(|c| (*c as u8) as char)
-            .collect(),
+        // An array of numbers as the long string (UTF-8) it holds, as
+        // areaDetector's `FilePath` and other char waveforms are.
+        (STRING, v) if v.is_numeric_array() => v.as_long_string().unwrap_or_default(),
         (_, Value::Double(_) | Value::Long(_)) => units(number(&s.value, format, p)),
         (_, Value::DoubleArray(a)) => units(array(a.iter().map(|v| Value::Double(*v)), format, p)),
         (_, Value::LongArray(a)) => units(array(a.iter().map(|v| Value::Long(*v)), format, p)),
@@ -92,14 +90,8 @@ fn number(v: &Value, format: i64, p: usize) -> String {
         }
         HEX => format!("0x{long:0p$X}"),
         BINARY => format!("0b{long:0p$b}"),
-        STRING => {
-            let b = long as u8;
-            if b.is_ascii() {
-                (b as char).to_string()
-            } else {
-                '\u{FFFD}'.to_string()
-            }
-        }
+        // The character of its low byte, as Phoebus shows it.
+        STRING => pv::long_string([long as u8]),
         COMPACT if x.abs() > 0.0001 && x.abs() < 10000.0 => format!("{x:.p$}"),
         COMPACT => exponential(x, p),
         SIGNIFICANT => significant(x, p),

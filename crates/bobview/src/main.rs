@@ -14,6 +14,7 @@ mod launch;
 mod layout;
 mod meter;
 mod plot;
+mod polygon;
 mod pvmenu;
 mod rules;
 mod screen;
@@ -260,7 +261,7 @@ fn run(cli: Cli, clicks: Vec<(egui::Pos2, egui::PointerButton)>) -> Result<(), F
              window open in another window, shift+click in a new one"
         );
     }
-    let mut file = cli.display.as_deref().map(Source::parse);
+    let mut file = cli.display.as_deref().map(fetch::user_named);
     let mut macros = parse_macros(cli.macros.as_deref().unwrap_or_default());
     let ui_scale = cli.ui_scale.unwrap_or_else(chrome::UiScale::from_env);
     let is_opi = |p: &std::path::Path| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("opi"));
@@ -418,6 +419,8 @@ fn unescape_macro(text: &str) -> String {
 /// `?display=https://host/opi/index.bob&macros=P=X&pvws=pvws.host:443`
 /// (and `zoom=1.5`, `token=SECRET` for a server with `--write`).
 /// A relative display is found next to the page; the default is `index.bob`.
+/// With a token, displays come only from the page's server, and writes
+/// carry the token only to a PVWS there.
 #[cfg(target_arch = "wasm32")]
 fn main() {
     use wasm_bindgen::JsCast;
@@ -437,7 +440,10 @@ fn main() {
         pv::set_pvws(&pvws);
     }
     if let Some(token) = query.get("token") {
+        // The token goes only to the page's own server, and only its
+        // displays may use it.
         pv::set_write_token(&token);
+        fetch::same_origin_only();
     }
     let zoom = query.get("zoom").and_then(|z| {
         parse_zoom(&z)

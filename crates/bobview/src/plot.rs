@@ -770,7 +770,7 @@ mod tests {
     fn node(pvs: &PvManager) -> Node {
         let d = Display::parse(PLOT).unwrap();
         let s =
-            crate::screen::Builder { pvs }.screen(d, &Macros::from_pairs([("P", "A:")]), None, 0);
+            crate::screen::Builder::new(pvs).screen(d, &Macros::from_pairs([("P", "A:")]), None, 0);
         s.nodes.into_iter().next().unwrap()
     }
 

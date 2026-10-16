@@ -11,13 +11,14 @@
 //! A display that links back to one above it is shown, marked ↻, but not
 //! opened again.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
-use bob::{Action, Macros, Source, Widget};
+use bob::{Action, Display, Macros, Source, Widget};
 use eframe::egui;
 
 use crate::app::Location;
-use crate::screen::{MAX_DEPTH, expand_for, find_group, tab_elements};
+use crate::screen::{MAX_DEPTH, display_macro, expand_for, find_group, tab_elements};
 
 /// What a link opens.
 #[derive(Clone, Debug, PartialEq)]
@@ -64,26 +65,24 @@ pub fn links(loc: &Location) -> Result<Links, bob::Error> {
         display.source.as_ref(),
         0,
         &mut all,
-    );
-    let mut links: Vec<Link> = Vec::new();
-    for link in all {
-        let key = target_key(&link.target);
-        if !links.iter().any(|l| target_key(&l.target) == key) {
-            links.push(link);
-        }
-    }
+    )?;
+    let mut seen = HashSet::new();
+    let mut links: Vec<Link> = all
+        .into_iter()
+        .filter(|l| seen.insert(target_key(&l.target)))
+        .collect();
     for i in 0..links.len() {
         let label = &links[i].label;
         let repeated = links.iter().filter(|l| l.label == *label).count() > 1;
         let named_after = match &links[i].target {
             Target::Display(loc) => *label == file_name(&loc.source),
-            Target::Command { command, .. } => label.contains(command.trim()),
+            Target::Command { command, .. } => label.contains(&one_line(command)),
         };
         links[i].vague = repeated || named_after;
     }
     let title = crate::screen::title(&display, &macros);
     Ok(Links {
-        name: name(&display.name, &macros).unwrap_or_else(|| title.clone()),
+        name: name(&display, &macros).unwrap_or_else(|| title.clone()),
         title,
         links,
     })
@@ -91,24 +90,28 @@ pub fn links(loc: &Location) -> Result<Links, bob::Error> {
 
 /// The words of a display's `name` that macros fill in, expanded: a
 /// device name, as in `Ion Pump - $(device)`; None if there are none.
-fn name(name: &str, macros: &Macros) -> Option<String> {
-    let words: Vec<String> = name
+fn name(display: &Display, macros: &Macros) -> Option<String> {
+    let words: Vec<String> = display
+        .name
         .split_whitespace()
         .filter(|w| w.contains("$(") || w.contains("${"))
-        .map(|w| bob::expand(w, &|n| macros.get(n).map(str::to_string)))
+        .map(|w| bob::expand(w, &|n| display_macro(display, macros, n)))
         .filter(|w| !w.contains("$(") && !w.contains("${") && !w.trim().is_empty())
         .collect();
     (!words.is_empty()).then(|| words.join(" "))
 }
 
-/// Add the links of `widgets`, in a display at `base`, to `out`.
+/// Add the links of `widgets`, in a display at `base`, to `out`; fails
+/// only while an embedded display is still being fetched (in a browser),
+/// after walking on, so the fetches of every one start at once.
 fn walk(
     widgets: &[Widget],
     parent: &Macros,
     base: Option<&Source>,
     depth: u32,
     out: &mut Vec<Link>,
-) {
+) -> Result<(), bob::Error> {
+    let mut done = Ok(());
     for w in widgets {
         let macros = parent.with(&w.macros());
         let actions = w.actions();
@@ -124,7 +127,7 @@ fn walk(
         }
         let prop = |name: &str| expand_for(w, &macros, base, w.text(name).unwrap_or(""));
         match w.kind.as_str() {
-            "group" => walk(&w.children, &macros, base, depth, out),
+            "group" => done = done.and(walk(&w.children, &macros, base, depth, out)),
             "tabs" => {
                 for tab in tab_elements(w) {
                     let children: Vec<Widget> = tab
@@ -137,17 +140,19 @@ fn walk(
                                 .collect()
                         })
                         .unwrap_or_default();
-                    walk(&children, &macros, base, depth, out);
+                    done = done.and(walk(&children, &macros, base, depth, out));
                 }
             }
-            "embedded" => embed(
-                &prop("file"),
-                &prop("group_name"),
-                &macros,
-                base,
-                depth,
-                out,
-            ),
+            "embedded" => {
+                done = done.and(embed(
+                    &prop("file"),
+                    &prop("group_name"),
+                    &macros,
+                    base,
+                    depth,
+                    out,
+                ));
+            }
             // Every tab, as each is a display a click away.
             "navtabs" => {
                 for tab in tab_elements(w) {
@@ -156,22 +161,25 @@ fn walk(
                     };
                     let own = tab.child("macros").map(Macros::from_element);
                     let macros = macros.with(&own.unwrap_or_default());
-                    embed(
+                    done = done.and(embed(
                         &text("file"),
                         &text("group_name"),
                         &macros,
                         base,
                         depth,
                         out,
-                    );
+                    ));
                 }
             }
             _ => {}
         }
     }
+    done
 }
 
-/// Add the links of the display (or its group) that a widget embeds.
+/// Add the links of the display (or its group) that a widget embeds. One
+/// that can't be read is left out, but one still being fetched fails the
+/// whole display, to be read again once it is there, not cached without.
 fn embed(
     file: &str,
     group: &str,
@@ -179,12 +187,17 @@ fn embed(
     base: Option<&Source>,
     depth: u32,
     out: &mut Vec<Link>,
-) {
+) -> Result<(), bob::Error> {
     if file.trim().is_empty() || depth >= MAX_DEPTH {
-        return;
+        return Ok(());
     }
-    let Ok(display) = crate::fetch::load(&resolve(base, file)) else {
-        return;
+    let display = match crate::fetch::load(&resolve(base, file)) {
+        Ok(display) => display,
+        #[cfg(target_arch = "wasm32")]
+        Err(bob::Error::Fetch(url, why)) if why == crate::fetch::LOADING => {
+            return Err(bob::Error::Fetch(url, why));
+        }
+        Err(_) => return Ok(()),
     };
     let macros = display.macros.with(macros);
     let widgets = if group.trim().is_empty() {
@@ -192,15 +205,12 @@ fn embed(
     } else {
         find_group(&display.widgets, group).map_or(&[][..], |g| &g.children[..])
     };
-    walk(widgets, &macros, display.source.as_ref(), depth + 1, out);
+    walk(widgets, &macros, display.source.as_ref(), depth + 1, out)
 }
 
 /// A file named by a widget of the display at `base`.
 fn resolve(base: Option<&Source>, file: &str) -> Source {
-    match base {
-        Some(base) => base.resolve(file),
-        None => Source::parse(file),
-    }
+    crate::fetch::resolve(base, file)
 }
 
 /// What `action` of widget `w` opens, as clicking it would (see
@@ -255,7 +265,6 @@ fn label(
     actions: usize,
     target: &Target,
 ) -> String {
-    let one_line = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
     let own = ["text", "label"]
         .iter()
         .find_map(|p| w.text(p))
@@ -273,6 +282,11 @@ fn label(
         Target::Display(loc) => file_name(&loc.source),
         Target::Command { command, .. } => one_line(command),
     })
+}
+
+/// `text` on one line, its runs of white space one space.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// A display's file name without its directory or extension.
@@ -319,6 +333,9 @@ enum Done {
     Command(String, Option<Location>),
 }
 
+/// A job done, with the `Navigator::generation` it was started in.
+type Finished = (u64, Done);
+
 /// Displays read at once.
 #[cfg(not(target_arch = "wasm32"))]
 const THREADS: usize = 4;
@@ -336,16 +353,18 @@ pub struct Navigator {
     pub open: bool,
     filter: String,
     /// Each display's links by `key`, or why they couldn't be read; None
-    /// while being read.
-    displays: HashMap<String, Option<Result<Links, String>>>,
+    /// while being read. Shared, as every frame's nodes take them.
+    displays: HashMap<String, Option<Result<Arc<Links>, String>>>,
     /// The display each command opens, by `target_key`; None while its
     /// script runs.
     commands: HashMap<String, Option<Option<Location>>>,
     queue: VecDeque<Job>,
     running: usize,
+    /// Bumped by ⟳, so the jobs started before it are dropped when done.
+    generation: u64,
     done: (
-        std::sync::mpsc::Sender<Done>,
-        std::sync::mpsc::Receiver<Done>,
+        std::sync::mpsc::Sender<Finished>,
+        std::sync::mpsc::Receiver<Finished>,
     ),
 }
 
@@ -358,6 +377,7 @@ impl Default for Navigator {
             commands: HashMap::new(),
             queue: VecDeque::new(),
             running: 0,
+            generation: 0,
             done: std::sync::mpsc::channel(),
         }
     }
@@ -365,10 +385,14 @@ impl Default for Navigator {
 
 impl Navigator {
     /// The tree of links from `root`, with the displays shown in windows
-    /// (`here`) in bold; returns the node clicked, if any.
-    pub fn ui(&mut self, ui: &mut egui::Ui, root: &Location, here: &[Location]) -> Option<Clicked> {
+    /// (those `here` says) in bold; returns the node clicked, if any.
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        root: &Location,
+        here: &dyn Fn(&Location) -> bool,
+    ) -> Option<Clicked> {
         self.poll();
-        let here: Vec<String> = here.iter().map(key).collect();
         let mut clicked = None;
         ui.horizontal(|ui| {
             if ui
@@ -376,8 +400,7 @@ impl Navigator {
                 .on_hover_text("Read the displays again")
                 .clicked()
             {
-                self.displays.clear();
-                self.commands.clear();
+                self.refresh();
             }
             ui.add(
                 egui::TextEdit::singleline(&mut self.filter)
@@ -398,9 +421,9 @@ impl Navigator {
                     target,
                     vague: false,
                 };
-                self.node(ui, &link, &mut Vec::new(), &here, &mut clicked);
+                self.node(ui, &link, &mut Vec::new(), here, &mut clicked);
             } else {
-                self.matches(ui, &here, &mut clicked);
+                self.matches(ui, here, &mut clicked);
             }
         });
         self.start(ui.ctx());
@@ -413,7 +436,7 @@ impl Navigator {
         ui: &mut egui::Ui,
         link: &Link,
         above: &mut Vec<String>,
-        here: &[String],
+        here: &dyn Fn(&Location) -> bool,
         clicked: &mut Option<Clicked>,
     ) {
         // A command's display, once its script has said.
@@ -465,7 +488,7 @@ impl Navigator {
             }
             _ => {}
         }
-        let shown = k.as_ref().is_some_and(|k| here.contains(k));
+        let shown = loc.as_ref().is_some_and(here);
         let mut rich = egui::RichText::new(text);
         if shown {
             rich = rich.strong();
@@ -509,9 +532,9 @@ impl Navigator {
                 let Some(Some(Ok(links))) = self.displays.get(k) else {
                     return;
                 };
-                let links = links.links.clone();
+                let links = links.clone();
                 above.push(k.clone());
-                for child in &links {
+                for child in &links.links {
                     self.node(ui, child, above, here, clicked);
                 }
                 above.pop();
@@ -540,10 +563,43 @@ impl Navigator {
         });
     }
 
-    /// The links read so far whose label or file has the filter in it.
-    fn matches(&mut self, ui: &mut egui::Ui, here: &[String], clicked: &mut Option<Clicked>) {
+    /// The links that match the filter (see `found`), to click.
+    fn matches(
+        &self,
+        ui: &mut egui::Ui,
+        here: &dyn Fn(&Location) -> bool,
+        clicked: &mut Option<Clicked>,
+    ) {
+        let found = self.found();
+        if found.is_empty() {
+            ui.weak("No match");
+        }
+        for (_, link) in &found {
+            let (tip, shown) = match &link.target {
+                Target::Display(loc) => (describe(loc), here(loc)),
+                Target::Command { command, .. } => (format!("command: {command}"), false),
+            };
+            let resp = ui.selectable_label(shown, &link.label).on_hover_text(tip);
+            if resp.clicked() {
+                let modifiers = ui.input(|i| i.modifiers);
+                *clicked = Some(Clicked {
+                    target: link.target.clone(),
+                    ctrl: modifiers.command,
+                    shift: modifiers.shift,
+                });
+            }
+        }
+        ui.separator();
+        ui.weak("Searches the displays read so far: open branches to read more.");
+    }
+
+    /// The links read so far whose label or file has the filter in it, each
+    /// target once, in order of label. Whatever order the displays are kept
+    /// in, a target is called by a label that tells it apart if any does,
+    /// else the first by name.
+    fn found(&self) -> Vec<(String, Link)> {
         let filter = self.filter.trim().to_lowercase();
-        let mut found: Vec<(String, Link)> = Vec::new();
+        let mut found: HashMap<String, (bool, Link)> = HashMap::new();
         for links in self.displays.values().flatten().flatten() {
             for link in &links.links {
                 let target = match &link.target {
@@ -570,46 +626,29 @@ impl Navigator {
                 let hit = [label.as_str(), title, &file]
                     .iter()
                     .any(|t| t.to_lowercase().contains(&filter));
-                if hit && !found.iter().any(|(fk, _)| *fk == k) {
-                    let vague = false;
-                    found.push((
-                        k,
-                        Link {
-                            label,
-                            target,
-                            vague,
-                        },
-                    ));
+                if !hit {
+                    continue;
+                }
+                let better = found
+                    .get(&k)
+                    .is_none_or(|(vague, l)| (link.vague, &label) < (*vague, &l.label));
+                if better {
+                    let shown = Link {
+                        label,
+                        target,
+                        vague: false,
+                    };
+                    found.insert(k, (link.vague, shown));
                 }
             }
         }
-        found.sort_by_key(|a| a.1.label.to_lowercase());
-        if found.is_empty() {
-            ui.weak("No match");
-        }
-        for (k, link) in &found {
-            let tip = match &link.target {
-                Target::Display(loc) => describe(loc),
-                Target::Command { command, .. } => format!("command: {command}"),
-            };
-            let resp = ui
-                .selectable_label(here.contains(k), &link.label)
-                .on_hover_text(tip);
-            if resp.clicked() {
-                let modifiers = ui.input(|i| i.modifiers);
-                *clicked = Some(Clicked {
-                    target: link.target.clone(),
-                    ctrl: modifiers.command,
-                    shift: modifiers.shift,
-                });
-            }
-        }
-        ui.separator();
-        ui.weak("Searches the displays read so far: open branches to read more.");
+        let mut found: Vec<(String, Link)> = found.into_iter().map(|(k, (_, l))| (k, l)).collect();
+        found.sort_by_cached_key(|(k, l)| (l.label.to_lowercase(), k.clone()));
+        found
     }
 
     /// The links of the display at `loc`, asking for them the first time.
-    fn read(&mut self, k: &str, loc: &Location) -> Option<Option<Result<Links, String>>> {
+    fn read(&mut self, k: &str, loc: &Location) -> Option<Option<Result<Arc<Links>, String>>> {
         if !self.displays.contains_key(k) {
             self.displays.insert(k.to_string(), None);
             self.queue
@@ -618,13 +657,27 @@ impl Navigator {
         self.displays.get(k).cloned()
     }
 
-    /// Take in the jobs done.
+    /// Forget what has been read, to read it all again: fetched and
+    /// launcher files too, as Reload does.
+    fn refresh(&mut self) {
+        crate::fetch::forget();
+        bob::project::forget();
+        self.displays.clear();
+        self.commands.clear();
+        self.queue.clear();
+        self.generation += 1;
+    }
+
+    /// Take in the jobs done, but those started before the last `refresh`.
     fn poll(&mut self) {
-        while let Ok(done) = self.done.1.try_recv() {
+        while let Ok((generation, done)) = self.done.1.try_recv() {
             self.running = self.running.saturating_sub(1);
+            if generation != self.generation {
+                continue;
+            }
             match done {
                 Done::Display(k, links) => {
-                    self.displays.insert(k, Some(links));
+                    self.displays.insert(k, Some(links.map(Arc::new)));
                 }
                 Done::Command(k, loc) => {
                     self.commands.insert(k, Some(loc));
@@ -640,9 +693,9 @@ impl Navigator {
             && let Some(job) = self.queue.pop_front()
         {
             self.running += 1;
-            let (tx, ctx) = (self.done.0.clone(), ctx.clone());
+            let (tx, ctx, generation) = (self.done.0.clone(), ctx.clone(), self.generation);
             std::thread::spawn(move || {
-                tx.send(run(job)).ok();
+                tx.send((generation, run(job))).ok();
                 ctx.request_repaint();
             });
         }
@@ -668,7 +721,7 @@ impl Navigator {
                 Job::Command(..) => run(job),
             };
             self.running += 1;
-            self.done.0.send(done).ok();
+            self.done.0.send((self.generation, done)).ok();
         }
         ctx.request_repaint();
     }
@@ -833,8 +886,104 @@ mod tests {
     }
 
     #[test]
+    fn a_command_named_after_itself_is_vague() {
+        let dir = std::env::temp_dir().join(format!("bobview-tree-cmd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let command = r#"<action type="command"><command>./go   now</command></action>"#;
+        std::fs::write(
+            dir.join("top.bob"),
+            display("Top", &[button(None, command)]),
+        )
+        .unwrap();
+        let loc = Location {
+            source: Source::File(dir.join("top.bob")),
+            macros: Macros::default(),
+        };
+        let found = links(&loc).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        // On one line, as its label, and so vague.
+        assert_eq!(found.links[0].label, "./go now");
+        assert!(found.links[0].vague);
+    }
+
+    #[test]
+    fn a_filter_calls_each_target_by_the_same_label() {
+        use super::{Link, Links, Navigator};
+        use std::sync::Arc;
+        let at = |file: &str| Location {
+            source: Source::File(file.into()),
+            macros: Macros::default(),
+        };
+        let link = |label: &str, vague| Link {
+            label: label.into(),
+            target: Target::Display(at("/d/pump.bob")),
+            vague,
+        };
+        let page = |links| {
+            Some(Ok(Arc::new(Links {
+                links,
+                ..Links::default()
+            })))
+        };
+        // Three displays link to the pump: by its file (vague), and as
+        // "Pump" and "Ion pump".
+        let pages = [
+            vec![link("pump", true)],
+            vec![link("Pump", false)],
+            vec![link("Ion pump", false)],
+        ];
+        // Whichever order the displays are kept in.
+        for first in 0..pages.len() {
+            let mut nav = Navigator {
+                filter: "pump".into(),
+                ..Navigator::default()
+            };
+            for (i, links) in pages.iter().cycle().skip(first).take(3).enumerate() {
+                nav.displays.insert(format!("{i}"), page(links.clone()));
+            }
+            let found = nav.found();
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].1.label, "Ion pump");
+            assert_eq!(found[0].0, key(&at("/d/pump.bob")));
+        }
+    }
+
+    #[test]
+    fn a_job_started_before_reading_again_is_dropped() {
+        use super::{Done, Navigator};
+        // Reading again clears the fetch cache.
+        let _cache = crate::fetch::tests::CACHE_USERS.lock();
+        // Started, then ⟳ pressed while it runs.
+        let mut nav = Navigator {
+            running: 1,
+            ..Navigator::default()
+        };
+        let started = nav.generation;
+        nav.refresh();
+        nav.done
+            .0
+            .send((started, Done::Display("old".into(), Err("gone".into()))))
+            .unwrap();
+        nav.poll();
+        assert_eq!(nav.running, 0);
+        assert!(!nav.displays.contains_key("old"));
+        // One started since is taken in.
+        nav.running = 1;
+        nav.done
+            .0
+            .send((nav.generation, Done::Command("new".into(), None)))
+            .unwrap();
+        nav.poll();
+        assert_eq!(nav.commands.get("new"), Some(&Some(None)));
+    }
+
+    #[test]
     fn names_a_display_by_what_macros_fill_in_its_title() {
-        use super::name;
+        use bob::Display;
+        let name = |text: &str, macros: &Macros| {
+            let d = Display::parse(&format!("<display><name>{text}</name></display>")).unwrap();
+            super::name(&d, macros)
+        };
         let macros = Macros::from_pairs([("dom", "LB"), ("device", "LB-VA-IONP-04"), ("id", "02")]);
         assert_eq!(
             name("Ion Pump Controller - $(device)", &macros).as_deref(),
@@ -847,5 +996,10 @@ mod tests {
         // Nothing filled in, or a macro not set: the title instead.
         assert_eq!(name("Linac Vacuum", &macros), None);
         assert_eq!(name("Space $(nope)", &macros), None);
+        // An environment variable, in a display from a file.
+        let mut d = Display::parse("<display><name>Home $(PATH)</name></display>").unwrap();
+        assert_eq!(super::name(&d, &macros), None);
+        d.source = Some(Source::parse("/tmp/x.bob"));
+        assert_eq!(super::name(&d, &macros), std::env::var("PATH").ok());
     }
 }
