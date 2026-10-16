@@ -7,9 +7,12 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Pushes publish to gh-pages one at a time, so that a release's main and tag
+# runs don't each write switcher.json from the same old copy; PR runs only
+# build, and a newer push to the PR cancels the last.
 concurrency:
-  group: docs-${{ github.ref }}
-  cancel-in-progress: true
+  group: docs-${{ github.event_name == 'push' && 'gh-pages' || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 jobs:
   docs:
@@ -39,7 +42,7 @@ jobs:
         run: |
           scripts/build-docs.sh
           # the book's links to the API docs
-          for crate in bob pv testioc; do
+          for crate in bob pv testioc bobview bobview_server bobview_probe bobview_testioc; do
             test -f "docs/book/api/${crate}/index.html"
           done
 
