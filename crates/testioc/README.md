@@ -16,7 +16,7 @@ while streaming images.
 
 The camera is not a real simDetector: it serves the ADBase / NDPluginBase
 records the demo screen uses (Acquire, AcquireTime, AcquirePeriod,
-ArrayCounter, ImageMode, NumImages, DetectorState_RBV, ...) and counts frames
+ArrayCounter, ImageMode, NumImages, DetectorState_RBV, FilePath, ...) and counts frames
 at the acquire period, honouring Single / Multiple / Continuous. As in its
 `ioc.yaml` it starts acquiring continuously at AcquireTime 0.1.
 
