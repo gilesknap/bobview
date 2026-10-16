@@ -113,6 +113,17 @@ fn update_rules(node: &mut Node) {
     if node.rules.is_empty() {
         return;
     }
+    // Rules depend only on their PVs: none changed, nothing to do.
+    let versions: Vec<u64> = node
+        .rules
+        .iter()
+        .flat_map(|r| r.pvs())
+        .map(pv::Pv::version)
+        .collect();
+    if node.rule_versions.as_ref() == Some(&versions) {
+        return;
+    }
+    node.rule_versions = Some(versions);
     let outcomes: Vec<(String, Outcome)> = node
         .rules
         .iter()
@@ -1003,8 +1014,8 @@ fn arc_points(rect: Rect, start: f32, total: f32) -> Vec<Pos2> {
 }
 
 fn poly(painter: &egui::Painter, w: &Widget, view: View, r: &[f64; 4]) {
-    let points: Vec<Pos2> = w
-        .points()
+    let display = w.points();
+    let points: Vec<Pos2> = display
         .iter()
         .map(|(x, y)| view.pos(r[0] + x, r[1] + y))
         .collect();
@@ -1021,7 +1032,7 @@ fn poly(painter: &egui::Painter, w: &Widget, view: View, r: &[f64; 4]) {
             .color("background_color")
             .map(|c| color(&c))
             .unwrap_or(Color32::from_rgb(50, 50, 255));
-        painter.add(Shape::convex_polygon(points.clone(), fill_c, Stroke::NONE));
+        crate::polygon::fill(painter, &display, points.clone(), fill_c);
         let mut closed = points;
         closed.push(closed[0]);
         painter.add(Shape::line(closed, Stroke::new(lw, line)));

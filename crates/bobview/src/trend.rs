@@ -65,6 +65,8 @@ pub fn line_color(i: usize) -> Color32 {
 #[derive(Default)]
 pub struct Samples {
     points: VecDeque<(f64, f64)>,
+    /// How many have ever been added, so a [`Thinned`] knows which are new.
+    pushed: u64,
 }
 
 impl Samples {
@@ -76,6 +78,7 @@ impl Samples {
         // The clock may step back; the samples stay in order.
         let t = self.points.back().map_or(t, |p| t.max(p.0));
         self.points.push_back((t, v));
+        self.pushed += 1;
         while self.points.len() > MAX_SAMPLES
             || self.points.front().is_some_and(|p| p.0 < t - MAX_AGE)
         {
@@ -94,6 +97,140 @@ impl Samples {
     fn len(&self) -> usize {
         self.points.len()
     }
+}
+
+/// One PV's samples thinned for drawing: in each column of time `dt` wide
+/// (a pixel or less), the first, lowest, highest and last sample, which
+/// draw the same as all of them. Kept from frame to frame, taking in only
+/// the samples added since, so a day of fast samples is not copied out
+/// and stepped through on every frame.
+#[derive(Default)]
+struct Thinned {
+    dt: f64,
+    /// The start of the time it was built for.
+    from: f64,
+    /// [`Samples::pushed`] when it last took samples in.
+    seen: u64,
+    /// The finished columns' points, in time order, NaN marking gaps.
+    done: VecDeque<(f64, f64)>,
+    /// The column being filled.
+    open: Option<Column>,
+}
+
+/// A column's first, lowest, highest and last sample.
+#[derive(Clone, Copy)]
+struct Column {
+    index: i64,
+    first: (f64, f64),
+    low: (f64, f64),
+    high: (f64, f64),
+    last: (f64, f64),
+}
+
+impl Column {
+    /// Its points in time order, each once.
+    fn points(&self) -> impl Iterator<Item = (f64, f64)> {
+        let mut pts = [self.first, self.low, self.high, self.last];
+        pts.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut n = 0;
+        for i in 0..pts.len() {
+            if n == 0 || pts[i] != pts[n - 1] {
+                pts[n] = pts[i];
+                n += 1;
+            }
+        }
+        pts.into_iter().take(n)
+    }
+}
+
+impl Thinned {
+    fn new(dt: f64, from: f64) -> Self {
+        Self {
+            dt,
+            from,
+            ..Default::default()
+        }
+    }
+
+    fn close(&mut self) {
+        if let Some(c) = self.open.take() {
+            self.done.extend(c.points());
+        }
+    }
+
+    fn add(&mut self, (t, v): (f64, f64)) {
+        if v.is_nan() {
+            // A gap ends the column's line.
+            self.close();
+            self.done.push_back((t, v));
+            return;
+        }
+        let index = (t / self.dt).floor() as i64;
+        match &mut self.open {
+            Some(c) if c.index == index => {
+                if v < c.low.1 {
+                    c.low = (t, v);
+                }
+                if v > c.high.1 {
+                    c.high = (t, v);
+                }
+                c.last = (t, v);
+            }
+            _ => {
+                self.close();
+                self.open = Some(Column {
+                    index,
+                    first: (t, v),
+                    low: (t, v),
+                    high: (t, v),
+                    last: (t, v),
+                });
+            }
+        }
+    }
+
+    /// Bring it up to date with `samples` for the time from `from` in
+    /// columns `dt` wide, rebuilding it only if the columns changed.
+    fn update(&mut self, samples: &Samples, from: f64, dt: f64) {
+        let new = samples.pushed - self.seen;
+        if self.dt != dt || from < self.from || new > samples.points.len() as u64 {
+            *self = Self::new(dt, from);
+            for p in samples.since(from) {
+                self.add(p);
+            }
+        } else {
+            let len = samples.points.len();
+            for p in samples.points.range(len - new as usize..) {
+                self.add(*p);
+            }
+        }
+        self.seen = samples.pushed;
+        // Forget what has scrolled off, but the point that holds at `from`.
+        let i = self.done.partition_point(|p| p.0 < from);
+        if i > 1 {
+            self.done.drain(..i - 1);
+        }
+    }
+
+    fn points(&self) -> impl Iterator<Item = (f64, f64)> + '_ {
+        self.done
+            .iter()
+            .copied()
+            .chain(self.open.iter().flat_map(Column::points))
+    }
+}
+
+/// The quickest a plot redraws for time moving on alone: a display redraws
+/// all of itself each frame, so a strip chart must not keep it at the
+/// 10 frames a second PV updates are held to.
+const MIN_SCROLL_REPAINT: f64 = 0.25;
+
+/// How long until a plot of `span` seconds over `width` points needs a
+/// redraw for time moving on: when it has scrolled a pixel, but not more
+/// often than [`MIN_SCROLL_REPAINT`] nor less than once a second.
+fn scroll_repaint(span: f64, width: f32) -> std::time::Duration {
+    let per_pixel = span / width.max(1.0) as f64;
+    std::time::Duration::from_secs_f64(per_pixel.clamp(MIN_SCROLL_REPAINT, 1.0))
 }
 
 /// The time now, in seconds since 1970.
@@ -119,6 +256,8 @@ pub struct Series {
     /// Locked by the listener while the PV's state is locked, so never read
     /// `pv.state()` while holding this lock.
     samples: Arc<Mutex<Samples>>,
+    /// The samples as last drawn.
+    thinned: Mutex<Thinned>,
     _listener: Listener,
 }
 
@@ -135,16 +274,22 @@ impl Series {
         Self {
             pv,
             samples,
+            thinned: Mutex::default(),
             _listener: listener,
         }
     }
 
-    /// The points to draw from `from` to `to`: the samples, with the last
-    /// value held to `to` while the PV is connected.
-    fn points(&self, from: f64, to: f64) -> Vec<(f64, f64)> {
+    /// The points to draw from `from` to `to`, `dt` seconds a pixel: the
+    /// samples thinned to a few per pixel, with the last value held to `to`
+    /// while the PV is connected.
+    fn points(&self, from: f64, to: f64, dt: f64) -> Vec<(f64, f64)> {
         // Copied out before the PV's state is read: an update holds that
         // lock while it adds a sample.
-        let mut pts: Vec<(f64, f64)> = self.samples.lock().since(from).collect();
+        let mut pts: Vec<(f64, f64)> = {
+            let mut thinned = self.thinned.lock();
+            thinned.update(&self.samples.lock(), from, dt);
+            thinned.points().collect()
+        };
         if let Some(&(t, v)) = pts.last()
             && v.is_finite()
             && t < to
@@ -191,7 +336,12 @@ pub fn draw_plot(
     fill(painter, rect, look.back);
     let (pad, tick) = (4.0 * z, 5.0 * z);
     let from = now - span;
-    let data: Vec<Vec<(f64, f64)>> = lines.iter().map(|l| l.series.points(from, now)).collect();
+    // Columns no wider than a pixel of the plot, which is narrower than `rect`.
+    let dt = span / rect.width().max(1.0) as f64;
+    let data: Vec<Vec<(f64, f64)>> = lines
+        .iter()
+        .map(|l| l.series.points(from, now, dt))
+        .collect();
 
     let ok = |v: f64| v.is_finite() && (!look.log || v > 0.0);
     let in_view = data
@@ -558,12 +708,9 @@ impl Trend {
             self.series.remove(i);
         }
 
-        // Keep time moving: a repaint for each pixel the plot scrolls.
-        let per_pixel = self.span / rect.width().max(1.0) as f64;
+        // Keep time moving while the PVs are quiet.
         ui.ctx()
-            .request_repaint_after(std::time::Duration::from_secs_f64(
-                per_pixel.clamp(0.1, 1.0),
-            ));
+            .request_repaint_after(scroll_repaint(self.span, rect.width()));
     }
 }
 
@@ -690,12 +837,9 @@ pub fn draw_stripchart(painter: &egui::Painter, node: &Node, rect: Rect, z: f32)
     );
     draw_plot(painter, area, &lines, span, now(), &look, z);
     // Keep time moving while the PVs are quiet, as `Trend::ui` does.
-    let per_pixel = span / area.width().max(1.0) as f64;
     painter
         .ctx()
-        .request_repaint_after(std::time::Duration::from_secs_f64(
-            per_pixel.clamp(0.1, 1.0),
-        ));
+        .request_repaint_after(scroll_repaint(span, area.width()));
 
     if let Some(s) = plot::worst_state(node) {
         alarm_border(painter, w, &s, rect, z);
@@ -753,13 +897,97 @@ mod tests {
         let series = Series::new(pv.clone());
         pv.write("2");
         pv.write("3");
+        let samples: Vec<f64> = series.samples.lock().since(0.0).map(|p| p.1).collect();
+        assert_eq!(samples, [1.0, 2.0, 3.0]);
+        // Drawn (in columns of a second, so maybe thinned): from the
+        // first to the last, which holds to now.
         let values: Vec<f64> = series
-            .points(0.0, now() + 1.0)
+            .points(0.0, now() + 1.0, 1.0)
             .iter()
             .map(|p| p.1)
             .collect();
-        // Three samples, the last held to now.
-        assert_eq!(values, [1.0, 2.0, 3.0, 3.0]);
+        assert_eq!(values.first(), Some(&1.0));
+        assert_eq!(values[values.len() - 2..], [3.0, 3.0]);
+    }
+
+    /// Points as bits, so gaps (NaN) compare equal.
+    fn bits(pts: &[(f64, f64)]) -> Vec<(u64, u64)> {
+        pts.iter().map(|p| (p.0.to_bits(), p.1.to_bits())).collect()
+    }
+
+    fn thinned(s: &Samples, from: f64, dt: f64) -> Vec<(f64, f64)> {
+        let mut t = Thinned::default();
+        t.update(s, from, dt);
+        t.points().collect()
+    }
+
+    #[test]
+    fn thinning_keeps_each_columns_ends_and_extremes() {
+        let mut s = Samples::default();
+        // A day of samples at 1 Hz, as a 1-day strip chart of 1000 pixels
+        // keeps: 86 seconds a pixel.
+        for i in 0..86_400 {
+            let t = i as f64;
+            s.push(
+                t,
+                (t * 0.01).sin() * 10.0 + if i == 5000 { 100.0 } else { 0.0 },
+            );
+        }
+        let dt = 86.4;
+        let pts = thinned(&s, 0.0, dt);
+        assert!(pts.len() <= 4 * 1001, "{} points", pts.len());
+        assert!(pts.windows(2).all(|w| w[0].0 <= w[1].0), "in time order");
+        // The spike and the first and last samples survive.
+        assert!(pts.contains(&(5000.0, s.since(5000.0).nth(1).unwrap().1)));
+        assert_eq!(pts.first(), s.since(0.0).next().as_ref());
+        assert_eq!(pts.last().map(|p| p.0), Some(86_399.0));
+        // Same extremes as all the samples.
+        let max = |p: &mut dyn Iterator<Item = (f64, f64)>| p.map(|p| p.1).fold(f64::MIN, f64::max);
+        assert_eq!(max(&mut pts.iter().copied()), max(&mut s.since(0.0)));
+    }
+
+    #[test]
+    fn thinning_takes_in_only_new_samples_and_keeps_gaps() {
+        let mut s = Samples::default();
+        let mut t = Thinned::default();
+        let push = |s: &mut Samples, t0: f64, n: usize| {
+            for i in 0..n {
+                let x = t0 + i as f64 * 0.05;
+                s.push(x, (x * 3.0).cos());
+            }
+        };
+        push(&mut s, 0.0, 500);
+        t.update(&s, 0.0, 0.5);
+        s.push(25.0, f64::NAN);
+        push(&mut s, 26.0, 500);
+        t.update(&s, 0.0, 0.5);
+        assert_eq!(t.seen, s.pushed);
+        // Taking in the new samples gives what thinning them all at once does.
+        let all: Vec<(f64, f64)> = t.points().collect();
+        assert_eq!(bits(&all), bits(&thinned(&s, 0.0, 0.5)));
+        assert_eq!(all.iter().filter(|p| p.1.is_nan()).count(), 1, "the gap");
+        // Time moving on forgets what has scrolled off, but the point that
+        // holds at the start.
+        t.update(&s, 40.0, 0.5);
+        let later: Vec<(f64, f64)> = t.points().collect();
+        assert!(later[0].0 < 40.0 && later[1].0 >= 40.0);
+        // A new width rebuilds it.
+        t.update(&s, 40.0, 0.25);
+        let rebuilt: Vec<(f64, f64)> = t.points().collect();
+        assert_eq!(bits(&rebuilt), bits(&thinned(&s, 40.0, 0.25)));
+    }
+
+    #[test]
+    fn plots_scroll_a_pixel_at_a_time_but_not_too_often() {
+        let secs = |d: std::time::Duration| d.as_secs_f64();
+        // An hour over 600 pixels scrolls a pixel every 6 s: once a second
+        // keeps the clock moving.
+        assert_eq!(secs(scroll_repaint(3600.0, 600.0)), 1.0);
+        // Half a second a pixel.
+        assert_eq!(secs(scroll_repaint(300.0, 600.0)), 0.5);
+        // A minute over 600 pixels would redraw the display 10 times a second.
+        assert_eq!(secs(scroll_repaint(60.0, 600.0)), MIN_SCROLL_REPAINT);
+        assert_eq!(secs(scroll_repaint(60.0, 0.0)), 1.0);
     }
 
     #[test]
