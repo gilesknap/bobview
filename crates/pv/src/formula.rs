@@ -471,6 +471,23 @@ fn binary(op: Op, a: Val, b: Val) -> Val {
     }
 }
 
+/// Most times a formula is evaluated in one run of a thread's left work.
+const MAX_EVALUATIONS: u32 = 1000;
+
+/// Whether two states are the same, a NaN value being the same as itself.
+fn same(a: &PvState, b: &PvState) -> bool {
+    let nan = |s: &PvState| matches!(s.value, Value::Double(v) if v.is_nan());
+    if nan(a) && nan(b) {
+        let strip = |s: &PvState| PvState {
+            value: Value::None,
+            ..s.clone()
+        };
+        strip(a) == strip(b)
+    } else {
+        a == b
+    }
+}
+
 /// A PV a formula reads, with the listener feeding its state to the formula.
 type Input = (Pv, Listener);
 
@@ -497,8 +514,12 @@ pub(crate) struct Formula {
     dirty: AtomicBool,
     queued: AtomicBool,
     busy: AtomicBool,
-    /// Whether reading itself has been reported, so it is said once.
+    /// Whether reading itself or not settling has been reported, so it is
+    /// said once.
     warned: AtomicBool,
+    /// The thread's run of left work it last evaluated in, and how many
+    /// times in that run.
+    runs: Mutex<(u64, u32)>,
 }
 
 impl Formula {
@@ -524,6 +545,7 @@ impl Formula {
             queued: AtomicBool::new(false),
             busy: AtomicBool::new(false),
             warned: AtomicBool::new(false),
+            runs: Mutex::new((0, 0)),
         })
     }
 
@@ -549,6 +571,24 @@ impl Formula {
         }));
     }
 
+    /// Whether this is one evaluation too many in this thread's run of left
+    /// work: formulas reading each other whose values never settle (NaN,
+    /// or 1 - each other) would otherwise evaluate each other for ever. It
+    /// waits for the next change of an input from outside the loop.
+    fn looping(&self) -> bool {
+        let run = crate::drain_number();
+        let mut runs = self.runs.lock();
+        if runs.0 != run {
+            *runs = (run, 0);
+        }
+        runs.1 += 1;
+        let looping = runs.1 > MAX_EVALUATIONS;
+        if looping && !self.warned.swap(true, Ordering::Relaxed) {
+            log::warn!("{}: formulas reading each other do not settle", self.key);
+        }
+        looping
+    }
+
     /// Evaluate while `dirty`, unless another thread is evaluating.
     fn evaluate(&self) {
         /// Lets go of the formula, even if evaluating it panicked.
@@ -565,6 +605,9 @@ impl Formula {
         {
             let busy = Busy(self);
             while self.dirty.swap(false, Ordering::SeqCst) {
+                if self.looping() {
+                    break;
+                }
                 self.refresh();
             }
             drop(busy);
@@ -579,7 +622,7 @@ impl Formula {
     /// one thread at a time, from [`Formula::evaluate`].
     fn refresh(&self) {
         let Some(expr) = &self.expr else { return };
-        let wanted = {
+        let evaluated = {
             let mut states = self.states.lock();
             states.extend(self.pending.lock().drain());
             let mut ev = Eval {
@@ -614,12 +657,13 @@ impl Formula {
                     ..old.clone()
                 },
             };
-            // Only a change goes out, so formulas reading each other settle.
-            if new != old {
-                self.shared.update(|s| *s = new);
-            }
-            ev.wanted
+            (old, new, ev.wanted)
         };
+        let (old, new, wanted) = evaluated;
+        // Only a change goes out, so formulas reading each other settle.
+        if !same(&new, &old) {
+            self.shared.update(|s| *s = new);
+        }
         self.follow(wanted);
     }
 
@@ -869,6 +913,29 @@ mod tests {
             x.write(v.to_string());
             assert_eq!(g.state().value, Value::Double(2.0 * v + 100.0));
         }
+    }
+
+    #[test]
+    fn formulas_reading_each_other_settle() {
+        // NaN is never equal to itself, and 1 - B with B = A never settles;
+        // both once evaluated each other for ever.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let pvs = PvManager::new();
+            let a = "=1 ? 0/0 : pv(toString('loc://fsna'))";
+            let b = "=1 ? 0/0 : pv(toString('loc://fsnb'))";
+            pvs.subscribe("loc://fsnb<VString>(\"x\")").write(a);
+            pvs.subscribe("loc://fsna<VString>(\"x\")").write(b);
+            let _nan = pvs.subscribe(a);
+            let a = "='loc://fso(1)' ? 1 : 1 - pv(toString('loc://fsob'))";
+            let b = "=pv(toString('loc://fsoa')) + 0";
+            pvs.subscribe("loc://fsoa<VString>(\"x\")").write(a);
+            pvs.subscribe("loc://fsob<VString>(\"x\")").write(b);
+            let (_a, _b) = (pvs.subscribe(a), pvs.subscribe(b));
+            pvs.subscribe("loc://fso").write("0");
+            let _ = tx.send(());
+        });
+        assert!(rx.recv_timeout(std::time::Duration::from_secs(10)).is_ok());
     }
 
     #[test]

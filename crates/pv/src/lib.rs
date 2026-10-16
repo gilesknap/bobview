@@ -120,8 +120,12 @@ thread_local! {
     /// How many PVs' listeners this thread is calling, under their locks.
     static CALLING: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Work a listener left for when this thread holds no PV's lock.
-    static DEFERRED: std::cell::RefCell<Vec<Box<dyn FnOnce()>>> =
-        const { std::cell::RefCell::new(Vec::new()) };
+    static DEFERRED: std::cell::RefCell<std::collections::VecDeque<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+    /// Whether this thread is running that work, and how many times it has
+    /// begun to (see [`drain_number`]).
+    static DRAINING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static DRAINS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// Call listeners in `f`, under a PV's lock; [`after_listeners`] once the
@@ -138,29 +142,41 @@ fn calling_listeners<R>(f: impl FnOnce() -> R) -> R {
     f()
 }
 
-/// Run the work listeners left, once this thread holds no PV's lock.
+/// Run the work listeners left, once this thread holds no PV's lock. Work
+/// that leaves more (and updates within it) joins this loop rather than
+/// nesting, so the stack stays flat however long a chain of formulas is.
 fn after_listeners() {
-    while CALLING.with(|c| c.get()) == 0 {
-        let work = DEFERRED.with(|d| std::mem::take(&mut *d.borrow_mut()));
-        if work.is_empty() {
-            break;
+    if CALLING.with(|c| c.get()) != 0 || DRAINING.with(|d| d.get()) {
+        return;
+    }
+    struct Draining;
+    impl Drop for Draining {
+        fn drop(&mut self) {
+            DRAINING.with(|d| d.set(false));
         }
-        for w in work {
-            w();
-        }
+    }
+    DRAINING.with(|d| d.set(true));
+    DRAINS.with(|n| n.set(n.get() + 1));
+    let _draining = Draining;
+    // One at a time, so a panic leaves the rest for the next time.
+    while let Some(work) = DEFERRED.with(|d| d.borrow_mut().pop_front()) {
+        work();
     }
 }
 
-/// Run `work` now, or, from a listener, once this thread holds no PV's
-/// lock: work that locks a PV (subscribing, listening) could otherwise
-/// wait for one this thread holds, or take two in another thread's order.
+/// Which run of left work this thread is in: work it leaves for itself
+/// (one formula evaluating another) stays in the same one.
+pub(crate) fn drain_number() -> u64 {
+    DRAINS.with(|n| n.get())
+}
+
+/// Run `work` once this thread holds no PV's lock: now, unless it is in a
+/// listener. Work that locks a PV (subscribing, listening, publishing)
+/// could otherwise wait for one this thread holds, or take two in another
+/// thread's order.
 pub(crate) fn outside_listeners(work: Box<dyn FnOnce()>) {
-    if CALLING.with(|c| c.get()) == 0 {
-        work();
-        after_listeners();
-    } else {
-        DEFERRED.with(|d| d.borrow_mut().push(work));
-    }
+    DEFERRED.with(|d| d.borrow_mut().push_back(work));
+    after_listeners();
 }
 
 /// State shared between a [`Pv`] handle and the task serving it.
