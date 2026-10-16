@@ -2206,8 +2206,10 @@ mod tests {
         app.launch(&ctx, main, None, None, "no-such-launcher".into());
         app.launch(&ctx, main, None, None, "no-such-launcher".into());
         assert_eq!(app.main.launching.len(), 1);
-        assert!(app.is_loading());
-        while app.is_loading() {
+        // The main view's own loading: app.is_loading() also counts tab
+        // builds of other tests running at the same time.
+        assert!(app.main.is_loading());
+        while app.main.is_loading() {
             std::thread::sleep(std::time::Duration::from_millis(5));
             app.poll_launched(&ctx);
         }
@@ -2230,7 +2232,7 @@ mod tests {
             })
             .unwrap();
         app.poll_launched(&ctx);
-        assert!(app.main.current.is_none() && !app.is_loading());
+        assert!(app.main.current.is_none() && !app.main.is_loading());
         // In the pinned main window a ctrl+clicked command opens in place,
         // as a ctrl+clicked link does.
         app.launched

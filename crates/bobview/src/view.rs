@@ -224,6 +224,12 @@ impl View {
     /// Show the display being fetched, or its error, once the fetch is done.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn poll_loading(&mut self, ctx: &egui::Context) {
+        // Embedded displays built on threads, including ones not drawn.
+        if let Some(screen) = &mut self.screen
+            && crate::screen::poll_built(&mut screen.nodes)
+        {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
         let Some(rx) = &self.loading else { return };
         match rx.try_recv() {
             Err(TryRecvError::Empty) => {

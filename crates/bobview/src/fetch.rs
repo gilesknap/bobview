@@ -10,9 +10,10 @@
 //! [`pending`].
 
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock};
 
 use bob::{Display, Error, Source};
+use parking_lot::Mutex;
 
 /// Largest display file we will read.
 const MAX_SIZE: u64 = 16 << 20;
@@ -58,9 +59,9 @@ pub fn load(source: &Source) -> Result<Display, Error> {
 pub fn forget() {
     #[cfg(not(target_arch = "wasm32"))]
     GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    CACHE.lock().unwrap().clear();
+    CACHE.lock().clear();
     #[cfg(target_arch = "wasm32")]
-    web::FAILED.lock().unwrap().clear();
+    web::FAILED.lock().clear();
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -145,7 +146,7 @@ mod native {
     }
 
     pub(super) fn get(url: &str) -> Result<Fetched, Error> {
-        if let Some(fetched) = CACHE.lock().unwrap().get(url).cloned() {
+        if let Some(fetched) = CACHE.lock().get(url).cloned() {
             return Ok(fetched);
         }
         let generation = GENERATION.load(std::sync::atomic::Ordering::SeqCst);
@@ -161,7 +162,7 @@ mod native {
             .map_err(|e| fail(describe(e)))?
             .into();
         let fetched = Fetched { url: served, text };
-        let mut cache = CACHE.lock().unwrap();
+        let mut cache = CACHE.lock();
         // Forgotten while it was being fetched: it may be stale, so it is
         // used this once but not kept.
         if GENERATION.load(std::sync::atomic::Ordering::SeqCst) == generation {
@@ -182,9 +183,10 @@ mod native {
 #[cfg(target_arch = "wasm32")]
 mod web {
     use std::collections::{HashMap, HashSet};
-    use std::sync::{LazyLock, Mutex};
+    use std::sync::LazyLock;
 
     use bob::{Error, Source};
+    use parking_lot::Mutex;
     use wasm_bindgen::JsCast;
     use wasm_bindgen_futures::JsFuture;
 
@@ -200,31 +202,31 @@ mod web {
 
     /// Whether any display is still being fetched.
     pub fn pending() -> bool {
-        !PENDING.lock().unwrap().is_empty()
+        !PENDING.lock().is_empty()
     }
 
     pub(super) fn get(url: &str) -> Result<Fetched, Error> {
-        if let Some(fetched) = CACHE.lock().unwrap().get(url).cloned() {
+        if let Some(fetched) = CACHE.lock().get(url).cloned() {
             return Ok(fetched);
         }
-        if let Some(why) = FAILED.lock().unwrap().get(url) {
+        if let Some(why) = FAILED.lock().get(url) {
             return Err(Error::Fetch(url.to_string(), why.clone()));
         }
-        if PENDING.lock().unwrap().insert(url.to_string()) {
+        if PENDING.lock().insert(url.to_string()) {
             let url = url.to_string();
             wasm_bindgen_futures::spawn_local(async move {
                 match fetch(&url).await {
                     Ok((served, data)) => {
                         let text = String::from_utf8_lossy(&data).into();
                         let fetched = Fetched { url: served, text };
-                        CACHE.lock().unwrap().insert(url.clone(), fetched);
+                        CACHE.lock().insert(url.clone(), fetched);
                     }
                     Err(why) => {
                         log::warn!("cannot fetch {url}: {why}");
-                        FAILED.lock().unwrap().insert(url.clone(), why);
+                        FAILED.lock().insert(url.clone(), why);
                     }
                 }
-                PENDING.lock().unwrap().remove(&url);
+                PENDING.lock().remove(&url);
             });
         }
         Err(Error::Fetch(url.to_string(), LOADING.into()))
@@ -296,7 +298,7 @@ pub(crate) mod tests {
                 while reader.read_line(&mut line).unwrap() > 2 {
                     line.clear();
                 }
-                *count.lock().unwrap() += 1;
+                *count.lock() += 1;
                 let (status, body) = if first.starts_with("GET /opi/a.bob ") {
                     ("200 OK", DISPLAY)
                 } else if first.starts_with("GET /old/a.bob ") {
@@ -318,14 +320,14 @@ pub(crate) mod tests {
 
     #[test]
     fn fetches_caches_and_reports_errors() {
-        let _cache = CACHE_USERS.lock().unwrap_or_else(|e| e.into_inner());
+        let _cache = CACHE_USERS.lock();
         let (base, hits) = serve();
         let src = Source::parse(&format!("{base}/opi/a.bob"));
         load(&src).unwrap();
         let d = load(&src).unwrap();
         assert_eq!(d.name, "Served");
         assert_eq!(d.source.as_ref(), Some(&src));
-        assert_eq!(*hits.lock().unwrap(), 1, "second load came from the cache");
+        assert_eq!(*hits.lock(), 1, "second load came from the cache");
 
         let missing = src.resolve("../missing.bob");
         let err = load(&missing).unwrap_err().to_string();
@@ -371,7 +373,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_fetch_finishing_after_a_reload_is_not_cached() {
-        let _cache = CACHE_USERS.lock().unwrap_or_else(|e| e.into_inner());
+        let _cache = CACHE_USERS.lock();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/a.bob", listener.local_addr().unwrap());
         let (got, request) = std::sync::mpsc::channel();
@@ -404,9 +406,6 @@ pub(crate) mod tests {
         forget();
         release.send(()).unwrap();
         assert_eq!(loading.join().unwrap().unwrap(), "Served");
-        assert!(
-            !CACHE.lock().unwrap().contains_key(&url),
-            "stale text cached"
-        );
+        assert!(!CACHE.lock().contains_key(&url), "stale text cached");
     }
 }

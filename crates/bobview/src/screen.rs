@@ -202,6 +202,25 @@ impl Drop for InFlight {
     }
 }
 
+/// Show every embedded display under `nodes` whose thread has built it,
+/// drawn or not (a hidden tab's too), so none stays counted by
+/// [`building`]; true while any is still being built.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn poll_built(nodes: &mut [Node]) -> bool {
+    let mut any = false;
+    for n in nodes {
+        any |= n.poll_building(Duration::ZERO);
+        any |= poll_built(&mut n.children);
+        for tab in &mut n.tabs {
+            any |= poll_built(tab);
+        }
+        if let Some(s) = &mut n.embedded {
+            any |= poll_built(&mut s.nodes);
+        }
+    }
+    any
+}
+
 /// The error for a display whose build thread panicked.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn build_failed(source: &Source) -> bob::Error {
@@ -929,9 +948,7 @@ mod tests {
     #[test]
     fn navtabs_are_fetched_off_the_ui_thread() {
         let _builds = BUILDS.lock().unwrap_or_else(|e| e.into_inner());
-        let _cache = crate::fetch::tests::CACHE_USERS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _cache = crate::fetch::tests::CACHE_USERS.lock();
         let (base, release) = held_server();
         let dir = std::env::temp_dir().join(format!("bobview-navtabs-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1035,6 +1052,41 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(nav.active_tab, 0);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_tab_built_while_hidden_is_still_collected() {
+        let _builds = BUILDS.lock().unwrap_or_else(|e| e.into_inner());
+        let (base, release) = held_server();
+        let d = Display::parse(&format!(
+            r#"<display version="2.0.0">
+              <widget type="navtabs" version="2.0.0"><name>Nav</name>
+                <tabs>
+                  <tab><name>Empty</name><file></file></tab>
+                  <tab><name>Slow</name><file>{base}/slow.bob</file></tab>
+                </tabs>
+              </widget>
+            </display>"#
+        ))
+        .unwrap();
+        let pvs = PvManager::new();
+        let mut screen = Builder::new(&pvs).screen(d, &Macros::default(), None, 0);
+        Builder::ui(&pvs).select_navtab(&mut screen.nodes[0], 1, 0);
+        let mut view = crate::view::View::new(&pvs, Some(1.0));
+        view.screen = Some(screen);
+        release.send(()).unwrap();
+        // Never drawn (as when hidden), the view still collects it, so a
+        // snapshot does not wait for it.
+        let ctx = eframe::egui::Context::default();
+        let until = std::time::Instant::now() + Duration::from_secs(20);
+        while building() {
+            assert!(std::time::Instant::now() < until, "never collected");
+            std::thread::sleep(Duration::from_millis(10));
+            view.poll_loading(&ctx);
+        }
+        let nav = &view.screen.as_ref().unwrap().nodes[0];
+        assert_eq!(nav.embedded.as_ref().unwrap().display.name, "Tab");
     }
 
     #[cfg(not(target_arch = "wasm32"))]
