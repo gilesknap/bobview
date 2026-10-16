@@ -259,7 +259,7 @@ fn run(cli: Cli, clicks: Vec<(egui::Pos2, egui::PointerButton)>) -> Result<(), F
              window open in another window, shift+click in a new one"
         );
     }
-    let mut file = cli.display.as_deref().map(Source::parse);
+    let mut file = cli.display.as_deref().map(fetch::user_named);
     let mut macros = parse_macros(cli.macros.as_deref().unwrap_or_default());
     let ui_scale = cli.ui_scale.unwrap_or_else(chrome::UiScale::from_env);
     let is_opi = |p: &std::path::Path| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("opi"));
