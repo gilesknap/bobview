@@ -297,6 +297,9 @@ fn round_to(x: f64, digits: f64) -> f64 {
         return format!("{x:.*}", digits as usize).parse().unwrap_or(x);
     }
     let unit = 10f64.powf(-digits);
+    if unit.is_infinite() {
+        return 0.0f64.copysign(x);
+    }
     (x / unit).round_ties_even() * unit
 }
 
@@ -694,6 +697,7 @@ mod tests {
         assert_eq!(run("round(2.675, 2)", &[]), Val::Num(2.67));
         assert_eq!(run("round(0.125, 2)", &[]), Val::Num(0.12));
         assert_eq!(run("round(1250, -2)", &[]), Val::Num(1200.0));
+        assert_eq!(run("round(1e300, -400)", &[]), Val::Num(0.0));
         assert!(run("round(1, 0.5)", &[]).num().is_nan());
         assert_eq!(run("math.log(8, 2)", &[]), Val::Num(3.0));
         assert_eq!(run("math.log(Math.E)", &[]), Val::Num(1.0));

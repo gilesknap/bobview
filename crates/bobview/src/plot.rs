@@ -86,7 +86,13 @@ impl Buffer {
             &mut self.y_seen
         };
         let now = s.connected.then(|| (s.timestamp, s.value.clone()));
-        if now.is_some() && *seen == now {
+        // NaN is not equal to itself, but a NaN still standing is no update.
+        let nan = |v: &Value| matches!(v, Value::Double(d) if d.is_nan());
+        let same = match (&*seen, &now) {
+            (Some((t0, v0)), Some((t1, v1))) => t0 == t1 && (v0 == v1 || nan(v0) && nan(v1)),
+            _ => false,
+        };
+        if same {
             return;
         }
         *seen = now;
@@ -1065,6 +1071,13 @@ mod tests {
             b.points(),
             vec![(0.0, 1.0), (1.0, 1.0), (2.0, 2.0), (3.0, 2.0)]
         );
+        // A NaN standing through a metadata change is no new value either.
+        (s.timestamp, s.value) = (at(3), Value::Double(f64::NAN));
+        b.changed(false, &s);
+        let len = b.points.len();
+        s.units = "m".into();
+        b.changed(false, &s);
+        assert_eq!(b.points.len(), len);
     }
 
     #[test]

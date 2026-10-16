@@ -1983,12 +1983,18 @@ fn slider_range(w: &Widget, (min, max): (f64, f64)) -> (f64, f64) {
 
 /// A scaled slider's alarm level markers, as Phoebus': each of LOLO, LOW,
 /// HIGH and HIHI there is a level for, unless its `show_*` is false. The
-/// levels are the PV's with `limits_from_pv`, else the widget's `level_*`
-/// (10, 20, 80 and 90 unless given). Room is kept for them all; those
-/// outside the range are not drawn.
+/// levels are the PV's with `limits_from_pv` while it is connected, else
+/// the widget's `level_*` (10, 20, 80 and 90 unless given). Room is kept
+/// for them all; those outside the range are not drawn.
 fn slider_markers(w: &Widget, s: Option<&PvState>) -> Vec<(f64, &'static str)> {
-    let mut levels = crate::meter::levels(w, s);
-    if !w.bool("limits_from_pv").unwrap_or(true) {
+    let from_pv = w.bool("limits_from_pv").unwrap_or(true) && s.is_some_and(|s| s.connected);
+    let mut levels = if from_pv {
+        crate::meter::levels(w, s)
+    } else {
+        ["level_lolo", "level_low", "level_high", "level_hihi"]
+            .map(|k| w.f64(k).filter(|v| v.is_finite()))
+    };
+    if !from_pv {
         for (level, default) in levels.iter_mut().zip([10.0, 20.0, 80.0, 90.0]) {
             level.get_or_insert(default);
         }
@@ -3374,6 +3380,13 @@ pv.setValue(pv_value);
             ..Default::default()
         };
         assert_eq!(names(&slider(""), Some(&pv)), ["LOW", "HIGH"]);
+        // Without a connected PV, the widget's own levels.
+        assert_eq!(names(&slider(""), None).len(), 4);
+        let gone = PvState {
+            connected: false,
+            ..pv.clone()
+        };
+        assert_eq!(names(&slider(""), Some(&gone)).len(), 4);
         assert!(
             names(
                 &slider("<show_low>false</show_low><show_high>false</show_high>"),
