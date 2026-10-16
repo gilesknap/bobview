@@ -5,6 +5,7 @@
 //! [`Image`]. Other structures show their `value` field if they have one.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use epics_pva_rs::PvaError;
@@ -40,17 +41,14 @@ pub(crate) async fn run(client: &PvaClient, pv: &str, shared: Arc<Shared>) {
         // as aborting the task does, cancels the search, while a monitor
         // dropped before it connects keeps searching. A search that times
         // out waits before the next, as the client's own searches slow down.
-        match client.pvconnect(pv).await {
-            Ok(_) => retry = Duration::from_millis(500),
-            Err(e) => {
-                if !matches!(e, PvaError::Timeout) {
-                    log::debug!("{pv}: {e}; retrying in {retry:?}");
-                    shared.update(|s| s.error = Some(e.to_string()));
-                }
-                tokio::time::sleep(retry).await;
-                retry = (retry * 2).min(Duration::from_secs(30));
-                continue;
+        if let Err(e) = client.pvconnect(pv).await {
+            if !matches!(e, PvaError::Timeout) {
+                log::debug!("{pv}: {e}; retrying in {retry:?}");
+                shared.update(|s| s.error = Some(e.to_string()));
             }
+            tokio::time::sleep(retry).await;
+            retry = (retry * 2).min(Duration::from_secs(30));
+            continue;
         }
         // A handle monitor, not `pvmonitor_events`: dropping the handle
         // sends the server DESTROY and ends the subscription, where
@@ -59,6 +57,9 @@ pub(crate) async fn run(client: &PvaClient, pv: &str, shared: Arc<Shared>) {
         // handle while it reconnects, and must not keep the state alive.
         let data = Arc::downgrade(&shared);
         let conn = Arc::downgrade(&shared);
+        // Whether the monitor got going, which resets the backoff.
+        let started = Arc::new(AtomicBool::new(false));
+        let started_by = started.clone();
         let monitor = client
             .pvmonitor_handle(
                 pv,
@@ -68,6 +69,9 @@ pub(crate) async fn run(client: &PvaClient, pv: &str, shared: Arc<Shared>) {
                     }
                 },
                 move |event| {
+                    if matches!(event, MonitorConnEvent::Connected { .. }) {
+                        started_by.store(true, Ordering::Relaxed);
+                    }
                     let Some(shared) = conn.upgrade() else { return };
                     match event {
                         MonitorConnEvent::Connected { .. } => shared.update(|s| s.error = None),
@@ -86,6 +90,9 @@ pub(crate) async fn run(client: &PvaClient, pv: &str, shared: Arc<Shared>) {
             },
             Err(e) => Some(e),
         };
+        if started.load(Ordering::Relaxed) {
+            retry = Duration::from_millis(500);
+        }
         shared.update(|s| {
             s.connected = false;
             if let Some(e) = &error {
