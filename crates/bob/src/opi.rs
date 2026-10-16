@@ -16,9 +16,13 @@ use crate::Element;
 
 const PREFIX: &str = "org.csstudio.opibuilder.widgets.";
 
-/// Phoebus divides legacy font heights given in points by this
-/// (`legacy_font_calibration`) to get pixels.
-const FONT_CALIBRATION: f64 = 1.01;
+/// BOY font heights not given in pixels are points, which CS-Studio draws
+/// at the 96 DPI of a Linux desktop, 4/3 of a pixel each. egui's text
+/// looks a little larger than SWT's at the same size, so a point is 1.27
+/// pixels here: side by side with CS-Studio, the text matches. (Phoebus
+/// divides points by its `legacy_font_calibration`, 1.01 by default,
+/// which leaves these screens' text far smaller than CS-Studio showed it.)
+const PIXELS_PER_POINT: f64 = 1.27;
 
 /// Fonts Phoebus defines itself; a BOY font with one of these names uses
 /// the Phoebus definition rather than the height in the file.
@@ -123,7 +127,7 @@ fn font(el: &Element) -> Element {
     let size = if el.attr("pixels") == Some("true") {
         height
     } else {
-        height.map(|h| h / FONT_CALIBRATION)
+        height.map(|h| h * PIXELS_PER_POINT)
     };
     out.with_attr("family", el.attr("fontName").unwrap_or("Liberation Sans"))
         .with_attr("style", style)
@@ -1525,7 +1529,7 @@ menumap {
     }
 
     #[test]
-    fn fonts_follow_phoebus() {
+    fn fonts_follow_boy() {
         let w = one(
             "Label",
             r#"<font><opifont.name fontName="Liberation Sans" height="15" style="0" pixels="true">Default</opifont.name></font>
@@ -1542,9 +1546,9 @@ menumap {
         let f = w.font("scale_font").unwrap();
         assert_eq!((f.size, f.style), (16.0, FontStyle::Bold));
         let f = w.font("title_font").unwrap();
-        assert_eq!((f.size, f.style), (9.9, FontStyle::BoldItalic));
+        assert_eq!((f.size, f.style), (12.7, FontStyle::BoldItalic));
         let f = w.font("other_font").unwrap();
-        assert_eq!((f.size, f.family.as_str()), (19.8, "Arial"));
+        assert_eq!((f.size, f.family.as_str()), (25.4, "Arial"));
         assert_eq!(f.name.as_deref(), Some("Site Big"));
         let f = w.font("pixel_font").unwrap();
         assert_eq!((f.size, f.family.as_str()), (20.0, "Arial"));
