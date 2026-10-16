@@ -36,7 +36,10 @@ use tokio::sync::mpsc;
 pub use name::{PvName, Scheme};
 #[cfg(target_arch = "wasm32")]
 pub use pvws::{set_pvws, set_write_token};
-pub use value::{Image, ImageData, PvState, Severity, Value, split_array, split_strings};
+pub use value::{
+    Image, ImageData, PvState, Severity, Value, long_string, long_string_bytes, split_array,
+    split_strings,
+};
 
 /// Called whenever any PV changes, so a UI can schedule a repaint.
 pub type Notifier = Arc<dyn Fn() + Send + Sync>;
@@ -46,11 +49,21 @@ pub type Notifier = Arc<dyn Fn() + Send + Sync>;
 pub type Listener = Arc<ListenFn>;
 pub type ListenFn = dyn Fn(&PvState) + Send + Sync;
 
+/// A write of text to a PV.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Put {
+    pub text: String,
+    /// Write the text into an array of numbers as a long string (see
+    /// [`Pv::write_long_string`]).
+    pub long_string: bool,
+}
+
 /// Where writes to a PV go.
 pub(crate) enum Writer {
     /// To the backend task, which converts and sends them.
     #[cfg(not(target_arch = "wasm32"))]
-    Channel(mpsc::UnboundedSender<String>),
+    Channel(mpsc::UnboundedSender<Put>),
     /// Straight into the local value.
     Local,
     /// Over the PV Web Socket, which converts them.
@@ -200,7 +213,18 @@ impl Pv {
 
     /// Write a value given as text; the backend converts it to the PV's type.
     pub fn write(&self, value: impl Into<String>) {
-        let value = value.into();
+        self.put(value.into(), false);
+    }
+
+    /// Write text as Phoebus does for a widget whose `format` is string: into
+    /// an array of numbers, such as a CA char waveform, as a long string (see
+    /// [`long_string_bytes`]), cut to the PV's element count where the
+    /// backend knows it. Any other PV is written as by [`Pv::write`].
+    pub fn write_long_string(&self, value: impl Into<String>) {
+        self.put(value.into(), true);
+    }
+
+    fn put(&self, value: String, long_string: bool) {
         let shared = &self.0.shared;
         if self.refuses_writes() {
             shared.ctl.notify(format!(
@@ -212,13 +236,25 @@ impl Pv {
         match shared.writer.lock().unwrap().as_ref() {
             #[cfg(not(target_arch = "wasm32"))]
             Some(Writer::Channel(tx)) => {
-                let _ = tx.send(value);
+                let _ = tx.send(Put {
+                    text: value,
+                    long_string,
+                });
             }
-            Some(Writer::Local) => {
-                shared.update(|s| s.value = local::apply(&s.value, &s.labels, &value));
-            }
+            Some(Writer::Local) => shared.update(|s| {
+                s.value = if long_string && s.value.is_numeric_array() {
+                    Value::LongArray(
+                        long_string_bytes(&value, None)
+                            .iter()
+                            .map(|b| *b as i64)
+                            .collect(),
+                    )
+                } else {
+                    local::apply(&s.value, &s.labels, &value)
+                }
+            }),
             #[cfg(target_arch = "wasm32")]
-            Some(Writer::Pvws(name)) => pvws::write(name, &shared.snapshot(), value),
+            Some(Writer::Pvws(name)) => pvws::write(name, &shared.snapshot(), value, long_string),
             None => shared
                 .ctl
                 .notify(format!("{} cannot be written", shared.name)),
@@ -475,6 +511,25 @@ mod tests {
         assert!(text.contains("write '3' failed: no write access"), "{text}");
         shared.write_result("4", None);
         assert_eq!(pv.state().write_error, None);
+    }
+
+    #[test]
+    fn long_strings_are_written_into_number_arrays_only() {
+        let pvs = PvManager::new();
+        let pv = pvs.subscribe("loc://long_string_test<VLongArray>(0, 0)");
+        pv.write_long_string("/tmp/a");
+        let state = pv.state();
+        assert_eq!(state.value.as_long_string().as_deref(), Some("/tmp/a"));
+        let Value::LongArray(a) = &state.value else {
+            panic!("{:?}", state.value)
+        };
+        assert_eq!(a.last(), Some(&0));
+        // Other writes are unchanged.
+        pv.write("[1, 2]");
+        assert_eq!(pv.state().value, Value::LongArray(Arc::from(vec![1, 2])));
+        let s = pvs.subscribe("loc://long_string_str(\"x\")");
+        s.write_long_string("y");
+        assert_eq!(s.state().value, Value::Str("y".into()));
     }
 
     #[test]

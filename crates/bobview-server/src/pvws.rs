@@ -446,7 +446,13 @@ fn handle(
             match msg.get("value").and_then(write_text) {
                 Some(value) => {
                     log::info!("write {name} = {value} from {peer}");
-                    sub.pv.write(value);
+                    // bobview's own mark for a string-format write (see
+                    // `pv::Pv::write_long_string`).
+                    if msg.get("long_string").and_then(Json::as_bool) == Some(true) {
+                        sub.pv.write_long_string(value);
+                    } else {
+                        sub.pv.write(value);
+                    }
                     vec![]
                 }
                 None => vec![error(format!("Cannot write {name}: no value"))],
@@ -1019,6 +1025,32 @@ mod tests {
         assert_eq!(subs.len(), 1);
         subs.clear();
         assert_eq!(hub.subscriptions.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn long_string_writes_are_marked() {
+        let hub = Hub::new(PvManager::new(), config(&[], &[]));
+        let peer: SocketAddr = "192.0.2.1:5000".parse().unwrap();
+        let mut subs = BTreeMap::new();
+        let name = "loc://srv_long_string<VLongArray>(0,0)";
+        let msg = json!({"type": "subscribe", "pvs": [name]}).to_string();
+        assert!(handle(&hub, &mut subs, &msg, peer).is_empty());
+        let write = |subs: &mut BTreeMap<String, Sub>, value: &str, long_string: bool| {
+            let mut msg = json!({"type": "write", "pv": name, "value": value, "token": "secret"});
+            if long_string {
+                msg["long_string"] = json!(true);
+            }
+            assert!(handle(&hub, subs, &msg.to_string(), peer).is_empty());
+            subs[name].pv.state().value
+        };
+        assert_eq!(
+            write(&mut subs, "ab", true),
+            Value::LongArray(Arc::from(vec![97, 98, 0]))
+        );
+        assert_eq!(
+            write(&mut subs, "[1, 2]", false),
+            Value::LongArray(Arc::from(vec![1, 2]))
+        );
     }
 
     #[test]

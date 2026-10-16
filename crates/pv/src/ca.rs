@@ -3,11 +3,38 @@
 use std::sync::Arc;
 
 use epics_base_rs::server::snapshot::{DbrClass, Snapshot};
+use epics_base_rs::types::DbFieldType;
 use epics_ca_rs::EpicsValue;
 use epics_ca_rs::client::{CaChannel, CaClient, ConnectionEvent};
 use tokio::sync::{broadcast, mpsc};
 
-use crate::{Severity, Shared, Value, Writer};
+use crate::{Put, Severity, Shared, Value, Writer};
+
+/// The `DBR_CHAR` request type, which a long string is written as, as
+/// `caput -S` does; the server converts it to the field's own type.
+const DBR_CHAR: u16 = 4;
+
+/// Whether to write `put` as a long string to a PV holding `value`, whose
+/// native type and element count are `native` and `count`.
+///
+/// With a string `format` it is one when the PV holds an array of numbers.
+/// Otherwise, as Phoebus's CA layer does, it is one when the PV is a char
+/// array and the text is not a list of numbers, which could not be
+/// written as an array anyway.
+fn as_long_string(
+    put: &Put,
+    value: &Value,
+    native: Option<DbFieldType>,
+    count: Option<usize>,
+) -> bool {
+    if put.long_string {
+        return value.is_numeric_array();
+    }
+    let items = crate::split_array(&put.text);
+    native == Some(DbFieldType::Char)
+        && count.is_some_and(|n| n > 1)
+        && (items.is_empty() || items.iter().any(|x| x.parse::<f64>().is_err()))
+}
 
 pub(crate) async fn run(client: &CaClient, pv: &str, shared: Arc<Shared>) {
     let channel = client.create_channel(pv);
@@ -51,27 +78,39 @@ pub(crate) async fn run(client: &CaClient, pv: &str, shared: Arc<Shared>) {
                 }
                 None => return,
             },
-            Some(text) = writes.recv() => {
-                // Arrays are typed as they are shown, `[1, 2]` or `["a", "b"]`;
-                // the server converts each string element to the field type.
-                let items: Option<Vec<String>> = match shared.snapshot().value {
-                    Value::DoubleArray(_) | Value::LongArray(_) => Some(
-                        crate::split_array(&text).into_iter().map(String::from).collect(),
-                    ),
-                    Value::StrArray(_) => Some(crate::split_strings(&text)),
-                    _ => None,
-                };
+            Some(put) = writes.recv() => {
+                let text = &put.text;
+                let value = shared.snapshot().value;
+                let native = channel.native_field_type().ok();
+                let count = channel.element_count().ok().map(|n| n as usize);
                 // Plain CA_PROTO_WRITE, as Phoebus does: a put-callback on a
                 // busy record (areaDetector Acquire) completes only when it
                 // returns to 0, and the IOC queues any later put-callback on
                 // that record behind it, so Stop could never reach it.
                 // Sent here, not on a spawned task, so writes keep their order.
-                let result = if let Some(items) = items {
-                    channel.put_string_array_nowait(&items).await
+                let result = if as_long_string(&put, &value, native, count) {
+                    let bytes = crate::long_string_bytes(text, count);
+                    channel
+                        .put_as_dbr_nowait(DBR_CHAR, &EpicsValue::CharArray(bytes.into()))
+                        .await
                 } else {
-                    channel.put_string_nowait(&text).await
+                    // Arrays are typed as they are shown, `[1, 2]` or
+                    // `["a", "b"]`; the server converts each string element
+                    // to the field type.
+                    let items: Option<Vec<String>> = match value {
+                        Value::DoubleArray(_) | Value::LongArray(_) => Some(
+                            crate::split_array(text).into_iter().map(String::from).collect(),
+                        ),
+                        Value::StrArray(_) => Some(crate::split_strings(text)),
+                        _ => None,
+                    };
+                    if let Some(items) = items {
+                        channel.put_string_array_nowait(&items).await
+                    } else {
+                        channel.put_string_nowait(text).await
+                    }
                 };
-                shared.write_result(&text, result.err().map(|e| e.to_string()));
+                shared.write_result(text, result.err().map(|e| e.to_string()));
             }
         }
     }
@@ -153,5 +192,82 @@ fn convert(v: &EpicsValue) -> Value {
         E::StringArray(a) => {
             Value::StrArray(a.iter().map(|s| s.as_str_lossy().into_owned()).collect())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn put(text: &str, long_string: bool) -> Put {
+        Put {
+            text: text.into(),
+            long_string,
+        }
+    }
+
+    #[test]
+    fn chooses_long_string_writes_as_phoebus_does() {
+        let chars = Value::LongArray(Arc::from(vec![0; 4]));
+        let char_wf = (Some(DbFieldType::Char), Some(256));
+        let long_wf = (Some(DbFieldType::Long), Some(256));
+        // A string format writes text into any array of numbers.
+        assert!(as_long_string(
+            &put("/data", true),
+            &chars,
+            char_wf.0,
+            char_wf.1
+        ));
+        assert!(as_long_string(
+            &put("1 2", true),
+            &chars,
+            long_wf.0,
+            long_wf.1
+        ));
+        // ... but not into a string or a scalar.
+        let text = Value::Str(String::new());
+        assert!(!as_long_string(
+            &put("/data", true),
+            &text,
+            Some(DbFieldType::String),
+            Some(1)
+        ));
+        assert!(!as_long_string(
+            &put("3", true),
+            &Value::Long(0),
+            char_wf.0,
+            Some(1)
+        ));
+        // Otherwise only text that is not numbers, to a char array.
+        assert!(as_long_string(
+            &put("/data", false),
+            &chars,
+            char_wf.0,
+            char_wf.1
+        ));
+        assert!(as_long_string(
+            &put("", false),
+            &chars,
+            char_wf.0,
+            char_wf.1
+        ));
+        assert!(!as_long_string(
+            &put("[1, 2]", false),
+            &chars,
+            char_wf.0,
+            char_wf.1
+        ));
+        assert!(!as_long_string(
+            &put("/data", false),
+            &chars,
+            long_wf.0,
+            long_wf.1
+        ));
+        assert!(!as_long_string(
+            &put("x", false),
+            &Value::Long(0),
+            char_wf.0,
+            Some(1)
+        ));
     }
 }

@@ -118,6 +118,8 @@ struct Keypad {
     window: WindowKey,
     pv: pv::Pv,
     text: String,
+    /// Write the text as a long string (the widget's `format` is string).
+    long_string: bool,
 }
 
 /// The saved layouts' names, read when a menu listing them opens and after
@@ -1394,8 +1396,17 @@ impl BobApp {
             } => self.follow(ctx, origin, Location { source, macros }, &target),
             // Shown in the window asked from, which may have been drawn
             // already this frame.
-            Request::Keypad { pv, text } => {
-                self.keypad = Some(Keypad { window, pv, text });
+            Request::Keypad {
+                pv,
+                text,
+                long_string,
+            } => {
+                self.keypad = Some(Keypad {
+                    window,
+                    pv,
+                    text,
+                    long_string,
+                });
                 ctx.request_repaint();
             }
             // A second one replaces a pending one: the dialog is modal in
@@ -1693,6 +1704,10 @@ fn keypad_window(ctx: &egui::Context, keypad: &mut Option<Keypad>) {
             }
         });
     match done {
+        Some(Some(value)) if pad.long_string => {
+            pad.pv.write_long_string(value);
+            *keypad = None;
+        }
         Some(Some(value)) => {
             pad.pv.write(value);
             *keypad = None;

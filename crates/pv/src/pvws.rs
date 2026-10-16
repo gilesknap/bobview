@@ -102,13 +102,22 @@ pub(crate) fn subscribe(name: &PvName, shared: Arc<Shared>) -> Task {
 
 /// Write `text` to `name`: as a number when it reads as one, as the server
 /// converts only text to an enum's or string's value.
-pub(crate) fn write(name: &str, state: &PvState, text: String) {
+///
+/// A long string (see [`crate::Pv::write_long_string`]) to an array of
+/// numbers goes as text, marked `long_string` for bobview-server. A PVWS
+/// server ignores the mark and writes the text, which Phoebus's CA layer
+/// writes into a char array as a long string.
+pub(crate) fn write(name: &str, state: &PvState, text: String, long_string: bool) {
+    let long_string = long_string && state.value.is_numeric_array();
     let numeric = !matches!(state.value, Value::Str(_) | Value::StrArray(_));
     let value = match text.trim().parse::<f64>() {
-        Ok(x) if numeric && x.is_finite() => json!(x),
+        Ok(x) if numeric && !long_string && x.is_finite() => json!(x),
         _ => json!(text),
     };
     let mut msg = json!({"type": "write", "pv": name, "value": value});
+    if long_string {
+        msg["long_string"] = json!(true);
+    }
     if let Some(token) = TOKEN.lock().unwrap().as_ref() {
         msg["token"] = json!(token);
     }

@@ -24,6 +24,8 @@ pub enum Request {
     Keypad {
         pv: pv::Pv,
         text: String,
+        /// Write the text as a long string (see [`writes_long_string`]).
+        long_string: bool,
     },
     /// Show the details of a widget's PV, from its context menu.
     Details(crate::pvmenu::Details),
@@ -609,17 +611,23 @@ pub(crate) fn placeholder(painter: &egui::Painter, rect: Rect, what: &str, z: f3
     );
 }
 
+/// The `format` that shows (and writes) an array of numbers as a long
+/// string, as areaDetector's `FilePath` and other char waveforms are.
+const STRING_FORMAT: i64 = 6;
+
+/// Whether a control writes its text as a long string, as Phoebus does
+/// when its `format` is string: see [`pv::Pv::write_long_string`].
+fn writes_long_string(w: &Widget) -> bool {
+    w.i64("format") == Some(STRING_FORMAT)
+}
+
 /// Value text as Phoebus formats it for the widget's `format` and `precision`.
 pub(crate) fn format_value(w: &Widget, s: &PvState) -> String {
     let precision = w.i64("precision").filter(|p| *p >= 0).map(|p| p as i32);
     let units = w.bool("show_units").unwrap_or(true);
     let format = w.i64("format").unwrap_or(0);
     match (format, &s.value) {
-        (6, Value::LongArray(a)) => a
-            .iter()
-            .take_while(|c| **c != 0)
-            .map(|c| (*c as u8) as char)
-            .collect(),
+        (STRING_FORMAT, v) if v.is_numeric_array() => v.as_long_string().unwrap_or_default(),
         (4, v) if v.as_i64().is_some() => format!("0x{:X}", v.as_i64().unwrap_or(0)),
         (10, v) if v.as_i64().is_some() => format!("0b{:b}", v.as_i64().unwrap_or(0)),
         (2, Value::Double(v)) => {
@@ -691,9 +699,14 @@ fn write_needs_confirmation(base: Option<&Source>) -> bool {
 }
 
 fn write(node: &Node, value: impl Into<String>) {
+    write_with(node, |pv| pv.write(value));
+}
+
+/// Write to the widget's PV with `put`, if the control may write it.
+fn write_with(node: &Node, put: impl FnOnce(&pv::Pv)) {
     if let Some(pv) = &node.pv {
         if can_write(&node.w, Some(&pv.state())) {
-            pv.write(value);
+            put(pv);
         } else {
             log::debug!("{}: not writing, the control is disabled", node.pv_name);
         }
@@ -1096,15 +1109,18 @@ fn text_entry(
             && enabled
             && let Some(pv) = &node.pv
         {
-            let text = state.map(|s| {
-                s.format(
+            let long_string = writes_long_string(&w);
+            let text = state.map(|s| match s.value.as_long_string() {
+                Some(text) if long_string => text,
+                _ => s.format(
                     w.i64("precision").filter(|p| *p >= 0).map(|p| p as i32),
                     false,
-                )
+                ),
             });
             cx.requests.push(Request::Keypad {
                 pv: pv.clone(),
                 text: text.unwrap_or_default(),
+                long_string,
             });
         }
         return resp;
@@ -1146,7 +1162,12 @@ fn text_entry(
         node.edit = Some(buf);
     } else if resp.lost_focus() {
         if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            write(node, buf.trim().to_string());
+            let text = buf.trim().to_string();
+            if writes_long_string(&node.w) {
+                write_with(node, |pv| pv.write_long_string(text));
+            } else {
+                write(node, text);
+            }
         }
         node.edit = None;
     }
@@ -2401,6 +2422,34 @@ mod tests {
             writable,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn string_format_shows_char_arrays_as_text() {
+        let chars = |codes: &[i64]| PvState {
+            connected: true,
+            value: Value::LongArray(Arc::from(codes)),
+            ..Default::default()
+        };
+        let path = chars(&[47, 116, 109, 112, 0, 120, 121]);
+        let string = widget("<format>6</format>");
+        assert!(writes_long_string(&string));
+        assert_eq!(format_value(&string, &path), "/tmp");
+        assert_eq!(format_value(&string, &chars(&[104, 105])), "hi");
+        // Other formats, and values that are not arrays of numbers, are as before.
+        let default = widget("");
+        assert!(!writes_long_string(&default));
+        assert_eq!(
+            format_value(&default, &path),
+            "[47, 116, 109, 112, 0, 120, 121]"
+        );
+        let text = PvState {
+            connected: true,
+            value: Value::Str("a b".into()),
+            ..Default::default()
+        };
+        assert_eq!(format_value(&string, &text), "a b");
+        assert_eq!(format_value(&string, &state(65, true)), "65");
     }
 
     #[test]
