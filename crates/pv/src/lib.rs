@@ -117,8 +117,50 @@ pub(crate) fn write_queue() -> (mpsc::Sender<Put>, mpsc::Receiver<Put>) {
 }
 
 thread_local! {
-    /// The PVs whose listeners this thread is calling, under their locks.
-    static UPDATING: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// How many PVs' listeners this thread is calling, under their locks.
+    static CALLING: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Work a listener left for when this thread holds no PV's lock.
+    static DEFERRED: std::cell::RefCell<Vec<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Call listeners in `f`, under a PV's lock; [`after_listeners`] once the
+/// lock is let go.
+fn calling_listeners<R>(f: impl FnOnce() -> R) -> R {
+    struct Calling;
+    impl Drop for Calling {
+        fn drop(&mut self) {
+            CALLING.with(|c| c.set(c.get() - 1));
+        }
+    }
+    CALLING.with(|c| c.set(c.get() + 1));
+    let _calling = Calling;
+    f()
+}
+
+/// Run the work listeners left, once this thread holds no PV's lock.
+fn after_listeners() {
+    while CALLING.with(|c| c.get()) == 0 {
+        let work = DEFERRED.with(|d| std::mem::take(&mut *d.borrow_mut()));
+        if work.is_empty() {
+            break;
+        }
+        for w in work {
+            w();
+        }
+    }
+}
+
+/// Run `work` now, or, from a listener, once this thread holds no PV's
+/// lock: work that locks a PV (subscribing, listening) could otherwise
+/// wait for one this thread holds, or take two in another thread's order.
+pub(crate) fn outside_listeners(work: Box<dyn FnOnce()>) {
+    if CALLING.with(|c| c.get()) == 0 {
+        work();
+        after_listeners();
+    } else {
+        DEFERRED.with(|d| d.borrow_mut().push(work));
+    }
 }
 
 /// State shared between a [`Pv`] handle and the task serving it.
@@ -131,9 +173,6 @@ pub(crate) struct Shared {
     writer: Mutex<Option<Writer>>,
     notify: Arc<RwLock<Option<Notifier>>>,
     listeners: Mutex<Vec<Weak<ListenFn>>>,
-    /// Listeners added by a listener of an update in progress, which joins
-    /// them as it finishes.
-    joining: Mutex<Vec<Weak<ListenFn>>>,
     /// Set (under the state lock) once the PV has first connected.
     was_connected: AtomicBool,
 }
@@ -148,7 +187,6 @@ impl Shared {
             writer: Mutex::new(None),
             notify,
             listeners: Mutex::new(Vec::new()),
-            joining: Mutex::new(Vec::new()),
             was_connected: AtomicBool::new(false),
         })
     }
@@ -166,31 +204,22 @@ impl Shared {
             // A listener that panics is dropped, so it cannot stop the PV's
             // task (or the UI thread writing a local PV) for good. Release
             // builds abort on any panic instead (`panic = "abort"`).
-            let call = |l: &Weak<ListenFn>| match l.upgrade() {
-                Some(l) => {
-                    let call = std::panic::AssertUnwindSafe(|| l(&state));
-                    let ok = std::panic::catch_unwind(call).is_ok();
-                    if !ok {
-                        log::error!("{}: a listener panicked and was removed", self.name);
-                    }
-                    ok
-                }
-                None => false,
-            };
-            let me = self as *const Self as usize;
-            UPDATING.with(|u| u.borrow_mut().push(me));
             let mut listeners = self.listeners.lock();
-            listeners.retain(call);
-            // Listeners those listeners added: called now, in turn.
-            loop {
-                let joining = std::mem::take(&mut *self.joining.lock());
-                if joining.is_empty() {
-                    break;
-                }
-                listeners.extend(joining.into_iter().filter(call));
-            }
-            UPDATING.with(|u| u.borrow_mut().pop());
+            calling_listeners(|| {
+                listeners.retain(|l| match l.upgrade() {
+                    Some(l) => {
+                        let call = std::panic::AssertUnwindSafe(|| l(&state));
+                        let ok = std::panic::catch_unwind(call).is_ok();
+                        if !ok {
+                            log::error!("{}: a listener panicked and was removed", self.name);
+                        }
+                        ok
+                    }
+                    None => false,
+                })
+            });
         }
+        after_listeners();
         if let Some(n) = self.notify.read().as_ref() {
             n();
         }
@@ -325,19 +354,15 @@ impl Pv {
     /// frame, this sees every monitor update.
     pub fn listen(&self, listener: &Listener) {
         let shared = &self.0.shared;
-        // From a listener of this PV's update, whose lock this thread holds:
-        // the update calls it as it finishes.
-        let me = Arc::as_ptr(shared) as usize;
-        if UPDATING.with(|u| u.borrow().contains(&me)) {
-            shared.joining.lock().push(Arc::downgrade(listener));
-            return;
+        {
+            let state = shared.state.lock();
+            calling_listeners(|| listener(&state));
+            let mut listeners = shared.listeners.lock();
+            // Drop dead ones here too: a PV that never changes is never updated.
+            listeners.retain(|l| l.strong_count() > 0);
+            listeners.push(Arc::downgrade(listener));
         }
-        let state = shared.state.lock();
-        listener(&state);
-        let mut listeners = shared.listeners.lock();
-        // Drop dead ones here too: a PV that never changes is never updated.
-        listeners.retain(|l| l.strong_count() > 0);
-        listeners.push(Arc::downgrade(listener));
+        after_listeners();
     }
 
     /// Write a value given as text; the backend converts it to the PV's type.

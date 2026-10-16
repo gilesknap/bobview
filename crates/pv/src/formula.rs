@@ -11,11 +11,12 @@
 //! The formula then follows whichever PV the name names.
 //!
 //! There is no task: the formula is evaluated again whenever a PV it reads
-//! changes, from the thread that changed it. One thread at a time evaluates
-//! it; an input changing meanwhile, on that thread or another, only leaves
-//! its state for that thread to evaluate again. So subscribing to an input,
-//! which calls its listener under the input's lock, never evaluates and
-//! subscribes again under that lock.
+//! changes, by the thread that changed it once that has let go of the PV's
+//! lock: a listener only leaves the input's state. So evaluating, which
+//! takes the formula's own lock and subscribes to inputs, holds no other
+//! PV's lock, and formulas reading each other cannot wait for each other.
+//! One thread at a time evaluates a formula; an input changing meanwhile
+//! leaves its state for that thread.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -470,11 +471,6 @@ fn binary(op: Op, a: Val, b: Val) -> Val {
     }
 }
 
-thread_local! {
-    /// The formulas this thread is evaluating, outermost first.
-    static EVALUATING: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
 /// A PV a formula reads, with the listener feeding its state to the formula.
 type Input = (Pv, Listener);
 
@@ -495,12 +491,13 @@ pub(crate) struct Formula {
     inputs: Mutex<HashMap<String, Input>>,
     /// Input states not yet evaluated. Never held while calling out.
     pending: Mutex<HashMap<String, PvState>>,
-    /// Whether an input changed since the last evaluation began, and
-    /// whether a thread is evaluating.
+    /// Whether an input changed since the last evaluation began, whether
+    /// an evaluation is queued to run outside listeners, and whether a
+    /// thread is evaluating.
     dirty: AtomicBool,
+    queued: AtomicBool,
     busy: AtomicBool,
-    /// Whether reading a formula it is part of has been reported, so it is
-    /// said once.
+    /// Whether reading itself has been reported, so it is said once.
     warned: AtomicBool,
 }
 
@@ -524,6 +521,7 @@ impl Formula {
             inputs: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             dirty: AtomicBool::new(false),
+            queued: AtomicBool::new(false),
             busy: AtomicBool::new(false),
             warned: AtomicBool::new(false),
         })
@@ -535,21 +533,41 @@ impl Formula {
         self.changed();
     }
 
-    /// Evaluate again, unless a thread is evaluating already: then it will,
-    /// as it finds `dirty` set.
+    /// Evaluate again once this thread holds no PV's lock, unless a thread
+    /// is evaluating already: then it will, as it finds `dirty` set.
     fn changed(&self) {
         self.dirty.store(true, Ordering::SeqCst);
+        if self.queued.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let me = self.me.clone();
+        crate::outside_listeners(Box::new(move || {
+            if let Some(me) = me.upgrade() {
+                me.queued.store(false, Ordering::SeqCst);
+                me.evaluate();
+            }
+        }));
+    }
+
+    /// Evaluate while `dirty`, unless another thread is evaluating.
+    fn evaluate(&self) {
+        /// Lets go of the formula, even if evaluating it panicked.
+        struct Busy<'a>(&'a Formula);
+        impl Drop for Busy<'_> {
+            fn drop(&mut self) {
+                self.0.busy.store(false, Ordering::SeqCst);
+            }
+        }
         while self
             .busy
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
         {
-            EVALUATING.with(|e| e.borrow_mut().push(self.key.clone()));
+            let busy = Busy(self);
             while self.dirty.swap(false, Ordering::SeqCst) {
                 self.refresh();
             }
-            EVALUATING.with(|e| e.borrow_mut().pop());
-            self.busy.store(false, Ordering::SeqCst);
+            drop(busy);
             // A change after the last check but before letting go is ours.
             if !self.dirty.load(Ordering::SeqCst) {
                 break;
@@ -558,7 +576,7 @@ impl Formula {
     }
 
     /// Evaluate, publish the result, and follow the PVs it now reads. Only
-    /// one thread at a time, from [`Formula::changed`].
+    /// one thread at a time, from [`Formula::evaluate`].
     fn refresh(&self) {
         let Some(expr) = &self.expr else { return };
         let wanted = {
@@ -572,30 +590,34 @@ impl Formula {
             };
             let result = ev.eval(expr);
             let (severity, timestamp) = (ev.severity, ev.timestamp);
-            self.shared.update(|s| match result {
-                Ok(Val::Pv(pv)) => {
-                    *s = PvState {
-                        severity,
-                        writable: false,
-                        writable_known: false,
-                        write_error: None,
-                        ..*pv
-                    }
-                }
-                Ok(v) => {
-                    *s = PvState {
-                        connected: true,
-                        value: match v {
-                            Val::Str(t) => Value::Str(t),
-                            v => Value::Double(v.num()),
-                        },
-                        severity,
-                        timestamp,
-                        ..PvState::default()
-                    }
-                }
-                Err(Missing) => s.connected = false,
-            });
+            let old = self.shared.snapshot();
+            let new = match result {
+                Ok(Val::Pv(pv)) => PvState {
+                    severity,
+                    writable: false,
+                    writable_known: false,
+                    write_error: None,
+                    ..*pv
+                },
+                Ok(v) => PvState {
+                    connected: true,
+                    value: match v {
+                        Val::Str(t) => Value::Str(t),
+                        v => Value::Double(v.num()),
+                    },
+                    severity,
+                    timestamp,
+                    ..PvState::default()
+                },
+                Err(Missing) => PvState {
+                    connected: false,
+                    ..old.clone()
+                },
+            };
+            // Only a change goes out, so formulas reading each other settle.
+            if new != old {
+                self.shared.update(|s| *s = new);
+            }
             ev.wanted
         };
         self.follow(wanted);
@@ -604,14 +626,15 @@ impl Formula {
     /// Subscribe to the PVs in `wanted` not yet subscribed, and drop those
     /// no longer read (when a computed name changes).
     fn follow(&self, wanted: Vec<(String, String)>) {
+        let mut inputs = self.inputs.lock();
         // Keyed, so two spellings of one PV are one input; the one giving a
         // local PV's initial value is the one subscribed.
         let mut names: HashMap<String, String> = HashMap::new();
         for (key, name) in wanted {
-            // Formulas reading each other would wait for themselves.
-            if EVALUATING.with(|e| e.borrow().contains(&key)) {
+            // Its own updates would evaluate it again for ever.
+            if key == self.key {
                 if !self.warned.swap(true, Ordering::Relaxed) {
-                    log::warn!("{}: formulas cannot read each other", self.key);
+                    log::warn!("{}: a formula cannot read itself", self.key);
                 }
                 continue;
             }
@@ -623,37 +646,45 @@ impl Formula {
                 }
             }
         }
-        let (new, old): (Vec<(String, String)>, Vec<Input>) = {
-            let mut inputs = self.inputs.lock();
-            let new = names
-                .iter()
-                .filter(|(k, _)| !inputs.contains_key(*k))
-                .map(|(k, n)| (k.clone(), n.clone()))
-                .collect();
-            let gone: Vec<String> = inputs
-                .keys()
-                .filter(|k| !names.contains_key(*k))
-                .cloned()
-                .collect();
-            let old = gone.iter().filter_map(|k| inputs.remove(k)).collect();
-            (new, old)
-        };
+        let new: Vec<(String, String)> = names
+            .iter()
+            .filter(|(k, _)| !inputs.contains_key(*k))
+            .map(|(k, n)| (k.clone(), n.clone()))
+            .collect();
+        let gone: Vec<String> = inputs
+            .keys()
+            .filter(|k| !names.contains_key(*k))
+            .cloned()
+            .collect();
+        let old: Vec<Input> = gone.iter().filter_map(|k| inputs.remove(k)).collect();
+        drop(inputs);
         if !old.is_empty() {
             self.states.lock().retain(|k, _| names.contains_key(k));
             self.pending.lock().retain(|k, _| names.contains_key(k));
         }
         drop(old);
+        if new.is_empty() {
+            return;
+        }
+        self.subscribe(new);
+    }
+
+    /// Subscribe to the inputs `new`, by key and name, and listen to each.
+    fn subscribe(&self, new: Vec<(String, String)>) {
         let Some(inner) = self.manager.upgrade() else {
             return;
         };
         let manager = PvManager { inner };
         for (key, name) in new {
+            // Subscribed meanwhile, by an evaluation after the one asking.
+            if self.inputs.lock().contains_key(&key) {
+                continue;
+            }
             let pv = manager.subscribe(&name);
             let me = self.me.clone();
             let state_key = key.clone();
-            // Called by `listen` under the input's lock (once its update is
-            // done, if this thread is inside one): it only leaves the state,
-            // and this thread evaluates it next.
+            // Called under the input's lock: it only leaves the state, for
+            // this thread to evaluate once it has let go.
             let listener: Listener = Arc::new(move |state: &PvState| {
                 if let Some(me) = me.upgrade() {
                     me.pending.lock().insert(state_key.clone(), state.clone());
@@ -826,6 +857,18 @@ mod tests {
         });
         let value = rx.recv_timeout(std::time::Duration::from_secs(20));
         assert_eq!(value, Ok(Value::Double(2.0)));
+    }
+
+    #[test]
+    fn a_formula_reading_a_formula_keeps_up() {
+        let pvs = PvManager::new();
+        let g = pvs.subscribe("=pv(\"=2*'loc://fch(1)'\") + 100");
+        assert_eq!(g.state().value, Value::Double(102.0));
+        let x = pvs.subscribe("loc://fch");
+        for v in [5.0, 7.0, 9.0] {
+            x.write(v.to_string());
+            assert_eq!(g.state().value, Value::Double(2.0 * v + 100.0));
+        }
     }
 
     #[test]
