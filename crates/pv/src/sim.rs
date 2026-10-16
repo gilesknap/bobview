@@ -163,7 +163,11 @@ mod tests {
             .unwrap();
         for n in names {
             let name = PvName::parse(n);
-            let shared = Shared::new(Arc::new(std::sync::RwLock::new(None)));
+            let shared = Shared::new(
+                &name,
+                Arc::new(std::sync::RwLock::new(None)),
+                Arc::default(),
+            );
             rt.block_on(async {
                 let _ = tokio::time::timeout(Duration::from_millis(50), run(name, shared)).await;
             });

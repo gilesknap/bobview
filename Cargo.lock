@@ -349,6 +349,7 @@ dependencies = [
  "chrono",
  "eframe",
  "egui",
+ "imagesize",
  "js-sys",
  "libc",
  "log",

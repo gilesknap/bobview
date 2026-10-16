@@ -74,15 +74,23 @@ static QUEUE: LazyLock<Mutex<std::sync::mpsc::Sender<Job>>> = LazyLock::new(|| {
     let rx = Arc::new(Mutex::new(rx));
     for _ in 0..LOADERS {
         let rx = rx.clone();
-        std::thread::spawn(move || {
-            loop {
-                let job = rx.lock().unwrap().recv();
-                match job {
-                    Ok(job) => load(job),
-                    Err(_) => break,
+        // An explicit stack: usvg recurses per element and the default is
+        // platform dependent.
+        let spawned = std::thread::Builder::new()
+            .name("image-loader".into())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || {
+                loop {
+                    let job = rx.lock().unwrap().recv();
+                    match job {
+                        Ok(job) => load(job),
+                        Err(_) => break,
+                    }
                 }
-            }
-        });
+            });
+        if let Err(e) = spawned {
+            log::error!("cannot start an image loader: {e}");
+        }
     }
     Mutex::new(tx)
 });
@@ -194,6 +202,10 @@ fn decode(source: &Source, data: &[u8]) -> Result<Image, String> {
     if !svg {
         return Err("only SVG and PNG images are supported".into());
     }
+    // (usvg is built without `svgz`, so a gzipped file fails to parse.)
+    if svg_too_deep(data) {
+        return Err("SVG nests elements too deeply".into());
+    }
     // An SVG may embed images as data: URLs, but never names files or URLs:
     // a display from the web is not trusted with local files.
     let options = usvg::Options {
@@ -203,10 +215,8 @@ fn decode(source: &Source, data: &[u8]) -> Result<Image, String> {
             resolve_data: {
                 let default = usvg::ImageHrefResolver::default_data_resolver();
                 Box::new(move |mime, data, opts| {
-                    if let Some((w, h)) = png_header_size(&data)
-                        && !png_size_ok(w, h)
-                    {
-                        log::warn!("embedded PNG of {w}x{h} pixels is not shown: too large");
+                    if !embedded_ok(mime, &data) {
+                        log::warn!("embedded {mime} image is not shown: too large or deep");
                         return None;
                     }
                     default(mime, data, opts)
@@ -235,14 +245,28 @@ fn png_size_ok(width: u32, height: u32) -> bool {
         && u64::from(width) * u64::from(height) <= MAX_PNG_PIXELS
 }
 
-/// The size a PNG declares in its IHDR chunk, if `data` starts like one.
-fn png_header_size(data: &[u8]) -> Option<(u32, u32)> {
-    let head = data.get(..24)?;
-    if !head.starts_with(b"\x89PNG\r\n\x1a\n") || &head[12..16] != b"IHDR" {
-        return None;
+/// Deepest element nesting of an SVG we hand to usvg, which recurses per level.
+const MAX_SVG_DEPTH: usize = 128;
+
+/// Whether `data` is XML nested more deeply than usvg can safely take.
+fn svg_too_deep(data: &[u8]) -> bool {
+    std::str::from_utf8(data).is_ok_and(|s| bob::xml_depth(s) > MAX_SVG_DEPTH)
+}
+
+/// Whether an image embedded in an SVG (decoded later, at render time) is safe
+/// to hand on: raster images of any format must have a bounded declared size,
+/// and nested SVGs a bounded depth.
+fn embedded_ok(mime: &str, data: &[u8]) -> bool {
+    if let Ok(size) = imagesize::blob_size(data) {
+        let side = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        if !png_size_ok(side(size.width), side(size.height)) {
+            return false;
+        }
     }
-    let be = |b: &[u8]| u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
-    Some((be(&head[16..20]), be(&head[20..24])))
+    if matches!(mime, "image/svg+xml" | "text/plain") {
+        return !svg_too_deep(data);
+    }
+    true
 }
 
 fn decode_png(data: &[u8]) -> Result<ColorImage, String> {
@@ -685,12 +709,62 @@ mod tests {
     fn png_decompression_bomb_is_refused_before_allocating() {
         assert!(decode_png(&png_claiming(1, 1)).is_ok());
         let bomb = png_claiming(30_000, 30_000);
-        assert_eq!(png_header_size(&bomb), Some((30_000, 30_000)));
+        assert!(!embedded_ok("image/png", &bomb));
         let err = decode_png(&bomb).unwrap_err();
         assert!(err.contains("too large"), "{err}");
         assert!(decode_png(&png_claiming(u32::MAX >> 1, 1)).is_err());
         assert!(!png_size_ok(8192 * 8, 1));
         assert!(png_size_ok(4096, 4096));
+    }
+
+    #[test]
+    fn oversized_jpeg_webp_and_gif_are_refused() {
+        let (w, h) = (20_000u32, 20_000u32);
+        let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xC0, 0, 17, 8];
+        jpeg.extend((h as u16).to_be_bytes());
+        jpeg.extend((w as u16).to_be_bytes());
+        jpeg.extend([3, 1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0]);
+        let mut webp = b"RIFF\x16\0\0\0WEBPVP8X\x0a\0\0\0\0\0\0\0".to_vec();
+        webp.extend(&(w - 1).to_le_bytes()[..3]);
+        webp.extend(&(h - 1).to_le_bytes()[..3]);
+        let mut gif = b"GIF89a".to_vec();
+        gif.extend((w as u16).to_le_bytes());
+        gif.extend((h as u16).to_le_bytes());
+        gif.extend([0, 0, 0]);
+        for (mime, data) in [
+            ("image/jpeg", jpeg),
+            ("image/webp", webp),
+            ("image/gif", gif),
+        ] {
+            assert!(
+                imagesize::blob_size(&data).is_ok(),
+                "{mime} header unreadable"
+            );
+            assert!(!embedded_ok(mime, &data), "{mime}");
+        }
+    }
+
+    #[test]
+    fn deeply_nested_svg_is_an_error_not_a_stack_overflow() {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let n = 50_000;
+                let svg = format!(
+                    r#"<svg xmlns="http://www.w3.org/2000/svg">{}{}</svg>"#,
+                    "<g>".repeat(n),
+                    "</g>".repeat(n)
+                );
+                let source = Source::File("x.svg".into());
+                assert!(decode(&source, svg.as_bytes()).is_err());
+                // The same, as a nested SVG.
+                assert!(!embedded_ok("image/svg+xml", svg.as_bytes()));
+                let ok = r#"<svg xmlns="http://www.w3.org/2000/svg"><g><g/></g></svg>"#;
+                assert!(decode(&source, ok.as_bytes()).is_ok());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

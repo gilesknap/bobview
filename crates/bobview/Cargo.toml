@@ -12,6 +12,7 @@ log = "0.4.34"
 bob = { path = "../bob" }
 pv = { path = "../pv" }
 png = "0.18.1"
+imagesize = "0.15"
 resvg = { version = "0.48.1", default-features = false, features = ["raster-images"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

@@ -17,7 +17,7 @@ mod trend;
 
 use std::path::{Path, PathBuf};
 
-pub use element::Element;
+pub use element::{Element, MAX_DEPTH as MAX_XML_DEPTH, depth as xml_depth};
 pub use group_link::{GroupLink, LinkSets, group_device, group_frame};
 pub use macros::{Macros, expand};
 pub use model::{Action, Color, Font, FontStyle, Rule, RuleExpr, named_color};
@@ -53,7 +53,7 @@ pub enum Error {
     Io(PathBuf, std::io::Error),
     Xml(roxmltree::Error),
     NotADisplay(String),
-    /// Elements nested more deeply than [`MAX_DEPTH`](element::MAX_DEPTH).
+    /// Elements nested more deeply than [`MAX_XML_DEPTH`].
     TooDeep,
     /// A URL that could not be fetched, and why.
     Fetch(String, String),
@@ -64,11 +64,7 @@ impl std::fmt::Display for Error {
         match self {
             Error::Io(p, e) => write!(f, "cannot read {}: {e}", p.display()),
             Error::Xml(e) => write!(f, "invalid XML: {e}"),
-            Error::TooDeep => write!(
-                f,
-                "display nests elements more than {} deep",
-                element::MAX_DEPTH
-            ),
+            Error::TooDeep => write!(f, "display nests elements more than {} deep", MAX_XML_DEPTH),
             Error::NotADisplay(root) => write!(f, "expected a <display>, found <{root}>"),
             Error::Fetch(url, why) => write!(f, "cannot fetch {url}: {why}"),
         }
@@ -102,7 +98,7 @@ impl Display {
 
     pub fn parse(xml: &str) -> Result<Self, Error> {
         // Before parsing: roxmltree's own parser recurses once per level.
-        if element::depth(xml) > element::MAX_DEPTH {
+        if xml_depth(xml) > MAX_XML_DEPTH {
             return Err(Error::TooDeep);
         }
         let doc = roxmltree::Document::parse(xml).map_err(Error::Xml)?;
@@ -309,7 +305,7 @@ mod tests {
                 );
                 assert!(matches!(Display::parse(&xml), Err(Error::TooDeep)));
                 // Nesting well inside the limit still parses.
-                let n = 100; // ok on a 2 MiB stack
+                let n = 40; // ok on a 2 MiB stack
                 let xml = format!(
                     "<display>{}{}</display>",
                     "<widget type=\"group\">".repeat(n),

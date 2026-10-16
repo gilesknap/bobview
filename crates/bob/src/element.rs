@@ -10,15 +10,18 @@ pub struct Element {
 
 /// Deepest element nesting accepted. Everything that walks the tree
 /// (`from_node`, `split_widgets`, `Drop`) recurses once per level.
-pub(crate) const MAX_DEPTH: usize = 256;
+/// The deepest real display nests about 8 levels; a small cap also bounds the
+/// stack used when displays are embedded in one another.
+pub const MAX_DEPTH: usize = 64;
 
 /// The deepest element nesting in `xml`, found by a quick scan without
 /// recursion, so it can run before the (recursive) XML parser.
 ///
 /// It only has to be right for documents the parser accepts: comments, CDATA
 /// and processing instructions are skipped, quotes in tags are honoured, and
-/// anything else odd (a DTD, which the parser rejects) ends the scan.
-pub(crate) fn depth(xml: &str) -> usize {
+/// anything else odd (a DTD, which the parser rejects) ends the scan. That
+/// relies on roxmltree's default `allow_dtd: false`; do not enable DTDs.
+pub fn depth(xml: &str) -> usize {
     let b = xml.as_bytes();
     let (mut i, mut open, mut deepest) = (0, 0usize, 0usize);
     let skip = |i: usize, end: &[u8]| -> usize {

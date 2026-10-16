@@ -310,6 +310,9 @@ fn expand_vars(text: &str, vars: &HashMap<String, String>) -> String {
 /// `<link><name>…</name><location>…</location></link>` entries of the
 /// `.project` in `dir` (or `<locationURI>`), resolved by [`location`].
 fn parse(text: &str, dir: &Path) -> Links {
+    if crate::element::depth(text) > crate::element::MAX_DEPTH {
+        return Vec::new();
+    }
     let Ok(doc) = roxmltree::Document::parse(text) else {
         return Vec::new();
     };
