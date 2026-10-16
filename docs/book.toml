@@ -1,0 +1,20 @@
+[book]
+title = "bobview"
+description = "A lean viewer for Phoebus Display Builder .bob screens"
+authors = ["Giles Knap"]
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/gilesknap/bobview"
+edit-url-template = "https://github.com/gilesknap/bobview/edit/main/docs/{path}"
+# CI sets the site URL of each version, /bobview/<version>/
+site-url = "/bobview/main/"
+additional-css = ["theme/grid.css", "theme/sidebar.css"]
+additional-js = ["theme/switcher.js"]
+default-theme = "light"
+preferred-dark-theme = "navy"
+
+[output.html.fold]
+enable = true
+level = 1
