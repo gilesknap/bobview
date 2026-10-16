@@ -4,6 +4,8 @@
 use std::fmt;
 use std::path::PathBuf;
 
+use crate::project::normalize;
+
 /// A display's location.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Source {
@@ -30,7 +32,9 @@ impl Source {
     }
 
     /// Resolve a file named by the display at `self`: relative names are
-    /// found next to it, and absolute URLs are used as they are.
+    /// found next to it, and absolute URLs are used as they are. A path
+    /// loses its `.` and `..` lexically, as in Phoebus and CS-Studio, so
+    /// following links back and forth does not grow it.
     pub fn resolve(&self, file: &str) -> Source {
         let file = file.trim();
         if is_http(file) {
@@ -42,8 +46,8 @@ impl Source {
                 let file = file.strip_prefix("file://").unwrap_or(file);
                 let rel = std::path::Path::new(file);
                 match path.parent() {
-                    Some(dir) if rel.is_relative() => Source::File(dir.join(rel)),
-                    _ => Source::File(rel.to_path_buf()),
+                    Some(dir) if rel.is_relative() => Source::File(normalize(&dir.join(rel))),
+                    _ => Source::File(normalize(rel)),
                 }
             }
         }
@@ -218,6 +222,24 @@ mod tests {
         assert_eq!(
             f.resolve("file:///abs/b.bob"),
             Source::File("/abs/b.bob".into())
+        );
+    }
+
+    #[test]
+    fn file_paths_lose_dot_segments() {
+        // Going there and back again (`shared/x.opi` -> `../shared/y.opi`
+        // -> `../shared/x.opi`) names the same file by the same path.
+        let f = Source::File("/opi/shared/x.opi".into());
+        let there = f.resolve("../shared/y.opi");
+        assert_eq!(there, Source::File("/opi/shared/y.opi".into()));
+        assert_eq!(there.resolve("../shared/x.opi"), f);
+        assert_eq!(
+            f.resolve("./../../motor/m.opi"),
+            Source::File("/motor/m.opi".into())
+        );
+        assert_eq!(
+            Source::File("x.opi".into()).resolve("../../y.opi"),
+            Source::File("../../y.opi".into())
         );
     }
 

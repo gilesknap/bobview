@@ -62,7 +62,15 @@ pub fn nice_range(lo: f64, hi: f64, max_ticks: usize) -> (f64, f64) {
 pub fn label(v: f64, step: f64) -> String {
     let big = v.abs().max(step.abs());
     if big >= 1e6 || (step > 0.0 && step < 1e-4) {
-        let s = format!("{v:.1e}");
+        // Enough mantissa decimals to reach the step's digit, so 1.30e8 and
+        // 1.32e8 don't both read 1.3e8.
+        let decimals = if step > 0.0 && v != 0.0 {
+            let e = (v.abs().log10() + 1e-9).floor();
+            (e - (step.log10() + 1e-9).floor()).clamp(0.0, 15.0) as usize
+        } else {
+            1
+        };
+        let s = format!("{v:.decimals$e}");
         return s.replace(".0e", "e");
     }
     let decimals = if step > 0.0 {
@@ -166,6 +174,11 @@ mod tests {
         assert_eq!(label(-0.4, 0.2), "-0.4");
         assert_eq!(label(0.25, 0.05), "0.25");
         assert_eq!(label(2e6, 1e6), "2e6");
+        assert_eq!(label(1.5e6, 5e5), "1.5e6");
+        // A narrow range of big values keeps adjacent ticks apart.
+        assert_eq!(label(1.3e8, 2e6), "1.30e8");
+        assert_eq!(label(1.32e8, 2e6), "1.32e8");
+        assert_eq!(label(1.5e-5, 5e-6), "1.5e-5");
         // Log decades have no step.
         assert_eq!(label(1e-9, 0.0), "1e-9");
         assert_eq!(label(2.5e-7, 0.0), "2.5e-7");

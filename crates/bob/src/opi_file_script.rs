@@ -106,7 +106,7 @@ fn string(s: &str) -> Option<&str> {
 /// The initial value of a local PV, `loc://name<VType>(value)` or
 /// `loc://name(value)`, unquoted: `0`, or `$(control)` for
 /// `loc://$(DID)dummy<VString>("$(control)")`.
-fn loc_initial(pv: &str) -> Option<String> {
+pub(crate) fn loc_initial(pv: &str) -> Option<String> {
     let name = pv.strip_prefix("loc://")?;
     // The first `(` not opening a macro in the name.
     let open = name
