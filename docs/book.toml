@@ -10,7 +10,7 @@ git-repository-url = "https://github.com/gilesknap/bobview"
 edit-url-template = "https://github.com/gilesknap/bobview/edit/main/docs/{path}"
 # CI sets the site URL of each version, /bobview/<version>/
 site-url = "/bobview/main/"
-additional-css = ["theme/grid.css"]
+additional-css = ["theme/grid.css", "theme/sidebar.css"]
 additional-js = ["theme/switcher.js"]
 default-theme = "light"
 preferred-dark-theme = "navy"
