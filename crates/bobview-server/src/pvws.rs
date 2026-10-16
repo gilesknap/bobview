@@ -722,6 +722,21 @@ fn update(name: &str, s: &PvState, last: Option<&PvState>, write: bool) -> Optio
             m.insert("min".into(), number(lo));
             m.insert("max".into(), number(hi));
         }
+        // Alarm and warning limits as PVWS sends them, and control limits,
+        // which it does not: meters and sliders take their ranges from them.
+        let limits = [
+            (s.warning_range, "warn_low", "warn_high"),
+            (s.alarm_range, "alarm_low", "alarm_high"),
+            (s.control_range, "ctrl_low", "ctrl_high"),
+        ];
+        let last_limits = last.map(|l| [l.warning_range, l.alarm_range, l.control_range]);
+        for (i, (range, lo_key, hi_key)) in limits.into_iter().enumerate() {
+            let Some((lo, hi)) = range else { continue };
+            if first || last_limits.is_some_and(|l| !same_range(l[i], range)) {
+                m.insert(lo_key.into(), number(lo));
+                m.insert(hi_key.into(), number(hi));
+            }
+        }
         if matches!(s.value, Value::Enum(_)) && changed(&|l| l.labels != s.labels) {
             m.insert("labels".into(), json!(s.labels));
         }
@@ -748,6 +763,17 @@ fn update(name: &str, s: &PvState, last: Option<&PvState>, write: bool) -> Optio
     msg.insert("pv".into(), json!(name));
     msg.extend(m);
     Some(Json::Object(msg).to_string())
+}
+
+/// Whether two limit pairs are equal, with NaN equal to NaN (unset alarm
+/// limits are NaN, which would otherwise be sent on every update).
+fn same_range(a: Option<(f64, f64)>, b: Option<(f64, f64)>) -> bool {
+    let same = |x: f64, y: f64| x == y || (x.is_nan() && y.is_nan());
+    match (a, b) {
+        (Some(a), Some(b)) => same(a.0, b.0) && same(a.1, b.1),
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 /// Whether two values are equal, without comparing arrays that are the
@@ -836,7 +862,11 @@ fn encode_value(m: &mut Map<String, Json>, s: &PvState) {
             m.insert("b64dbl".into(), b64(bytes));
         }
         Value::StrArray(a) => {
+            // The text, as PVWS sends it, for any PVWS client; the items
+            // for bobview under a key of its own, so that a client reading
+            // `value` as a number (cs-web-lib) never sees an array.
             m.insert("text".into(), json!(a.join(", ")));
+            m.insert("strings".into(), json!(a.as_ref()));
         }
         Value::Image(img) => {
             // Images need a video stream, not JSON (bobview#20).
@@ -943,6 +973,39 @@ mod tests {
                 assert!(update("X", s, Some(s), write).is_none(), "{s:?}");
             }
         }
+    }
+
+    #[test]
+    fn limits_and_string_arrays() {
+        let mut a = PvState {
+            alarm_range: Some((f64::NAN, f64::NAN)),
+            warning_range: Some((1.0, 9.0)),
+            control_range: Some((0.0, 10.0)),
+            ..double(5.0)
+        };
+        let m = parse(update("X", &a, None, false));
+        assert_eq!(m["warn_low"], 1.0);
+        assert_eq!(m["warn_high"], 9.0);
+        assert_eq!(m["alarm_low"], "NaN");
+        assert_eq!(m["ctrl_high"], 10.0);
+        // Unchanged NaN limits are not sent again; a changed limit is.
+        assert!(update("X", &a.clone(), Some(&a), false).is_none());
+        let before = a.clone();
+        a.control_range = Some((0.0, 20.0));
+        let m = parse(update("X", &a, Some(&before), false));
+        assert_eq!(m["ctrl_high"], 20.0);
+        assert!(!m.contains_key("warn_low"));
+
+        let s = PvState {
+            connected: true,
+            value: Value::StrArray(vec!["a, b".into(), "c".into()].into()),
+            ..Default::default()
+        };
+        let m = parse(update("X", &s, None, false));
+        assert_eq!(m["vtype"], "VStringArray");
+        assert_eq!(m["strings"], json!(["a, b", "c"]));
+        assert_eq!(m["text"], "a, b, c");
+        assert!(!m.contains_key("value"), "PVWS sends no value for these");
     }
 
     #[test]

@@ -21,7 +21,7 @@ impl Scheme {
 }
 
 /// A parsed PV name such as `ca://X`, `loc://x<VDouble>(3)` or `sim://sine(0, 10, 0.1)`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PvName {
     pub scheme: Scheme,
     /// Everything after the `scheme://` prefix.

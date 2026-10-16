@@ -68,11 +68,22 @@ impl Roots {
                     }
                     file.push("index.html");
                 }
-                Ok(_) => {}
+                Ok(m) if m.is_file() => {}
+                // A FIFO or device: opening one may block, or do something.
+                Ok(_) => return Found::Missing,
                 // Not here (or a dangling link): look in the next.
                 Err(_) => continue,
             }
-            let Ok(opened) = File::open(&file) else {
+            // Without blocking, should a FIFO be swapped in meanwhile; the
+            // check below refuses anything but a regular file.
+            let opened = {
+                use std::os::unix::fs::OpenOptionsExt;
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(&file)
+            };
+            let Ok(opened) = opened else {
                 continue;
             };
             let checked = || -> Option<Metadata> {
@@ -382,6 +393,19 @@ mod tests {
         assert_eq!(read("/out/secret"), "refused");
         assert_eq!(read("/%73ecret.bob"), "refused");
         assert_eq!(read("/out%2Fsecret"), "refused");
+        // A FIFO, here or out of the root, is not opened: that would block.
+        let fifo = |p: &PathBuf| {
+            let ok = std::process::Command::new("mkfifo")
+                .arg(p)
+                .status()
+                .unwrap();
+            assert!(ok.success());
+        };
+        fifo(&opi.join("f.bob"));
+        fifo(&outside.join("f"));
+        link(&outside.join("f"), "outf.bob");
+        assert_eq!(read("/f.bob"), "missing");
+        assert_eq!(read("/outf.bob"), "missing");
         // A directory out is refused before it would be redirected.
         assert_eq!(read("/out"), "refused");
         assert_eq!(read("//sub"), "-> /sub/");

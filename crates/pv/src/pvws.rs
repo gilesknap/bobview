@@ -11,16 +11,16 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Weak};
 
-use base64::Engine;
 use futures_util::future::{AbortHandle, abortable};
 use parking_lot::Mutex;
-use serde_json::{Map, Value as Json, json};
+use serde_json::{Value as Json, json};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use web_sys::{MessageEvent, WebSocket};
-use web_time::{Duration, SystemTime};
+use web_time::Duration;
 
-use crate::{PvName, PvState, Scheme, Severity, Shared, Value, Writer};
+use crate::pvws_msg::apply;
+use crate::{PvName, PvState, Scheme, Shared, Value, Writer};
 
 /// The socket's URL, if set before the first PV subscribes.
 static URL: Mutex<Option<String>> = Mutex::new(None);
@@ -333,104 +333,5 @@ impl Socket {
             }
             _ => {}
         }
-    }
-}
-
-/// Apply one update, which holds only what changed, to a PV's state.
-fn apply(s: &mut PvState, vtype: &str, msg: &Map<String, Json>) {
-    let f64_of = |key: &str| msg.get(key).and_then(Json::as_f64);
-    if let Some(sevr) = msg.get("severity").and_then(Json::as_str) {
-        s.severity = match sevr {
-            "NONE" => Severity::NoAlarm,
-            "MINOR" => Severity::Minor,
-            "MAJOR" => Severity::Major,
-            _ => Severity::Invalid,
-        };
-        // A lost connection is an UNDEFINED alarm with no value.
-        if sevr == "UNDEFINED" && !msg.contains_key("value") && !msg.contains_key("text") {
-            s.connected = false;
-        }
-    }
-    if let Some(readonly) = msg.get("readonly").and_then(Json::as_bool) {
-        s.writable = !readonly;
-        s.writable_known = true;
-    }
-    if let Some(units) = msg.get("units").and_then(Json::as_str) {
-        s.units = units.to_string();
-    }
-    if let Some(p) = msg.get("precision").and_then(Json::as_i64) {
-        s.precision = Some(p as i32);
-    }
-    if let (Some(lo), Some(hi)) = (f64_of("min"), f64_of("max")) {
-        s.display_range = Some((lo, hi));
-    }
-    if let Some(labels) = msg.get("labels").and_then(Json::as_array) {
-        s.labels = labels
-            .iter()
-            .filter_map(|l| l.as_str().map(String::from))
-            .collect();
-    }
-    if let Some(secs) = f64_of("seconds") {
-        let nanos = f64_of("nanos").unwrap_or(0.0);
-        if let Ok(t) = Duration::try_from_secs_f64(secs + nanos * 1e-9) {
-            s.timestamp = Some(SystemTime::UNIX_EPOCH + t);
-        }
-    }
-    if let Some(value) = value(vtype, msg) {
-        s.value = value;
-        s.error = None;
-        // PVWS sends a PV it cannot reach as a bare readonly/timestamp
-        // update, so only a value means connected.
-        s.connected = true;
-    }
-}
-
-fn value(vtype: &str, msg: &Map<String, Json>) -> Option<Value> {
-    for (key, size) in [
-        ("b64dbl", 8),
-        ("b64flt", 4),
-        ("b64int", 4),
-        ("b64srt", 2),
-        ("b64byt", 1),
-    ] {
-        let Some(b64) = msg.get(key).and_then(Json::as_str) else {
-            continue;
-        };
-        let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
-        let items = bytes.chunks_exact(size);
-        return Some(match key {
-            "b64dbl" => Value::DoubleArray(
-                items
-                    .map(|b| f64::from_le_bytes(b.try_into().unwrap()))
-                    .collect(),
-            ),
-            "b64flt" => Value::DoubleArray(
-                items
-                    .map(|b| f32::from_le_bytes(b.try_into().unwrap()) as f64)
-                    .collect(),
-            ),
-            "b64int" => Value::LongArray(
-                items
-                    .map(|b| i32::from_le_bytes(b.try_into().unwrap()) as i64)
-                    .collect(),
-            ),
-            "b64srt" => Value::LongArray(
-                items
-                    .map(|b| i16::from_le_bytes(b.try_into().unwrap()) as i64)
-                    .collect(),
-            ),
-            _ => Value::LongArray(items.map(|b| b[0] as i8 as i64).collect()),
-        });
-    }
-    let text = msg.get("text").and_then(Json::as_str);
-    match msg.get("value") {
-        Some(v) if vtype == "VEnum" => Some(Value::Enum(v.as_f64()? as u16)),
-        // Non-finite doubles come as text.
-        Some(Json::String(_)) => Some(Value::Double(f64::NAN)),
-        Some(v) if matches!(vtype, "VDouble" | "VFloat") || v.is_f64() => {
-            Some(Value::Double(v.as_f64()?))
-        }
-        Some(v) => Some(Value::Long(v.as_i64()?)),
-        None => text.map(|t| Value::Str(t.to_string())),
     }
 }
