@@ -139,26 +139,24 @@ impl View {
         self.open_path = loc.source.to_string();
         #[cfg(target_arch = "wasm32")]
         set_page_url(&loc);
-        self.loading = None;
         // In a browser `poll_loading` fetches and builds every display.
-        #[cfg(target_arch = "wasm32")]
-        let fetch_first = true;
-        #[cfg(not(target_arch = "wasm32"))]
-        let fetch_first = loc.source.is_url();
-        if fetch_first {
-            self.loading = Some(self.start_loading(&loc));
-            self.error = None;
-            self.current = Some(loc);
-            return;
-        }
-        let loaded = Screen::load(&loc.source, &loc.macros, &self.pvs);
+        self.loading = Some(self.start_loading(&loc));
+        self.error = None;
         self.current = Some(loc);
-        self.loaded(loaded);
+        // A local or already fetched display is usually built at once: show
+        // it without a frame of "Loading".
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(rx) = &self.loading
+            && let Ok(loaded) = rx.recv_timeout(crate::screen::QUICK)
+        {
+            self.loading = None;
+            self.loaded(loaded);
+        }
     }
 
-    /// Build a fetched display on a thread, embedded displays and all, so a
-    /// slow server doesn't freeze the window; `poll_loading` shows it once
-    /// it arrives.
+    /// Build the display on a thread, embedded displays and all, so a slow
+    /// server or file system doesn't freeze the window; `poll_loading`
+    /// shows it once it arrives.
     #[cfg(not(target_arch = "wasm32"))]
     fn start_loading(&self, loc: &Location) -> Loading {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -226,6 +224,12 @@ impl View {
     /// Show the display being fetched, or its error, once the fetch is done.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn poll_loading(&mut self, ctx: &egui::Context) {
+        // Embedded displays built on threads, including ones not drawn.
+        if let Some(screen) = &mut self.screen
+            && crate::screen::poll_built(&mut screen.nodes)
+        {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
         let Some(rx) = &self.loading else { return };
         match rx.try_recv() {
             Err(TryRecvError::Empty) => {
@@ -235,7 +239,14 @@ impl View {
                 self.loading = None;
                 self.loaded(loaded);
             }
-            Err(TryRecvError::Disconnected) => self.loading = None,
+            Err(TryRecvError::Disconnected) => {
+                // The thread panicked building it: say so, not a blank view.
+                self.loading = None;
+                if let Some(cur) = &self.current {
+                    let e = crate::screen::build_failed(&cur.source);
+                    self.loaded(Err(e));
+                }
+            }
         }
     }
 
@@ -507,5 +518,29 @@ fn set_page_url(loc: &Location) {
     }
     if let Ok(history) = window.history() {
         let _ = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&url.href()));
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_panicked_build_shows_an_error() {
+        let ctx = egui::Context::default();
+        let mut view = View::new(&PvManager::new(), Some(1.0));
+        view.current = Some(Location {
+            source: bob::Source::File("/x/a.bob".into()),
+            macros: Default::default(),
+        });
+        // The thread's sender dropped without sending, as when it panics.
+        let (_, rx) = std::sync::mpsc::channel();
+        view.loading = Some(rx);
+        view.poll_loading(&ctx);
+        assert!(!view.is_loading() && view.screen.is_none());
+        assert_eq!(
+            view.error.as_deref(),
+            Some("cannot read /x/a.bob: the build failed (see the log)")
+        );
     }
 }

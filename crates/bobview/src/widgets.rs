@@ -1954,8 +1954,14 @@ fn fetched(ui: &Ui, node: &Node) -> bool {
     node.loading && !crate::fetch::pending()
 }
 
+/// Show the display `node` embeds once its thread has built it, keeping
+/// the window repainting until then. It is never embedded again, so false.
 #[cfg(not(target_arch = "wasm32"))]
-fn fetched(_ui: &Ui, _node: &Node) -> bool {
+fn fetched(ui: &Ui, node: &mut Node) -> bool {
+    if node.poll_building(std::time::Duration::ZERO) {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(50));
+    }
     false
 }
 
@@ -1976,7 +1982,7 @@ fn embedded(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut Cx, id: Id) {
         let file = node.prop("file");
         let group = node.prop("group_name");
         let macros = node.macros.clone();
-        Builder { pvs: cx.pvs }.embed(node, &file, &macros, &group, cx.depth);
+        Builder::ui(cx.pvs).embed(node, &file, &macros, &group, cx.depth);
     }
     let w = node.w.clone();
     match node.embedded.as_mut() {
@@ -2037,10 +2043,10 @@ fn navtabs(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut Cx, id: Id) {
         }
     }
     if let Some(i) = clicked {
-        Builder { pvs: cx.pvs }.select_navtab(node, i, cx.depth);
+        Builder::ui(cx.pvs).select_navtab(node, i, cx.depth);
     }
     if fetched(ui, node) {
-        Builder { pvs: cx.pvs }.select_navtab(node, node.active_tab, cx.depth);
+        Builder::ui(cx.pvs).select_navtab(node, node.active_tab, cx.depth);
     }
     let body = if vertical {
         Rect::from_min_max(rect.min + Vec2::new(tw + gap, 0.0), rect.max)
@@ -2111,8 +2117,7 @@ mod tests {
         )
         .unwrap();
         let pvs = PvManager::new();
-        let screen =
-            crate::screen::Builder { pvs: &pvs }.screen(d, &bob::Macros::default(), None, 0);
+        let screen = crate::screen::Builder::new(&pvs).screen(d, &bob::Macros::default(), None, 0);
         let widget = |resize: i64| {
             bob::Display::parse(&format!(
                 "<display><widget type='embedded'><resize>{resize}</resize></widget></display>"
@@ -2139,8 +2144,7 @@ mod tests {
         for dir in ["", "/tmp", "file:///tmp"] {
             let mut d = bob::Display::parse(&actions(dir)).unwrap();
             d.source = Some(Source::Url("https://example.com/x.bob".into()));
-            let screen =
-                crate::screen::Builder { pvs: &pvs }.screen(d, &Macros::default(), None, 0);
+            let screen = crate::screen::Builder::new(&pvs).screen(d, &Macros::default(), None, 0);
             let node = &screen.nodes[0];
             let mut requests = Vec::new();
             let mut cx = Cx {
@@ -2513,7 +2517,7 @@ mod tests {
             </action></actions></widget></display>"#;
         let pvs = PvManager::new();
         let display = bob::Display::parse(xml).unwrap();
-        let screen = Builder { pvs: &pvs }.screen(display, &Macros::default(), None, 0);
+        let screen = Builder::new(&pvs).screen(display, &Macros::default(), None, 0);
         let node = &screen.nodes[0];
         let mut requests = Vec::new();
         let mut cx = Cx {
@@ -2547,7 +2551,7 @@ mod tests {
             </actions></widget></display>"#;
         let pvs = PvManager::new();
         let display = bob::Display::parse(xml).unwrap();
-        let screen = Builder { pvs: &pvs }.screen(display, &Macros::default(), None, 0);
+        let screen = Builder::new(&pvs).screen(display, &Macros::default(), None, 0);
         let node = &screen.nodes[0];
         let mut requests = Vec::new();
         let mut cx = Cx {
@@ -2597,7 +2601,7 @@ pv.setValue(pv_value);
             let pvs = PvManager::new();
             let mut display = bob::Display::parse(xml).unwrap();
             display.source = Some(Source::parse(source));
-            let screen = Builder { pvs: &pvs }.screen(display, &Macros::default(), None, 0);
+            let screen = Builder::new(&pvs).screen(display, &Macros::default(), None, 0);
             let node = &screen.nodes[0];
             let pv = node.pv.clone().unwrap();
             let mut requests = Vec::new();

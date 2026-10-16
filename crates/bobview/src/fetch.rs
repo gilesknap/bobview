@@ -28,6 +28,11 @@ struct Fetched {
 
 static CACHE: LazyLock<Mutex<HashMap<String, Fetched>>> = LazyLock::new(Default::default);
 
+/// Bumped by [`forget`], so a fetch started before a reload cannot put
+/// what it read back into the cache after it.
+#[cfg(not(target_arch = "wasm32"))]
+static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Read and parse the display at `source`.
 pub fn load(source: &Source) -> Result<Display, Error> {
     match source {
@@ -52,6 +57,8 @@ pub fn load(source: &Source) -> Result<Display, Error> {
 
 /// Drop every cached display, so the next load fetches it again.
 pub fn forget() {
+    #[cfg(not(target_arch = "wasm32"))]
+    GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     CACHE.lock().clear();
     #[cfg(target_arch = "wasm32")]
     web::FAILED.lock().clear();
@@ -84,7 +91,7 @@ mod native {
     use bob::{Error, Source};
     use ureq::ResponseExt;
 
-    use super::{CACHE, Fetched, MAX_SIZE};
+    use super::{CACHE, Fetched, GENERATION, MAX_SIZE};
 
     static AGENT: LazyLock<ureq::Agent> = LazyLock::new(|| {
         ureq::Agent::config_builder()
@@ -142,6 +149,7 @@ mod native {
         if let Some(fetched) = CACHE.lock().get(url).cloned() {
             return Ok(fetched);
         }
+        let generation = GENERATION.load(std::sync::atomic::Ordering::SeqCst);
         log::info!("fetching {url}");
         let fail = |why: String| Error::Fetch(url.to_string(), why);
         let mut resp = AGENT.get(url).call().map_err(|e| fail(describe(e)))?;
@@ -154,7 +162,12 @@ mod native {
             .map_err(|e| fail(describe(e)))?
             .into();
         let fetched = Fetched { url: served, text };
-        CACHE.lock().insert(url.to_string(), fetched.clone());
+        let mut cache = CACHE.lock();
+        // Forgotten while it was being fetched: it may be stale, so it is
+        // used this once but not kept.
+        if GENERATION.load(std::sync::atomic::Ordering::SeqCst) == generation {
+            cache.insert(url.to_string(), fetched.clone());
+        }
         Ok(fetched)
     }
 
@@ -259,12 +272,15 @@ mod web {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
 
     const DISPLAY: &str = r#"<display version="2.0.0"><name>Served</name></display>"#;
+
+    /// Held by tests that rely on what the cache holds, or that clear it.
+    pub(crate) static CACHE_USERS: Mutex<()> = Mutex::new(());
 
     /// Serve `DISPLAY` at /opi/a.bob and 404 elsewhere; returns the base URL
     /// and a count of requests handled.
@@ -304,6 +320,7 @@ mod tests {
 
     #[test]
     fn fetches_caches_and_reports_errors() {
+        let _cache = CACHE_USERS.lock();
         let (base, hits) = serve();
         let src = Source::parse(&format!("{base}/opi/a.bob"));
         load(&src).unwrap();
@@ -352,5 +369,43 @@ mod tests {
         let d = load(&Source::File(virt)).unwrap();
         assert_eq!(d.source, Some(Source::File(dir.join("x.bob"))));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_fetch_finishing_after_a_reload_is_not_cached() {
+        let _cache = CACHE_USERS.lock();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/a.bob", listener.local_addr().unwrap());
+        let (got, request) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap() > 2 {
+                    line.clear();
+                }
+                got.send(()).unwrap();
+                held.recv().unwrap();
+                let mut stream = stream;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{DISPLAY}",
+                    DISPLAY.len()
+                )
+                .unwrap();
+            }
+        });
+        let src = Source::parse(&url);
+        let loading = std::thread::spawn({
+            let src = src.clone();
+            move || load(&src).map(|d| d.name)
+        });
+        // A reload while the display is on its way.
+        request.recv().unwrap();
+        forget();
+        release.send(()).unwrap();
+        assert_eq!(loading.join().unwrap().unwrap(), "Served");
+        assert!(!CACHE.lock().contains_key(&url), "stale text cached");
     }
 }
