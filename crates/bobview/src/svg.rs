@@ -167,6 +167,11 @@ const INHERITED: &[&str] = &[
 /// primitives (and a filter image what it draws by its own reference).
 const PAINT_SERVERS: &[&str] = &["linearGradient", "radialGradient", "filter"];
 
+/// More vertices than usvg gives a rect, circle or ellipse. It converts
+/// these and lines, polylines, polygons and paths to paths, and puts
+/// markers on all of them (`convert_element_impl` in its `converter.rs`).
+const SHAPE_VERTICES: usize = 64;
+
 /// Properties holding references that are not inherited, but that an
 /// element may take from its parent by `inherit`.
 const NOT_INHERITED: [&str; 3] = ["clip-path", "mask", "filter"];
@@ -303,14 +308,15 @@ pub fn svg_cost(doc: &roxmltree::Document) -> Cost {
             list.sort_unstable();
             list.dedup();
         }
-        // Each vertex takes at least two characters to write.
-        if matches!(
-            node.tag_name().name(),
-            "path" | "line" | "polyline" | "polygon"
-        ) {
-            let text = |name| node.attribute(name).map_or(0, str::len);
-            r.vertices = (text("d") + text("points")) / 2 + 2;
-        }
+        // A generous bound: no vertex takes fewer characters to write than
+        // one, nor an arc fewer than the segments usvg splits it into, and
+        // a rect or an ellipse has fewer than `SHAPE_VERTICES`.
+        let text = |name| node.attribute(name).map_or(0, str::len);
+        r.vertices = match node.tag_name().name() {
+            "rect" | "circle" | "ellipse" => SHAPE_VERTICES,
+            "line" | "polyline" | "polygon" | "path" => 2 + text("d") + text("points"),
+            _ => 0,
+        };
     }
     // The element whose `NOT_INHERITED` property each element has, taking
     // its parent's by `inherit` (parents come first).
@@ -934,7 +940,7 @@ mod tests {
     #[test]
     fn long_reference_chains_are_refused_before_usvg_follows_them() {
         on_small_stack(|| {
-            for (kind, svg) in chains(5) {
+            for (kind, svg) in chains(4) {
                 assert!(parse(svg.as_bytes()).is_ok(), "{kind}");
             }
             for (kind, svg) in chains(3000) {
@@ -1030,6 +1036,28 @@ mod tests {
                     r#"<path d="M0 0{}" stroke="black" marker-mid="url(#xPREV)"/>"#,
                     "L1 1".repeat(20)
                 ),
+                r#"<marker id="xID">CONTENT</marker>"#,
+            ),
+            // Every shape is converted to a path that markers go on.
+            levels(
+                6,
+                3,
+                marker,
+                r#"<circle r="1" stroke="black" marker-mid="url(#xPREV)"/>"#,
+                r#"<marker id="xID">CONTENT</marker>"#,
+            ),
+            levels(
+                6,
+                3,
+                marker,
+                r#"<rect width="1" height="1" rx="0.5" stroke="black" marker-mid="url(#xPREV)"/>"#,
+                r#"<marker id="xID">CONTENT</marker>"#,
+            ),
+            levels(
+                6,
+                3,
+                marker,
+                r#"<ellipse rx="1" ry="2" stroke="black" marker-mid="url(#xPREV)"/>"#,
                 r#"<marker id="xID">CONTENT</marker>"#,
             ),
             levels(
