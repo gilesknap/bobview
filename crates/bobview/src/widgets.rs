@@ -1197,8 +1197,11 @@ fn entry_job(
     job
 }
 
+/// Put a widget at `rect`, clipped. The scope starts at `rect`, not at the
+/// cursor: one there would take in the space after the last widget each
+/// time, and grow the display's scrolled size below its bottom.
 fn put_clipped(ui: &mut Ui, rect: Rect, clip: Rect, widget: impl egui::Widget) -> Response {
-    ui.scope(|ui| {
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
         ui.set_clip_rect(clip.intersect(ui.clip_rect()));
         ui.put(rect, widget)
     })
@@ -2979,6 +2982,51 @@ mod tests {
         };
         assert_eq!(*source, Source::parse("../sub/ioc/BL01C-MO-01.bob"));
         assert_eq!(macros.get("P"), Some("BL01C-MO-01"));
+    }
+
+    #[test]
+    fn text_entries_and_sliders_take_no_space_below_the_display() {
+        // Each used to take the space from the cursor, below the display, so
+        // a display with many of them could scroll past its bottom.
+        let mut xml = String::from("<display><width>300</width><height>100</height>");
+        for (i, kind) in ["textentry", "spinner", "scaledslider"].iter().enumerate() {
+            for j in 0..4 {
+                xml += &format!(
+                    r#"<widget type="{kind}"><x>{}</x><y>{}</y><width>60</width><height>20</height></widget>"#,
+                    70 * j,
+                    30 * i
+                );
+            }
+        }
+        xml += "</display>";
+        let pvs = PvManager::new();
+        let display = bob::Display::parse(&xml).unwrap();
+        let mut screen = Builder::new(&pvs).screen(display, &Macros::default(), None, 0);
+        let ctx = egui::Context::default();
+        let mut used = None;
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let size = Vec2::new(screen.width as f32, screen.height as f32);
+            let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+            let mut requests = Vec::new();
+            let mut cx = Cx {
+                view: View {
+                    origin: rect.min,
+                    zoom: 1.0,
+                },
+                clip: rect,
+                pvs: &pvs,
+                requests: &mut requests,
+                depth: 0,
+                touch: false,
+                trends: &[],
+                window: WindowKey::Main,
+            };
+            draw_screen(ui, &mut screen, &mut cx, Id::new("display"));
+            used = Some((rect, ui.min_rect()));
+        });
+        out.textures_delta.clear();
+        let (rect, used) = used.unwrap();
+        assert_eq!(used, rect);
     }
 
     #[test]
