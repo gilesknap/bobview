@@ -157,9 +157,34 @@ fn lex(text: &str) -> Result<Vec<Tok>, String> {
 struct Parser {
     toks: Vec<Tok>,
     at: usize,
+    /// Nesting of brackets, `?:`, prefix operators and `^`, bounded by
+    /// `MAX_DEPTH`.
+    depth: usize,
 }
 
+/// Deepest nesting of brackets, `?:`, prefix operators and `^` a formula
+/// may have. The parser, the evaluator and `Drop` all recurse once per level,
+/// and a display from the web is not trusted to keep within the stack.
+const MAX_DEPTH: usize = 64;
+/// Most tokens a formula may have: a long chain (`1+1+1+...`) builds a deep
+/// left-leaning tree that the evaluator and `Drop` walk recursively.
+const MAX_TOKENS: usize = 1024;
+
 impl Parser {
+    /// `f`, one level deeper.
+    fn nested(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<Expr, String>,
+    ) -> Result<Expr, String> {
+        if self.depth >= MAX_DEPTH {
+            return Err("formula nests too deeply".into());
+        }
+        self.depth += 1;
+        let e = f(self);
+        self.depth -= 1;
+        e
+    }
+
     fn peek(&self) -> Option<&Tok> {
         self.toks.get(self.at)
     }
@@ -181,6 +206,10 @@ impl Parser {
     }
 
     fn cond(&mut self) -> Result<Expr, String> {
+        self.nested(Self::cond_inner)
+    }
+
+    fn cond_inner(&mut self) -> Result<Expr, String> {
         let c = self.binary(0)?;
         if !self.eat("?") {
             return Ok(c);
@@ -219,15 +248,15 @@ impl Parser {
 
     fn unary(&mut self) -> Result<Expr, String> {
         if self.eat("-") {
-            Ok(Expr::Neg(Box::new(self.unary()?)))
+            Ok(Expr::Neg(Box::new(self.nested(Self::unary)?)))
         } else if self.eat("+") {
-            self.unary()
+            self.nested(Self::unary)
         } else if self.eat("!") {
-            Ok(Expr::Not(Box::new(self.unary()?)))
+            Ok(Expr::Not(Box::new(self.nested(Self::unary)?)))
         } else {
             let base = self.primary()?;
             if self.eat("^") {
-                let exp = self.unary()?;
+                let exp = self.nested(Self::unary)?;
                 return Ok(Expr::Binary(Op::Pow, Box::new(base), Box::new(exp)));
             }
             Ok(base)
@@ -325,9 +354,14 @@ fn unary_fn(f: &str) -> Option<fn(f64) -> f64> {
 }
 
 fn parse(text: &str) -> Result<Expr, String> {
+    let toks = lex(text)?;
+    if toks.len() > MAX_TOKENS {
+        return Err(format!("formula has more than {MAX_TOKENS} tokens"));
+    }
     let mut p = Parser {
-        toks: lex(text)?,
+        toks,
         at: 0,
+        depth: 0,
     };
     let e = p.cond()?;
     match p.peek() {
@@ -826,6 +860,45 @@ mod tests {
         for text in ["1 +", "nope(1)", "pv(1, 2)", "(1", "'x", "1 $ 2"] {
             assert!(parse(text).is_err(), "{text}");
         }
+    }
+
+    #[test]
+    fn hostile_formulas_fail_to_parse_not_overflow() {
+        // On a known stack, so unbounded recursion fails this test instead
+        // of passing on a larger one. Release builds need a tenth of this
+        // for the deepest formulas allowed.
+        let deep = std::thread::Builder::new()
+            .stack_size(4 * 1024 * 1024)
+            .spawn(|| {
+                // Nested past the cap, both within the token limit and far
+                // beyond it.
+                for n in [100, 100_000] {
+                    for text in [
+                        format!("{}1{}", "(".repeat(n), ")".repeat(n)),
+                        format!("{}1", "-".repeat(n)),
+                        format!("{}1", "!".repeat(n)),
+                        format!("{}1", "+".repeat(n)),
+                        "2^".repeat(n) + "2",
+                        "1?".repeat(n) + "1" + &":1".repeat(n),
+                        "1?1:".repeat(n) + "1",
+                        "abs(".repeat(n) + "1" + &")".repeat(n),
+                    ] {
+                        assert!(parse(&text).is_err(), "{}", &text[..20]);
+                    }
+                }
+                // Long, flat formulas.
+                assert!(parse(&vec!["1"; 100_000].join("+")).is_err());
+                assert!(parse(&format!("max({})", vec!["1"; 100_000].join(","))).is_err());
+                // Reasonable nesting still parses.
+                let ok = format!("{}1{}", "(".repeat(30), ")".repeat(30));
+                assert_eq!(parse(&ok), Ok(Expr::Num(1.0)));
+                assert!(parse(&format!("{}1", "-".repeat(30))).is_ok());
+                // The longest chain allowed evaluates, and is dropped.
+                assert_eq!(num(&vec!["1"; 512].join("+")), 512.0);
+            })
+            .unwrap()
+            .join();
+        assert!(deep.is_ok());
     }
 
     #[test]

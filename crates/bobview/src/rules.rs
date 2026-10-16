@@ -661,7 +661,17 @@ fn tokenize(s: &str, lang: Lang) -> Option<Vec<Tok>> {
 
 fn parse(s: &str, lang: Lang) -> Option<Expr> {
     let toks = tokenize(s, lang)?;
-    let mut p = Parser { toks, pos: 0, lang };
+    // A long chain (`1+1+1+...`) builds a deep left-leaning tree that the
+    // evaluator and `Drop` walk recursively, so bound the length too.
+    if toks.len() > MAX_TOKENS {
+        return None;
+    }
+    let mut p = Parser {
+        toks,
+        pos: 0,
+        lang,
+        depth: 0,
+    };
     let e = p.or()?;
     (p.pos == p.toks.len()).then_some(e)
 }
@@ -670,7 +680,14 @@ struct Parser {
     toks: Vec<Tok>,
     pos: usize,
     lang: Lang,
+    /// Nesting of parentheses and prefix operators, bounded by `MAX_DEPTH`.
+    depth: usize,
 }
+
+/// Deepest nesting of `(`, `!` and `-` a rule expression may have.
+const MAX_DEPTH: usize = 64;
+/// Most tokens a rule expression may have.
+const MAX_TOKENS: usize = 1024;
 
 const COMPARISONS: &[&str] = &["==", "!=", "<", ">", "<=", ">="];
 
@@ -766,6 +783,16 @@ impl Parser {
     }
 
     fn unary(&mut self) -> Option<Expr> {
+        if self.depth >= MAX_DEPTH {
+            return None;
+        }
+        self.depth += 1;
+        let e = self.unary_inner();
+        self.depth -= 1;
+        e
+    }
+
+    fn unary_inner(&mut self) -> Option<Expr> {
         let tok = self.toks.get(self.pos)?.clone();
         self.pos += 1;
         let int = |n: i64| match self.lang {
@@ -848,6 +875,36 @@ mod tests {
 
     fn js(expr: &str, values: &[pv::Value]) -> Val {
         run_as(Lang::JavaScript, expr, values)
+    }
+
+    /// Run `f` on a thread with a small stack, so unbounded recursion fails
+    /// this test instead of passing on the test runner's larger stack.
+    fn small_stack<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
+        std::thread::Builder::new()
+            .stack_size(1024 * 1024)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    #[test]
+    fn hostile_expressions_are_rejected_not_overflowed() {
+        small_stack(|| {
+            for lang in [Lang::Python, Lang::JavaScript] {
+                let nested = format!("{}1{}", "(".repeat(5000), ")".repeat(5000));
+                assert!(parse(&nested, lang).is_none());
+                assert!(parse(&format!("{}1", "!".repeat(5000)), lang).is_none());
+                assert!(parse(&format!("{}1", "-".repeat(5000)), lang).is_none());
+                assert!(parse(&vec!["1"; 20000].join("+"), lang).is_none());
+                let calls = format!("{}1{}", "Math.abs(".repeat(5000), ")".repeat(5000));
+                assert!(parse(&calls, lang).is_none());
+                assert!(parse(&format!("max({})", vec!["1"; 20000].join(",")), lang).is_none());
+                // Reasonable nesting still works.
+                let ok = format!("{}1{}", "(".repeat(30), ")".repeat(30));
+                assert!(parse(&ok, lang).is_some());
+            }
+        });
     }
 
     #[test]

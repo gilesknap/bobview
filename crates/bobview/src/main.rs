@@ -21,6 +21,7 @@ mod screen;
 #[cfg(not(target_arch = "wasm32"))]
 mod snapshot;
 mod style;
+mod svg;
 mod symbol;
 mod tree;
 mod trend;

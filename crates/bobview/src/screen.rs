@@ -398,6 +398,9 @@ pub(crate) fn expand_for(w: &Widget, macros: &Macros, base: Option<&Source>, tex
     expand_props(w, macros, env, text, &Default::default())
 }
 
+/// Deepest chain of properties naming one another that is expanded.
+const MAX_PROP_DEPTH: usize = 16;
+
 /// The properties being expanded, and those already expanded.
 type Expanding = std::cell::RefCell<(
     Vec<String>,
@@ -408,18 +411,22 @@ type Expanding = std::cell::RefCell<(
 /// far in `state`. A widget property may name others, as BOY's rule PV
 /// `$(pv_name)` does with `$(name):STA` and the name
 /// `$(prefix)$(cell)S-VA-PIRG-01`; one that names itself, directly or not,
-/// or anything unknown or too long is left as written. Each is expanded
-/// once, so properties that name others several times don't take
-/// exponential time.
+/// or anything unknown, too long or naming others too deeply is left as
+/// written. Each is expanded once, so properties that name others several
+/// times don't take exponential time.
 fn expand_props(w: &Widget, macros: &Macros, env: bool, text: &str, state: &Expanding) -> String {
     bob::expand(text, &|name| {
         macros.get(name).map(str::to_string).or_else(|| {
             if let Some(value) = state.borrow().1.get(name) {
                 return value.clone();
             }
-            if state.borrow().0.iter().any(|a| a == name) {
+            // Each property named recurses, so a long chain of them must not
+            // exhaust the stack.
+            let expanding = state.borrow();
+            if expanding.0.len() >= MAX_PROP_DEPTH || expanding.0.iter().any(|a| a == name) {
                 return None;
             }
+            drop(expanding);
             let Some(prop) = w.text(name) else {
                 return env.then(|| env_var(name)).flatten();
             };
@@ -953,6 +960,35 @@ mod tests {
         assert_eq!(title(&d, &own), "On mine");
         d.source = Some(Source::parse("https://example.com/x.bob"));
         assert_eq!(title(&d, &Macros::default()), "On $(PATH)");
+    }
+
+    #[test]
+    fn long_chains_of_property_macros_do_not_overflow() {
+        // p0 names p1, which names p2 … : one level of recursion each.
+        let n = 100_000;
+        let props: String = (0..n)
+            .map(|i| format!("<p{i}>$(p{})</p{i}>", i + 1))
+            .collect();
+        let d = Display::parse(&format!(
+            "<display><widget type='label'>{props}<p{n}>x</p{n}></widget></display>"
+        ))
+        .unwrap();
+        let pvs = PvManager::new();
+        let s = Builder::new(&pvs).screen(d, &Macros::default(), None, 0);
+        let w = s.nodes[0].w.clone();
+        let expanded = std::thread::Builder::new()
+            .stack_size(1024 * 1024)
+            .spawn(move || {
+                let m = Macros::default();
+                (
+                    expand_for(&w, &m, None, "$(p0)"),
+                    expand_for(&w, &m, None, &format!("$(p{})", n - 3)),
+                )
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(expanded, ("$(p0)".to_string(), "x".to_string()));
     }
 
     #[test]
