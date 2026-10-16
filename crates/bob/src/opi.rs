@@ -693,6 +693,11 @@ fn xy_graph(el: &mut Element) {
         ("line_width", "line_width"),
         ("point_size", "point_size"),
         ("visible", "visible"),
+        // BOY plots the last `buffer_size` updates when concatenating;
+        // Phoebus has no such properties, so only bobview reads these.
+        ("concatenate_data", "concatenate_data"),
+        ("buffer_size", "buffer_size"),
+        ("update_mode", "update_mode"),
     ];
     // Counts are bounded (NaN is 0 as usize), so a bad file can't hang us.
     let axes = num(el, "axis_count").unwrap_or(2.0).clamp(1.0, MAX_COUNT) as usize;
@@ -2341,6 +2346,8 @@ widget.setPropertyValue("opi_file", pv0 + ".opi");"#,
             <trace_0_trace_color><color red="21" green="21" blue="196"/></trace_0_trace_color>
             <trace_1_y_pv>G2</trace_1_y_pv><trace_1_y_axis_index>2</trace_1_y_axis_index>
             <trace_1_trace_type>2</trace_1_trace_type><trace_1_point_style>9</trace_1_point_style>
+            <trace_1_concatenate_data>true</trace_1_concatenate_data>
+            <trace_1_buffer_size>250</trace_1_buffer_size><trace_1_update_mode>3</trace_1_update_mode>
             <trace_2_y_pv>unused</trace_2_y_pv>
             <plot_area_background_color><color red="255" green="255" blue="255"/></plot_area_background_color>
             <tooltip>$(trace_0_y_pv)</tooltip>
@@ -2365,6 +2372,10 @@ widget.setPropertyValue("opi_file", pv0 + ".opi");"#,
         assert_eq!(
             ["axis", "trace_type", "point_type"].map(|k| t[1].child_text(k)),
             [Some("1"), Some("0"), Some("4")]
+        );
+        assert_eq!(
+            ["concatenate_data", "buffer_size", "update_mode"].map(|k| t[1].child_text(k)),
+            [Some("true"), Some("250"), Some("3")]
         );
         assert_eq!(w.text("tooltip"), Some("$(traces[0].y_pv)"));
         assert_eq!(w.rules()[0].prop_id, "traces[1].visible");

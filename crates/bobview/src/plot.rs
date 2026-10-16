@@ -1,11 +1,15 @@
 //! The XY plot widget: array PVs drawn against their index or another array,
-//! with axes, grid and legend laid out as in Phoebus.
+//! with axes, grid and legend laid out as in Phoebus. A BOY XY graph's
+//! concatenating trace plots its PVs' last updates instead.
 
+use std::collections::VecDeque;
 use std::f32::consts::FRAC_PI_2;
+use std::sync::Arc;
 
 use bob::{Element, Widget};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Shape, Stroke, Vec2, epaint};
-use pv::{Pv, PvManager, PvState, Value};
+use parking_lot::Mutex;
+use pv::{Listener, Pv, PvManager, PvState, Value};
 
 use crate::axis::{self, Scale};
 use crate::screen::Node;
@@ -16,6 +20,132 @@ use crate::widgets::{alarm_border, fill, plain_pv_name};
 pub struct TracePvs {
     pub x: Option<Pv>,
     pub y: Option<Pv>,
+    /// The updates it has had, when it concatenates them.
+    history: Option<History>,
+}
+
+/// Samples kept by a concatenating trace, at most.
+const MAX_BUFFER: usize = 100_000;
+
+/// Which updates add to a concatenating trace, as BOY's `update_mode`:
+/// either PV's, both PVs' (once each has updated), the x PV's or the y PV's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum UpdateMode {
+    XOrY,
+    XAndY,
+    X,
+    Y,
+}
+
+/// A concatenating trace's last `size` points, as BOY plots with
+/// `concatenate_data`: each update appends the y PV's values, paired with
+/// the x PV's or, without one, plotted against their index.
+#[derive(Debug)]
+struct Buffer {
+    size: usize,
+    mode: UpdateMode,
+    has_x: bool,
+    /// The PVs' latest values, and whether each has updated since the last
+    /// append.
+    x: Option<Vec<f64>>,
+    y: Option<Vec<f64>>,
+    x_new: bool,
+    y_new: bool,
+    /// (x, y), x unused without an x PV.
+    points: VecDeque<(f64, f64)>,
+}
+
+impl Buffer {
+    fn new(size: usize, mode: UpdateMode, has_x: bool) -> Self {
+        Self {
+            size: size.clamp(1, MAX_BUFFER),
+            mode,
+            has_x,
+            x: None,
+            y: None,
+            x_new: false,
+            y_new: false,
+            points: VecDeque::new(),
+        }
+    }
+
+    /// Take in an update of the x PV (`is_x`) or the y PV: its numbers, or
+    /// `None` when it has none, which appends nothing.
+    fn update(&mut self, is_x: bool, v: Option<Vec<f64>>) {
+        if is_x {
+            (self.x, self.x_new) = (v, true);
+        } else {
+            (self.y, self.y_new) = (v, true);
+        }
+        let append = !self.has_x
+            || match self.mode {
+                UpdateMode::XOrY => true,
+                UpdateMode::XAndY => self.x_new && self.y_new,
+                UpdateMode::X => is_x,
+                UpdateMode::Y => !is_x,
+            };
+        let (Some(y), true) = (&self.y, append) else {
+            return;
+        };
+        if self.has_x {
+            let Some(x) = &self.x else { return };
+            self.points.extend(x.iter().copied().zip(y.iter().copied()));
+        } else {
+            self.points.extend(y.iter().map(|v| (0.0, *v)));
+        }
+        (self.x_new, self.y_new) = (false, false);
+        let extra = self.points.len().saturating_sub(self.size);
+        self.points.drain(..extra);
+    }
+
+    fn points(&self) -> Vec<(f64, f64)> {
+        if self.has_x {
+            self.points.iter().copied().collect()
+        } else {
+            let y: Vec<f64> = self.points.iter().map(|p| p.1).collect();
+            points(None, &y)
+        }
+    }
+}
+
+/// A concatenating trace's buffer, filled by its PVs' listeners.
+struct History {
+    /// Locked by the listeners while a PV's state is locked, so never read
+    /// a PV's state while holding this lock.
+    buffer: Arc<Mutex<Buffer>>,
+    _listeners: Vec<Listener>,
+}
+
+impl History {
+    /// The trace's history, if it concatenates (`concatenate_data`, from a
+    /// BOY XY graph) and has a y PV.
+    fn new(t: &Element, x: Option<&Pv>, y: Option<&Pv>) -> Option<Self> {
+        let t = Widget::from_element(t.clone());
+        let y = y.filter(|_| t.bool("concatenate_data") == Some(true))?;
+        let mode = match t.i64("update_mode") {
+            Some(1) => UpdateMode::XAndY,
+            Some(2) => UpdateMode::X,
+            Some(3) => UpdateMode::Y,
+            // X or Y is BOY's default; a trigger PV is not supported.
+            _ => UpdateMode::XOrY,
+        };
+        // BOY's default buffer size is 100.
+        let size = t.f64("buffer_size").unwrap_or(100.0).max(0.0) as usize;
+        let buffer = Arc::new(Mutex::new(Buffer::new(size, mode, x.is_some())));
+        let listen = |pv: &Pv, is_x: bool| {
+            let into = buffer.clone();
+            let listener: Listener =
+                Arc::new(move |s: &PvState| into.lock().update(is_x, numbers(s)));
+            pv.listen(&listener);
+            listener
+        };
+        let mut listeners = vec![listen(y, false)];
+        listeners.extend(x.map(|x| listen(x, true)));
+        Some(Self {
+            buffer,
+            _listeners: listeners,
+        })
+    }
 }
 
 fn trace_elements(w: &Widget) -> Vec<&Element> {
@@ -35,10 +165,9 @@ pub fn subscribe(w: &Widget, expand: &dyn Fn(&str) -> String, pvs: &PvManager) -
                     .filter(|n| !n.trim().is_empty())
                     .map(|n| pvs.subscribe(&n))
             };
-            TracePvs {
-                x: pv("x_pv"),
-                y: pv("y_pv"),
-            }
+            let (x, y) = (pv("x_pv"), pv("y_pv"));
+            let history = History::new(t, x.as_ref(), y.as_ref());
+            TracePvs { x, y, history }
         })
         .collect()
 }
@@ -208,13 +337,17 @@ pub(crate) fn traces(node: &Node, z: f32) -> Vec<Trace> {
             let t = Widget::from_element((*el).clone());
             let pvs = node.traces.get(i);
             let data = |pv: Option<&Pv>| pv.and_then(|p| numbers(&p.state()));
-            let y = data(pvs.and_then(|p| p.y.as_ref()));
-            let x = data(pvs.and_then(|p| p.x.as_ref()));
-            let has_x = pvs.is_some_and(|p| p.x.is_some());
-            let points = match (y, has_x) {
-                (Some(y), false) => points(None, &y),
-                (Some(y), true) => x.map(|x| points(Some(&x), &y)).unwrap_or_default(),
-                (None, _) => Vec::new(),
+            let points = if let Some(h) = pvs.and_then(|p| p.history.as_ref()) {
+                h.buffer.lock().points()
+            } else {
+                let y = data(pvs.and_then(|p| p.y.as_ref()));
+                let x = data(pvs.and_then(|p| p.x.as_ref()));
+                let has_x = pvs.is_some_and(|p| p.x.is_some());
+                match (y, has_x) {
+                    (Some(y), false) => points(None, &y),
+                    (Some(y), true) => x.map(|x| points(Some(&x), &y)).unwrap_or_default(),
+                    (None, _) => Vec::new(),
+                }
             };
             Trace {
                 name: t.text("name").map(|n| expand(node, n)).unwrap_or_default(),
@@ -823,6 +956,56 @@ mod tests {
         // A missing axis gets the Phoebus defaults.
         let d = axis_cfg(None, "X", &n, 1.0);
         assert_eq!((d.title.as_str(), d.range), ("X", (0.0, 100.0)));
+    }
+
+    #[test]
+    fn a_concatenating_trace_plots_its_last_updates_against_their_index() {
+        // A BOY XY graph's history of a scalar PV, as translated from .opi.
+        let d = Display::parse(
+            r#"<display><widget type="xyplot"><traces><trace>
+              <y_pv>loc://concat_test(1)</y_pv><concatenate_data>true</concatenate_data>
+              <buffer_size>3</buffer_size></trace>
+              <trace><y_pv>loc://concat_test</y_pv></trace></traces>
+            </widget></display>"#,
+        )
+        .unwrap();
+        let pvs = PvManager::new();
+        let s = crate::screen::Builder::new(&pvs).screen(d, &Macros::default(), None, 0);
+        let n = &s.nodes[0];
+        let pv = n.traces[0].y.as_ref().unwrap();
+        for v in ["2", "3", "4"] {
+            pv.write(v);
+        }
+        let t = traces(n, 1.0);
+        assert_eq!(t[0].points, vec![(0.0, 2.0), (1.0, 3.0), (2.0, 4.0)]);
+        // Without concatenate_data (as in Phoebus), only the current value.
+        assert_eq!(t[1].points, vec![(0.0, 4.0)]);
+    }
+
+    #[test]
+    fn buffers_append_on_their_update_mode() {
+        let mut b = Buffer::new(4, UpdateMode::Y, true);
+        b.update(true, Some(vec![10.0]));
+        assert!(b.points().is_empty());
+        b.update(false, Some(vec![1.0]));
+        b.update(true, Some(vec![20.0]));
+        b.update(false, Some(vec![2.0]));
+        assert_eq!(b.points(), vec![(10.0, 1.0), (20.0, 2.0)]);
+        // Arrays append each element, and the oldest go.
+        let mut b = Buffer::new(4, UpdateMode::Y, false);
+        b.update(false, Some(vec![1.0]));
+        b.update(false, None);
+        b.update(false, Some(vec![2.0, 3.0, 4.0, 5.0]));
+        assert_eq!(
+            b.points(),
+            vec![(0.0, 2.0), (1.0, 3.0), (2.0, 4.0), (3.0, 5.0)]
+        );
+        let mut b = Buffer::new(10, UpdateMode::XAndY, true);
+        b.update(true, Some(vec![1.0]));
+        b.update(true, Some(vec![2.0]));
+        b.update(false, Some(vec![5.0]));
+        b.update(false, Some(vec![6.0]));
+        assert_eq!(b.points(), vec![(2.0, 5.0)]);
     }
 
     #[test]
