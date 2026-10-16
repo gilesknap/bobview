@@ -268,6 +268,10 @@ pub fn svg_cost(doc: &roxmltree::Document) -> Cost {
             url_ids(value, &mut names);
             to.extend(names.iter().filter_map(|n| ids.get(n)));
         };
+        // The ids each property names. A property set several times (by
+        // attribute, `style` and style sheet) has one value in the end, but
+        // usvg converts what different properties name once for each.
+        let mut by_name: HashMap<&str, Vec<usize>> = HashMap::new();
         for (name, value) in props.into_iter().filter(|(_, v)| relevant(v)) {
             let k = NOT_INHERITED.iter().position(|n| *n == name);
             if inherit(value) {
@@ -276,21 +280,33 @@ pub fn svg_cost(doc: &roxmltree::Document) -> Cost {
                 }
                 continue;
             }
-            // usvg draws a start and an end marker once a path, like a fill,
-            // and a middle one at each vertex between.
-            match name {
-                "fill" | "stroke" | "marker-start" | "marker-end" => named(value, &mut r.paint),
-                "marker-mid" => named(value, &mut r.markers),
-                "marker" => {
-                    named(value, &mut r.paint);
-                    named(value, &mut r.markers);
-                }
-                _ => named(value, &mut r.other),
-            }
             if let Some(k) = k {
                 named(value, &mut r.not_inherited[k]);
             }
+            named(value, by_name.entry(name).or_default());
         }
+        let mut unknown = Vec::new();
+        for (name, mut list) in by_name {
+            list.sort_unstable();
+            list.dedup();
+            // usvg draws a start and an end marker once a path, like a fill,
+            // and a middle one at each vertex between.
+            match name {
+                "fill" | "stroke" | "marker-start" | "marker-end" => r.paint.extend(list),
+                "marker-mid" => r.markers.extend(list),
+                "marker" => {
+                    r.paint.extend(&list);
+                    r.paint.extend(&list);
+                    r.markers.extend(list);
+                }
+                _ if NOT_INHERITED.contains(&name) => r.other.extend(list),
+                // usvg follows no other property, so these lead nowhere new.
+                _ => unknown.extend(list),
+            }
+        }
+        unknown.sort_unstable();
+        unknown.dedup();
+        r.other.extend(unknown);
         if HREF_ELEMENTS.contains(&node.tag_name().name()) {
             for a in node.attributes().filter(|a| a.name() == "href") {
                 if let Some((_, id)) = a.value().split_once('#') {
@@ -298,10 +314,9 @@ pub fn svg_cost(doc: &roxmltree::Document) -> Cost {
                 }
             }
         }
-        for list in [&mut r.href, &mut r.paint, &mut r.markers, &mut r.other] {
-            list.sort_unstable();
-            list.dedup();
-        }
+        // usvg follows one `href` (or `xlink:href`).
+        r.href.sort_unstable();
+        r.href.dedup();
         // A generous bound on the vertices middle markers go on: each takes
         // at least two characters to write (usvg puts none on a close), an
         // arc more than twice the segments usvg splits it into, and a rect
@@ -1053,6 +1068,28 @@ mod tests {
                     "L1 1".repeat(20)
                 ),
                 r#"<marker id="xID">CONTENT</marker>"#,
+            ),
+            // Different properties naming the same thing convert it twice.
+            levels(
+                20,
+                1,
+                marker,
+                r#"<path d="M0 0L1 1" stroke="black" marker-start="url(#xPREV)" marker-end="url(#xPREV)"/>"#,
+                r#"<marker id="xID">CONTENT</marker>"#,
+            ),
+            levels(
+                20,
+                1,
+                marker,
+                r#"<path d="M0 0L1 1" stroke="black" marker="url(#xPREV)"/>"#,
+                r#"<marker id="xID">CONTENT</marker>"#,
+            ),
+            levels(
+                20,
+                1,
+                r#"<pattern id="x0" width="1" height="1" patternContentUnits="objectBoundingBox"><rect width="1" height="1"/></pattern>"#,
+                r#"<rect width="1" height="1" fill="url(#xPREV)" stroke="url(#xPREV)"/>"#,
+                r#"<pattern id="xID" width="1" height="1" patternContentUnits="objectBoundingBox">CONTENT</pattern>"#,
             ),
             // Every shape is converted to a path that markers go on.
             levels(
