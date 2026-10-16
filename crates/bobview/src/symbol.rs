@@ -9,13 +9,14 @@
 //! widget keeps its own texture at the size it is drawn.
 
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock};
 
 use bob::Source;
 use eframe::egui::{
     self, Align2, Color32, ColorImage, CornerRadius, FontId, Id, Mesh, Pos2, Rect, Response, Sense,
     TextureHandle, TextureOptions, Vec2,
 };
+use parking_lot::Mutex;
 use pv::{PvState, Value};
 use resvg::{tiny_skia, usvg};
 
@@ -76,7 +77,7 @@ static QUEUE: LazyLock<Mutex<std::sync::mpsc::Sender<Job>>> = LazyLock::new(|| {
         let rx = rx.clone();
         std::thread::spawn(move || {
             loop {
-                let job = rx.lock().unwrap().recv();
+                let job = rx.lock().recv();
                 match job {
                     Ok(job) => load(job),
                     Err(_) => break,
@@ -95,7 +96,7 @@ struct Job {
 
 /// Drop every image, loaded or loading, so they are read again on a reload.
 pub fn forget() {
-    let mut images = IMAGES.lock().unwrap();
+    let mut images = IMAGES.lock();
     images.entries.clear();
     images.generation += 1;
 }
@@ -105,7 +106,6 @@ pub fn forget() {
 pub fn loading() -> bool {
     IMAGES
         .lock()
-        .unwrap()
         .entries
         .values()
         .any(|e| matches!(e, Entry::Loading))
@@ -114,7 +114,7 @@ pub fn loading() -> bool {
 /// The image at `source`: `Some(Ok)` when loaded, `Some(Err)` when it cannot
 /// be, and `None` while it loads (a repaint follows when it has).
 fn image(ctx: &egui::Context, source: &Source) -> Option<Result<Image, ()>> {
-    let mut images = IMAGES.lock().unwrap();
+    let mut images = IMAGES.lock();
     match images.entries.get(source) {
         Some(Entry::Ready(img)) => return Some(Ok(img.clone())),
         Some(Entry::Failed) => return Some(Err(())),
@@ -129,7 +129,7 @@ fn image(ctx: &egui::Context, source: &Source) -> Option<Result<Image, ()>> {
     };
     drop(images);
     #[cfg(not(target_arch = "wasm32"))]
-    let _ = QUEUE.lock().unwrap().send(job);
+    let _ = QUEUE.lock().send(job);
     // A browser has one thread: fetch without blocking, then decode.
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_futures::spawn_local(async move {
@@ -165,7 +165,7 @@ fn finish(job: Job, data: Result<Vec<u8>, bob::Error>) {
         }
     };
     let entry = std::panic::catch_unwind(read).unwrap_or(Entry::Failed);
-    let mut images = IMAGES.lock().unwrap();
+    let mut images = IMAGES.lock();
     if images.generation == job.generation {
         images.entries.insert(job.source, entry);
     }

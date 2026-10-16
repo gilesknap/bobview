@@ -174,7 +174,7 @@ fn convert(v: &EpicsValue) -> Value {
         E::Long(x) => Value::Long(*x as i64),
         E::Double(x) => Value::Double(*x),
         E::Int64(x) => Value::Long(*x),
-        E::UInt64(x) => Value::Long(*x as i64),
+        E::UInt64(x) => Value::from_u64(*x),
         E::UShort(x) => Value::Long(*x as i64),
         E::ULong(x) => Value::Long(*x as i64),
         E::UChar(x) => Value::Long(*x as i64),
@@ -185,7 +185,7 @@ fn convert(v: &EpicsValue) -> Value {
         E::LongArray(a) => longs(a),
         E::CharArray(a) => longs(a),
         E::Int64Array(a) => longs(a),
-        E::UInt64Array(a) => Value::LongArray(a.iter().map(|x| *x as i64).collect()),
+        E::UInt64Array(a) => Value::from_u64s(a),
         E::UShortArray(a) => longs(a),
         E::ULongArray(a) => longs(a),
         E::UCharArray(a) => longs(a),
@@ -269,5 +269,18 @@ mod tests {
             char_wf.0,
             Some(1)
         ));
+    }
+
+    #[test]
+    fn unsigned_64_bit_values_never_wrap_negative() {
+        assert_eq!(convert(&EpicsValue::UInt64(7)), Value::Long(7));
+        assert_eq!(
+            convert(&EpicsValue::UInt64(u64::MAX)),
+            Value::Double(u64::MAX as f64)
+        );
+        assert_eq!(
+            convert(&EpicsValue::UInt64Array(vec![1, u64::MAX].into())),
+            Value::DoubleArray(Arc::from([1.0, u64::MAX as f64]))
+        );
     }
 }
