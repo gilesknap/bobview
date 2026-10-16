@@ -10,6 +10,7 @@
 //! | `pva://`  | PV Access                               |
 //! | `loc://`  | local PVs held in this process          |
 //! | `sim://`  | simulated signals (sine, ramp, noise …) |
+//! | `=`, `eq://` | formulas over other PVs              |
 //!
 //! In a browser (wasm32) there is no runtime: `sim://` runs on the page's
 //! event loop, and `ca://` and `pva://` PVs come over a PV Web Socket
@@ -17,6 +18,7 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 mod ca;
+mod formula;
 mod local;
 mod name;
 mod origin;
@@ -232,6 +234,9 @@ struct Entry {
     name: PvName,
     shared: Arc<Shared>,
     task: Option<Task>,
+    /// A formula's inputs, followed for as long as it is held.
+    #[cfg_attr(not(test), allow(dead_code, reason = "only held"))]
+    formula: Option<Arc<formula::Formula>>,
 }
 
 impl Drop for Entry {
@@ -528,16 +533,32 @@ impl PvManager {
             log::warn!("{}: PV name has an undefined macro", name.pv);
         }
 
-        let (shared, task) = match name.scheme {
-            Scheme::Loc => (self.local(&name), None),
+        let shared = || Shared::new(&name, self.inner.notify.clone(), self.inner.ctl.clone());
+        let (shared, task, formula) = match name.scheme {
+            Scheme::Loc => (self.local(&name), None, None),
+            Scheme::Formula => {
+                let shared = shared();
+                let f = formula::Formula::new(&name, shared.clone(), Arc::downgrade(&self.inner));
+                (shared, None, Some(f))
+            }
             _ => {
-                let shared = Shared::new(&name, self.inner.notify.clone(), self.inner.ctl.clone());
+                let shared = shared();
                 let task = self.spawn_backend(&name, shared.clone());
-                (shared, task)
+                (shared, task, None)
             }
         };
-        let entry = Arc::new(Entry { name, shared, task });
+        let entry = Arc::new(Entry {
+            name,
+            shared,
+            task,
+            formula: formula.clone(),
+        });
         entries.insert(key, Arc::downgrade(&entry));
+        // Its inputs are subscribed to with the entries unlocked.
+        drop(entries);
+        if let Some(f) = formula {
+            f.start();
+        }
         Pv(entry)
     }
 
@@ -559,7 +580,7 @@ impl PvManager {
         Some(match name.scheme {
             Scheme::Sim => pvws::spawn(sim::run(name.clone(), shared)),
             Scheme::Ca | Scheme::Pva => pvws::subscribe(name, shared),
-            Scheme::Loc => unreachable!("local PVs have no task"),
+            Scheme::Loc | Scheme::Formula => unreachable!("local PVs and formulas have no task"),
         })
     }
 
@@ -591,7 +612,7 @@ impl PvManager {
                     pva::run(client, &pv, shared).await
                 }))
             }
-            Scheme::Loc => unreachable!("local PVs have no task"),
+            Scheme::Loc | Scheme::Formula => unreachable!("local PVs and formulas have no task"),
         }
     }
 }
@@ -694,6 +715,7 @@ mod tests {
             name,
             shared,
             task: None,
+            formula: None,
         };
         (Pv(Arc::new(entry)), rx)
     }
