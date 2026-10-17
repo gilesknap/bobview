@@ -35,7 +35,8 @@ instead of fitting the window.
   in a terminal then pastes it, and one on a
   [trend](../how-to/trends.md) or in
   [archiveview](https://github.com/gilesknap/archiveview) plots it (a
-  Channel Access or PV Access name). The
+  Channel Access, PV Access, `loc://` or `sim://` name; for a formula use
+  **Trend**). The
   widget flashes and the status line says "Copied *name*". See
   [Copying a PV name](#copying-a-pv-name).
 - On a touch screen, pinch to zoom.
