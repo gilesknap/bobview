@@ -217,7 +217,7 @@ fn draw_node(ui: &mut Ui, node: &mut Node, cx: &mut Cx, id: Id) {
             None
         }
         "stripchart" => {
-            crate::trend::draw_stripchart(&painter, node, rect, z);
+            crate::stripchart::draw_stripchart(&painter, node, rect, z);
             None
         }
         "meter" => {

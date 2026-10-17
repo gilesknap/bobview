@@ -12,6 +12,8 @@ use bob::{Macros, Source};
 use eframe::egui::{Pos2, Rect, Vec2};
 use serde::{Deserialize, Serialize};
 
+use archiveview::view::{Range, TraceView, YAxis};
+
 use crate::app::Location;
 
 /// The layout restored at startup.
@@ -35,12 +37,18 @@ pub struct Layout {
 /// A trend window of a layout.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TrendLayout {
-    /// The PVs plotted, in order.
+    /// The PVs plotted, in order. Also in `view`: written for older
+    /// bobviews, and all a layout from before `view` has.
     pub pvs: Vec<String>,
-    /// The seconds shown.
+    /// The seconds shown, as for `pvs`.
     pub span: f64,
+    /// A log scale, as for `pvs`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub log: bool,
+    /// What the plot shows: PVs, time range and value axes (see
+    /// [`TrendLayout::view`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<archiveview::View>,
     /// As for a display window.
     #[serde(default)]
     pub position: Option<[f32; 2]>,
@@ -213,13 +221,56 @@ impl WindowLayout {
 }
 
 impl TrendLayout {
-    pub fn new(pvs: Vec<String>, (span, log): (f64, bool), geometry: Geometry) -> Self {
+    pub fn new(view: archiveview::View, geometry: Geometry) -> Self {
+        let span = match &view.range {
+            Range::Relative { secs } => *secs,
+            Range::Absolute { start, end } => {
+                match (
+                    archiveview::view::parse_time(start),
+                    archiveview::view::parse_time(end),
+                ) {
+                    (Some(a), Some(b)) if b > a => b - a,
+                    _ => 3600.0,
+                }
+            }
+        };
         Self {
-            pvs,
+            pvs: view.pvs.iter().map(|t| t.name.clone()).collect(),
             span,
-            log,
+            log: view.y.log,
+            view: Some(view),
             position: geometry.position.map(|p| [p.x, p.y]),
             size: geometry.size.map(|s| [s.x, s.y]),
+        }
+    }
+
+    /// What the plot shows: as saved, or for a layout from before trends
+    /// were archiveview plots, its PVs over the last `span` seconds (live),
+    /// on a log scale if it was.
+    pub fn view(&self) -> archiveview::View {
+        if let Some(view) = &self.view {
+            return view.clone();
+        }
+        let span = if self.span.is_finite() && self.span > 0.0 {
+            self.span
+        } else {
+            600.0
+        };
+        archiveview::View {
+            pvs: (self.pvs.iter())
+                .map(|name| TraceView {
+                    name: name.clone(),
+                    color: None,
+                    visible: true,
+                    axis: None,
+                })
+                .collect(),
+            range: Range::Relative { secs: span },
+            y: YAxis {
+                log: self.log,
+                ..YAxis::default()
+            },
+            ..archiveview::View::default()
         }
     }
 
@@ -420,9 +471,32 @@ pub struct Settings {
     /// Save the default layout when bobview exits.
     #[serde(default)]
     pub save_default_on_exit: bool,
+    /// The Archiver Appliance trends fetch history from: the last given
+    /// with `--archiver` or picked in a trend's archiver pill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archiver_url: Option<String>,
+    /// The archivers used, newest first, which the pill offers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_archivers: Vec<String>,
 }
 
+/// The most archivers [`Settings::recent_archivers`] keeps.
+const MAX_RECENT_ARCHIVERS: usize = 8;
+
 impl Settings {
+    /// Make `archiver` (a retrieval URL, or none) the one to use, and the
+    /// newest of the recent ones. True if that changed anything.
+    pub fn remember_archiver(&mut self, archiver: Option<&str>) -> bool {
+        let before = (self.archiver_url.clone(), self.recent_archivers.clone());
+        self.archiver_url = archiver.map(str::to_string);
+        if let Some(url) = archiver {
+            self.recent_archivers.retain(|u| u != url);
+            self.recent_archivers.insert(0, url.to_string());
+            self.recent_archivers.truncate(MAX_RECENT_ARCHIVERS);
+        }
+        before != (self.archiver_url.clone(), self.recent_archivers.clone())
+    }
+
     pub fn load() -> Self {
         config_dir()
             .and_then(|d| std::fs::read_to_string(d.join("settings.json")).ok())
@@ -477,11 +551,16 @@ mod tests {
         let layout = Layout::new(
             vec![first, second],
             vec![TrendLayout::new(
-                vec![
-                    "ca://SR-DI-DCCT-01:SIGNAL".into(),
-                    "pva://BL01C:TEMP".into(),
-                ],
-                (3600.0, true),
+                archiveview::View {
+                    pvs: ["ca://SR-DI-DCCT-01:SIGNAL", "pva://BL01C:TEMP"]
+                        .map(trace)
+                        .into(),
+                    y: YAxis {
+                        log: true,
+                        ..YAxis::default()
+                    },
+                    ..archiveview::View::default()
+                },
                 Geometry {
                     position: Some(Pos2::new(200.0, 300.0)),
                     size: Some(Vec2::new(640.0, 420.0)),
@@ -492,6 +571,12 @@ mod tests {
         assert!(text.contains("\"position\": null"), "{text}");
         assert!(text.contains("\"zoom\": \"fit\""), "{text}");
         assert!(text.contains("\"span\": 3600.0"), "{text}");
+        // Older bobviews read a trend's PVs, span and log scale.
+        assert!(text.contains("\"log\": true"), "{text}");
+        assert!(
+            text.contains("\"pvs\": [\n        \"ca://SR-DI-DCCT-01:SIGNAL\""),
+            "{text}"
+        );
         // Older bobviews read the main window's pin as multi-window mode.
         assert!(text.contains("\"multi_window\": true"), "{text}");
         assert!(text.contains("\"pinned\": false"), "{text}");
@@ -562,6 +647,50 @@ mod tests {
             }
         );
         assert!(!empty.log && empty.position.is_none() && empty.size.is_none());
+        // From before trends were archiveview plots: the PVs, live over
+        // the span, with the log scale for the value axes.
+        let view = rf.view();
+        assert_eq!(view.pvs, [trace("ca://SR-DI-DCCT-01:SIGNAL")]);
+        assert_eq!(view.range, Range::Relative { secs: 60.0 });
+        assert!(view.y.log && view.y.autoscale && view.axes.is_empty());
+        assert_eq!(view.archiver, None);
+        assert!(empty.view().pvs.is_empty() && !empty.view().y.log);
+    }
+
+    #[test]
+    fn reads_trend_views() {
+        let text = r#"{
+          "version": 1,
+          "windows": [],
+          "trends": [
+            { "pvs": ["A"], "span": 7200, "position": null, "size": [800, 500],
+              "view": { "version": 1, "pvs": [{ "name": "A", "axis": 0 }, { "name": "B", "visible": false }],
+                        "range": { "kind": "absolute", "start": "2026-10-17T09:00:00Z", "end": "2026-10-17T11:00:00Z" },
+                        "y": { "autoscale": false, "min": 0, "max": 300 } } }
+          ]
+        }"#;
+        let layout: Layout = serde_json::from_str(text).unwrap();
+        let view = layout.trends[0].view();
+        // The view wins over the older fields.
+        assert_eq!(view.pvs.len(), 2);
+        assert!(!view.pvs[1].visible);
+        assert!(matches!(view.range, Range::Absolute { .. }));
+        assert_eq!((view.y.min, view.y.max), (Some(0.0), Some(300.0)));
+        // And saved again, the older fields say what an older bobview can
+        // show: the PVs, and a fixed range's length.
+        let again = TrendLayout::new(view.clone(), Geometry::default());
+        assert_eq!(again.pvs, ["A", "B"]);
+        assert_eq!(again.span, 7200.0);
+        assert_eq!(again.view(), view);
+    }
+
+    fn trace(name: &str) -> TraceView {
+        TraceView {
+            name: name.into(),
+            color: None,
+            visible: true,
+            axis: None,
+        }
     }
 
     #[test]

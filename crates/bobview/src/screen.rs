@@ -93,7 +93,7 @@ pub struct Node {
     /// The x and y PVs of each trace of an XY plot.
     pub traces: Vec<crate::plot::TracePvs>,
     /// The samples of each trace of a strip chart.
-    pub series: Vec<Option<crate::trend::Series>>,
+    pub series: Vec<Option<crate::stripchart::Series>>,
     /// The vacuum-space link field that points this widget at a group.
     pub link: Option<crate::group_link::Link>,
     /// What the load that made this node may still build.
@@ -879,7 +879,7 @@ impl Builder<'_> {
                 node.series = node
                     .traces
                     .iter()
-                    .map(|t| t.y.clone().map(crate::trend::Series::new))
+                    .map(|t| t.y.clone().map(crate::stripchart::Series::new))
                     .collect();
             }
             "navtabs" => {

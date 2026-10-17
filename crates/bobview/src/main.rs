@@ -45,6 +45,7 @@ mod screen;
 mod selection;
 #[cfg(not(target_arch = "wasm32"))]
 mod snapshot;
+mod stripchart;
 mod style;
 mod svg;
 mod symbol;
@@ -74,7 +75,9 @@ project/module/screen.opi) finds the linked files. A BOY .opi screen beside
 a DLS runcss.sh launcher is opened through the links that script gives
 CS-Studio, with no .project or -p needed.
 PVs without a prefix use Channel Access; EPICS_CA_ADDR_LIST and
-EPICS_CA_NAME_SERVERS select the IOCs. Set BOBVIEW_LOG=debug for more output.";
+EPICS_CA_NAME_SERVERS select the IOCs. Trends fetch history from the
+Archiver Appliance given by --archiver, else BOBVIEW_ARCHIVER, else the
+last one used. Set BOBVIEW_LOG=debug for more output.";
 
 /// A lean viewer for Phoebus .bob displays (and CS-Studio BOY .opi).
 #[cfg(not(target_arch = "wasm32"))]
@@ -115,6 +118,15 @@ struct Cli {
     /// nothing
     #[arg(long)]
     read_only: bool,
+    /// The EPICS Archiver Appliance that trends fetch history from, e.g.
+    /// http://archiver:17668 (/retrieval is added); remembered for later
+    /// runs. Without one (nor BOBVIEW_ARCHIVER), trends are live only
+    #[arg(long, value_name = "URL", value_parser = parse_archiver)]
+    archiver: Option<archiveview::ArchiverClient>,
+    /// No archiver this run, even if BOBVIEW_ARCHIVER or the settings name
+    /// one: trends are live only
+    #[arg(long, conflicts_with = "archiver")]
+    no_archiver: bool,
     /// Restore the saved window layout NAME
     #[arg(long, value_name = "NAME")]
     layout: Option<String>,
@@ -199,6 +211,40 @@ fn parse_zoom(text: &str) -> Result<f32, String> {
         .ok()
         .filter(|z| (0.2..=5.0).contains(z))
         .ok_or_else(|| format!("expected a factor from 0.2 to 5, not {text:?}"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_archiver(text: &str) -> Result<archiveview::ArchiverClient, String> {
+    archiveview::ArchiverClient::new(text).map_err(|e| e.to_string())
+}
+
+/// The archiver trends use: `--archiver`, else none with `--no-archiver`,
+/// else `BOBVIEW_ARCHIVER` (`env`), else the one the settings remember
+/// (`saved`); and whether to remember it, as only `--archiver`'s is.
+#[cfg(not(target_arch = "wasm32"))]
+fn choose_archiver(
+    given: Option<archiveview::ArchiverClient>,
+    none: bool,
+    env: Option<&str>,
+    saved: Option<&str>,
+) -> (Option<archiveview::ArchiverClient>, bool) {
+    use archiveview::ArchiverClient;
+    if given.is_some() {
+        return (given, true);
+    }
+    if none {
+        return (None, false);
+    }
+    let from = |what: &str, url: &str| {
+        ArchiverClient::new(url)
+            .inspect_err(|e| log::warn!("{what}: {e}"))
+            .ok()
+    };
+    let env = env
+        .filter(|u| !u.trim().is_empty())
+        .and_then(|u| from("BOBVIEW_ARCHIVER", u));
+    let archiver = env.or_else(|| saved.and_then(|u| from("the saved archiver", u)));
+    (archiver, false)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -363,6 +409,16 @@ fn run(cli: Cli, clicks: Vec<(egui::Pos2, egui::PointerButton)>) -> Result<(), F
         })
         .map(|source| app::Location { source, macros });
 
+    let (archiver, remember) = choose_archiver(
+        cli.archiver,
+        cli.no_archiver,
+        std::env::var("BOBVIEW_ARCHIVER").ok().as_deref(),
+        layout::Settings::load().archiver_url.as_deref(),
+    );
+    if let Some(a) = &archiver {
+        log::info!("trend history from {}", a.base());
+    }
+
     if let Some(out) = cli.snapshot {
         let start = start.ok_or_else(|| Failure::usage("--snapshot needs a display file"))?;
         let opts = snapshot::Options {
@@ -374,6 +430,7 @@ fn run(cli: Cli, clicks: Vec<(egui::Pos2, egui::PointerButton)>) -> Result<(), F
             clicks,
             settle: std::time::Duration::from_secs_f64(cli.settle),
             read_only: cli.read_only,
+            archiver,
         };
         return snapshot::run(start, &opts, &out)
             .map_err(|e| Failure::failed(format!("snapshot failed: {e}")));
@@ -403,6 +460,7 @@ fn run(cli: Cli, clicks: Vec<(egui::Pos2, egui::PointerButton)>) -> Result<(), F
         Box::new(move |cc| {
             let mut app = app::BobApp::new(&cc.egui_ctx, start, zoom, ui_scale);
             app.set_read_only(read_only);
+            app.set_archiver(archiver, remember);
             if let Some((layout, name)) = layout {
                 app.restore_layout(layout, Some(name));
             }
@@ -703,6 +761,57 @@ mod tests {
                     (pos2(7.0, 8.0), PointerButton::Middle),
                     (pos2(5.0, 6.0), PointerButton::Primary),
                 ]
+            );
+        }
+
+        #[test]
+        fn takes_an_archiver() {
+            let cli = parse(&["--archiver", "archiver:17668"]).unwrap();
+            let a = cli.archiver.unwrap();
+            assert_eq!(a.base(), "http://archiver:17668/retrieval");
+            assert!(parse(&["--no-archiver"]).unwrap().no_archiver);
+            for args in [
+                &["--archiver", "ftp://x"][..],
+                &["--archiver", ""],
+                &["--archiver", "h", "--no-archiver"],
+            ] {
+                assert!(parse(args).is_err(), "{args:?}");
+            }
+        }
+
+        #[test]
+        fn chooses_the_archiver() {
+            use super::super::choose_archiver;
+            let base = |c: (Option<archiveview::ArchiverClient>, bool)| {
+                (c.0.map(|a| a.base().to_string()), c.1)
+            };
+            let given = archiveview::ArchiverClient::new("http://cli").ok();
+            let some = |u: &str| Some(u.to_string());
+            // --archiver wins, and is remembered.
+            assert_eq!(
+                base(choose_archiver(given, false, Some("env"), Some("saved"))),
+                (some("http://cli/retrieval"), true)
+            );
+            // --no-archiver: live only.
+            assert_eq!(
+                base(choose_archiver(None, true, Some("env"), Some("saved"))),
+                (None, false)
+            );
+            // Then the environment, then the settings; neither remembered.
+            assert_eq!(
+                base(choose_archiver(None, false, Some("env"), Some("saved"))),
+                (some("http://env/retrieval"), false)
+            );
+            for env in [None, Some(""), Some("ftp://bad")] {
+                assert_eq!(
+                    base(choose_archiver(None, false, env, Some("saved"))),
+                    (some("http://saved/retrieval"), false),
+                    "{env:?}"
+                );
+            }
+            assert_eq!(
+                base(choose_archiver(None, false, None, None)),
+                (None, false)
             );
         }
 

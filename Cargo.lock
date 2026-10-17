@@ -154,6 +154,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "archiveview"
+version = "0.1.0"
+source = "git+https://github.com/gilesknap/archiveview?rev=498dab491d2c32ce486bb9f1d022031b1679de0b#498dab491d2c32ce486bb9f1d022031b1679de0b"
+dependencies = [
+ "archiveview-archiver",
+ "bobview-pv",
+ "chrono",
+ "egui",
+ "log",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "web-time",
+]
+
+[[package]]
+name = "archiveview-archiver"
+version = "0.1.0"
+source = "git+https://github.com/gilesknap/archiveview?rev=498dab491d2c32ce486bb9f1d022031b1679de0b#498dab491d2c32ce486bb9f1d022031b1679de0b"
+dependencies = [
+ "chrono",
+ "log",
+ "serde",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -340,6 +368,7 @@ name = "bobview"
 version = "1.8.5"
 dependencies = [
  "arboard",
+ "archiveview",
  "bobview-bob",
  "bobview-pv",
  "chrono",

@@ -36,12 +36,15 @@ pub struct Options {
     /// (such as a trend window) to fill.
     pub settle: Duration,
     pub read_only: bool,
+    /// Where trends fetch history from (not remembered).
+    pub archiver: Option<archiveview::ArchiverClient>,
 }
 
 pub fn run(start: Location, opts: &Options, out: &Path) -> Result<(), String> {
     let ctx = egui::Context::default();
     let mut app = BobApp::new(&ctx, Some(start), opts.zoom, opts.ui_scale);
     app.set_read_only(opts.read_only);
+    app.set_archiver(opts.archiver.clone(), false);
     // A --middle-click copies to the clipboard only: a snapshot leaves the
     // desktop's primary selection alone.
     app.set_primary(Box::new(crate::selection::NoPrimary));
@@ -349,6 +352,7 @@ mod tests {
                 clicks: Vec::new(),
                 settle: Duration::ZERO,
                 read_only: false,
+                archiver: None,
             };
             run(start, &opts, &out).unwrap();
             assert!(
@@ -388,6 +392,7 @@ mod tests {
                 clicks: Vec::new(),
                 settle: Duration::ZERO,
                 read_only: false,
+                archiver: None,
             };
             let start = Location {
                 source: bob::Source::File(bob.clone()),
