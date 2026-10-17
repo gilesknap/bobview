@@ -155,8 +155,9 @@ dependencies = [
 
 [[package]]
 name = "archiveview"
-version = "0.1.0"
-source = "git+https://github.com/gilesknap/archiveview?rev=498dab491d2c32ce486bb9f1d022031b1679de0b#498dab491d2c32ce486bb9f1d022031b1679de0b"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d725cfaa68d6019a8b7e9de46475277ff723b1d96f87b2de82f99dc79bd567ba"
 dependencies = [
  "archiveview-archiver",
  "bobview-pv",
@@ -171,8 +172,9 @@ dependencies = [
 
 [[package]]
 name = "archiveview-archiver"
-version = "0.1.0"
-source = "git+https://github.com/gilesknap/archiveview?rev=498dab491d2c32ce486bb9f1d022031b1679de0b#498dab491d2c32ce486bb9f1d022031b1679de0b"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8e5ad8cb5dc015edda0147b1a1c5aadaf45e1f50388c60728cb87777610c781"
 dependencies = [
  "chrono",
  "log",
@@ -2616,7 +2618,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3494,7 +3496,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix 1.1.5",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

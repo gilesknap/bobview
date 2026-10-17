@@ -17,9 +17,8 @@ homepage = "https://gilesknap.github.io/bobview/"
 bob = { package = "bobview-bob", path = "crates/bob", version = "=1.8.5" }
 pv = { package = "bobview-pv", path = "crates/pv", version = "=1.8.5" }
 # The trend windows' plot (archived and live PVs): the library only, with
-# no eframe, clap or clipboard. From git until it is on crates.io; then
-# `version = "..."` in place of `git` and `rev`.
-archiveview = { git = "https://github.com/gilesknap/archiveview", rev = "498dab491d2c32ce486bb9f1d022031b1679de0b", default-features = false }
+# no eframe, clap or clipboard.
+archiveview = { version = "0.2.0", default-features = false }
 
 # archiveview's `Plot` takes a crates.io `bobview_pv::PvManager`: this makes
 # it the in-tree crate, so it is the same type as bobview's.

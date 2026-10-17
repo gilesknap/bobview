@@ -48,7 +48,7 @@ serves synthetic history for the test IOC's `bl01t:SUM` and a few
 `MOCK:` PVs:
 
 ```bash
-cargo install --git https://github.com/gilesknap/archiveview archiveview-mockarchiver
+cargo install archiveview-mockarchiver
 archiveview-mockarchiver &
 bobview --archiver http://127.0.0.1:17668
 ```
