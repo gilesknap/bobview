@@ -336,7 +336,7 @@ dependencies = [
 
 [[package]]
 name = "bobview"
-version = "1.8.1"
+version = "1.8.3"
 dependencies = [
  "bobview-bob",
  "bobview-pv",
@@ -364,7 +364,7 @@ dependencies = [
 
 [[package]]
 name = "bobview-bob"
-version = "1.8.1"
+version = "1.8.3"
 dependencies = [
  "log",
  "roxmltree",
@@ -372,7 +372,7 @@ dependencies = [
 
 [[package]]
 name = "bobview-pv"
-version = "1.8.1"
+version = "1.8.3"
 dependencies = [
  "base64 0.23.1",
  "bobview-testioc",
@@ -393,7 +393,7 @@ dependencies = [
 
 [[package]]
 name = "bobview-server"
-version = "1.8.1"
+version = "1.8.3"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -412,7 +412,7 @@ dependencies = [
 
 [[package]]
 name = "bobview-testioc"
-version = "1.8.1"
+version = "1.8.3"
 dependencies = [
  "asyn-rs",
  "epics-base-rs",
