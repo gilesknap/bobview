@@ -24,8 +24,14 @@ trend windows open now. From the command line:
 bobview                     # restores the default layout if there is one
 bobview DISPLAY             # opens DISPLAY; the default layout is not restored
 bobview --layout rf-shift   # restores layouts/rf-shift.json
+bobview --layout ~/shift.json   # restores the layout in that file
 bobview --no-layout         # ignores the default layout
 ```
+
+A `--layout` that has a directory in it or ends in `.json` is a layout
+file's path, so a layout kept elsewhere (under version control, say) can be
+restored without copying it into `layouts`. The toolbar shows it by its file
+name, and **Save layout** writes back to that file.
 
 `--snapshot` ignores layouts.
 

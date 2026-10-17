@@ -127,8 +127,9 @@ struct Cli {
     /// one: trends are live only
     #[arg(long, conflicts_with = "archiver")]
     no_archiver: bool,
-    /// Restore the saved window layout NAME
-    #[arg(long, value_name = "NAME")]
+    /// Restore the saved window layout NAME, or the layout in a JSON file
+    /// (a path with a directory in it or ending in .json)
+    #[arg(long, value_name = "NAME|FILE")]
     layout: Option<String>,
     /// Don't restore the default layout
     #[arg(long)]
@@ -394,7 +395,8 @@ fn run(cli: Cli, clicks: Vec<(egui::Pos2, egui::PointerButton)>) -> Result<(), F
         None
     } else {
         let default = file.is_none() && !cli.no_layout && layout::exists(layout::DEFAULT);
-        layout::startup(cli.layout, default, layout::load).map_err(Failure::usage)?
+        layout::startup(cli.layout.map(layout::named), default, layout::load)
+            .map_err(Failure::usage)?
     };
     // A layout's main window has a display of its own.
     let layout_has_main = layout
