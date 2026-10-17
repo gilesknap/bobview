@@ -79,5 +79,11 @@ Work on other threads asks for a repaint by viewport id, because a bare
 
 A window also polls while it waits: a display being fetched or built, an
 embedded display building on its thread, or a fetch in the browser asks
-for a repaint every 50 ms until it arrives. Trends scroll by asking for the
-next repaint when the plot has moved a pixel.
+for a repaint every 50 ms until it arrives. Strip charts scroll by asking
+for the next repaint when the plot has moved a pixel.
+
+A trend window's plot is archiveview's `Plot`, built on the trend window's
+own tagged `PvManager`, so its PVs repaint only that window. It repaints
+itself for the rest: archive fetches run on the `pv` crate's runtime and
+ask for a repaint of the viewport the plot was last drawn in, and a live
+plot asks for the next repaint as it scrolls.

@@ -21,6 +21,7 @@ use crate::tree::{self, Navigator};
 use crate::trend::Trend;
 use crate::view::{LaunchKey, Origin, View, ViewCx, WindowKey, window_title};
 use crate::widgets::{self, Request};
+use archiveview::ArchiverClient;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Location {
@@ -103,6 +104,8 @@ pub struct BobApp {
     /// Open trend windows, and the id the next one gets.
     trends: Vec<Trend>,
     next_trend: u64,
+    /// Where trends fetch history from; none for live only.
+    archiver: Option<ArchiverClient>,
     /// Displays named by command actions, worked out on threads.
     launched: (
         std::sync::mpsc::Sender<Launched>,
@@ -434,6 +437,7 @@ impl BobApp {
             layouts: LayoutList::default(),
             trends: Vec::new(),
             next_trend: 0,
+            archiver: None,
             launched: std::sync::mpsc::channel(),
             chrome: Chrome::new(ui_scale),
             primary: selection::system(),
@@ -458,6 +462,53 @@ impl BobApp {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn set_primary(&mut self, primary: Box<dyn selection::Primary>) {
         self.primary = primary;
+    }
+
+    /// Fetch the trends' history from `archiver`, or none (live only),
+    /// remembering it in the settings for later runs if `remember`.
+    pub fn set_archiver(&mut self, archiver: Option<ArchiverClient>, remember: bool) {
+        let outgoing = self.archiver.as_ref().map(ArchiverClient::base);
+        if remember
+            && self
+                .settings
+                .remember_archiver(archiver.as_ref().map(ArchiverClient::base), outgoing)
+        {
+            self.settings.save();
+        }
+        self.archiver = archiver;
+        for t in &mut self.trends {
+            t.set_archiver(self.archiver.as_ref(), &self.settings.recent_archivers);
+        }
+    }
+
+    /// The user switched archivers in a trend's pill: switch every trend,
+    /// remember it, and repaint the other trend windows to fetch again.
+    fn switch_archiver(&mut self, ctx: &egui::Context, archiver: Option<ArchiverClient>) {
+        log::info!(
+            "trend history from {}",
+            archiver
+                .as_ref()
+                .map_or("no archiver", ArchiverClient::base)
+        );
+        self.set_archiver(archiver, true);
+        for t in &self.trends {
+            repaint_after(ctx, trend_viewport(t.id), Duration::ZERO);
+        }
+    }
+
+    /// A trend window of `names`, with the next id.
+    fn new_trend(&mut self, ctx: &egui::Context, names: &[String]) -> Trend {
+        let pvs = self.pvs_for(ctx, trend_viewport(self.next_trend));
+        let archiver = self.archiver.clone();
+        let trend = Trend::new(
+            self.next_trend,
+            names,
+            &pvs,
+            archiver,
+            &self.settings.recent_archivers,
+        );
+        self.next_trend += 1;
+        trend
     }
 
     /// Restore `layout` (saved as `name`) once the window is up.
@@ -723,6 +774,7 @@ impl BobApp {
         self.main.is_loading()
             || self.windows.iter().any(|w| w.view.is_loading())
             || crate::screen::building()
+            || self.trends.iter().any(Trend::is_loading)
     }
 
     /// Run a command action on a thread, so a slow launcher script or file
@@ -1068,7 +1120,7 @@ impl BobApp {
         let trends: Vec<TrendLayout> = self
             .trends
             .iter()
-            .map(|t| TrendLayout::new(t.names(), t.view(), t.geometry))
+            .map(|t| TrendLayout::new(t.view(), t.geometry))
             .collect();
         // On X11 a window not drawn yet has no position either.
         let unplaced = windows.iter().any(|w| w.position.is_none())
@@ -1175,10 +1227,8 @@ impl BobApp {
         }
         self.trends.clear();
         for t in &layout.trends {
-            let pvs = self.pvs_for(ctx, trend_viewport(self.next_trend));
-            let mut trend = Trend::new(self.next_trend, &t.pvs, &pvs);
-            self.next_trend += 1;
-            trend.set_view(t.span, t.log);
+            let mut trend = self.new_trend(ctx, &[]);
+            trend.set_view(&t.view());
             trend.place = t.geometry(&monitors);
             self.trends.push(trend);
         }
@@ -1857,9 +1907,8 @@ impl BobApp {
             }
             Request::Trend(names) => {
                 log::info!("trend {}", names.join(", "));
-                let pvs = self.pvs_for(ctx, trend_viewport(self.next_trend));
-                self.trends.push(Trend::new(self.next_trend, &names, &pvs));
-                self.next_trend += 1;
+                let trend = self.new_trend(ctx, &names);
+                self.trends.push(trend);
             }
             Request::TrendAdd(id, names) => {
                 if let Some(trend) = self.trends.iter_mut().find(|t| t.id == id) {
@@ -1963,6 +2012,7 @@ impl BobApp {
     fn embedded_trends(&mut self, ctx: &egui::Context) {
         let screen = ctx.content_rect();
         let repaints = &self.repaints;
+        let mut switched = None;
         self.trends.retain_mut(|trend| {
             if let Some(r) = repaints.get(&trend_viewport(trend.id)) {
                 r.begin();
@@ -1970,7 +2020,7 @@ impl BobApp {
             let mut open = true;
             // Each new window a little below and right of the one before.
             let step = (trend.id % 8) as f32 * 24.0;
-            let size = Vec2::new(640.0, 420.0).min(screen.size() * 0.9);
+            let size = TREND_SIZE.min(screen.size() * 0.9);
             egui::Window::new(trend.title())
                 .id(trend_window_id(trend.id))
                 .open(&mut open)
@@ -1978,8 +2028,14 @@ impl BobApp {
                 .default_pos(screen.left_top() + Vec2::new(40.0, 60.0) + Vec2::splat(step))
                 .default_size(size)
                 .show(ctx, |ui| trend.ui(ui));
+            if trend.take_archiver_change() {
+                switched = Some(trend.archiver().cloned());
+            }
             open
         });
+        if let Some(archiver) = switched {
+            self.switch_archiver(ctx, archiver);
+        }
     }
 
     /// The display windows to keep open, each in its own native window
@@ -2009,15 +2065,12 @@ impl BobApp {
             .map(|trend| {
                 // The window manager places it, unless a layout says where;
                 // Wayland won't let us.
-                let size = trend
-                    .place
-                    .size
-                    .map_or(Vec2::new(640.0, 420.0), |s| s / zoom);
+                let size = trend.place.size.map_or(TREND_SIZE, |s| s / zoom);
                 let mut builder = egui::ViewportBuilder::default()
                     .with_title(trend.title())
                     .with_app_id("bobview")
                     .with_inner_size(size)
-                    .with_min_inner_size([320.0, 200.0]);
+                    .with_min_inner_size([400.0, 280.0]);
                 if let Some(pos) = trend.place.position {
                     builder = builder.with_position(Pos2::ZERO + pos.to_vec2() / zoom);
                 }
@@ -2089,6 +2142,12 @@ impl BobApp {
             if ui.input(|i| i.viewport().close_requested()) {
                 self.trends.remove(i);
             }
+        }
+        if let Some(trend) = self.trends.get_mut(i).filter(|t| t.id == id)
+            && trend.take_archiver_change()
+        {
+            let archiver = trend.archiver().cloned();
+            self.switch_archiver(&ctx, archiver);
         }
         self.repaint_changed(&ctx, &before, trend_viewport(id));
     }
@@ -2472,6 +2531,9 @@ fn display_toolbar(ui: &mut egui::Ui, view: &mut View, home: &Option<Location>) 
         }
     });
 }
+
+/// A new trend window's size, in points.
+const TREND_SIZE: Vec2 = Vec2::new(760.0, 480.0);
 
 /// The native window of the trend `id`.
 fn trend_viewport(id: u64) -> egui::ViewportId {

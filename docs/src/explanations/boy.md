@@ -39,7 +39,8 @@ exceptions, recognised and done by bobview itself:
   (`ScriptUtil.executeEclipseCommand` of
   `org.csstudio.trends.databrowser2.newWindow` with `['pvnames', 'A,B']`, as
   the DLS vacuum "Graph" buttons do) opens a [trend](../how-to/trends.md) of
-  them.
+  them, with their archived history when bobview has an archiver, as the
+  Data Browser would show.
 - The DLS vacuum widget script `get_pv_name.py`, recognised by its file
   name. Its second PV, a vacuum space's link field such as
   `SR03S-VA-SPACE-01:IONPSTA.INPA`, names a group

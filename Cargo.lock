@@ -154,6 +154,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "archiveview"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f678068ea54e794402b2311e1706e6eb628ff6ff0dc17a94dd548bcd8e2eab8"
+dependencies = [
+ "archiveview-archiver",
+ "bobview-pv",
+ "chrono",
+ "egui",
+ "log",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "web-time",
+]
+
+[[package]]
+name = "archiveview-archiver"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35e09b1b72a50753a50e14d74dccceda87ca49baf5f9df0e1b7e95627cd23573"
+dependencies = [
+ "chrono",
+ "log",
+ "serde",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -337,9 +367,10 @@ dependencies = [
 
 [[package]]
 name = "bobview"
-version = "1.8.5"
+version = "1.9.0"
 dependencies = [
  "arboard",
+ "archiveview",
  "bobview-bob",
  "bobview-pv",
  "chrono",
@@ -366,7 +397,7 @@ dependencies = [
 
 [[package]]
 name = "bobview-bob"
-version = "1.8.5"
+version = "1.9.0"
 dependencies = [
  "log",
  "roxmltree",
@@ -374,7 +405,7 @@ dependencies = [
 
 [[package]]
 name = "bobview-pv"
-version = "1.8.5"
+version = "1.9.0"
 dependencies = [
  "base64 0.23.1",
  "bobview-testioc",
@@ -395,7 +426,7 @@ dependencies = [
 
 [[package]]
 name = "bobview-server"
-version = "1.8.5"
+version = "1.9.0"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -415,7 +446,7 @@ dependencies = [
 
 [[package]]
 name = "bobview-testioc"
-version = "1.8.5"
+version = "1.9.0"
 dependencies = [
  "asyn-rs",
  "epics-base-rs",
@@ -2587,7 +2618,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3465,7 +3496,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix 1.1.5",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

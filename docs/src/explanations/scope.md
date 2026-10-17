@@ -16,8 +16,10 @@ builds for the browser.
   name and done natively instead; see [How BOY screens are translated](boy.md)
   and [Widgets](../reference/widgets.md).
 - **Display editing.** Use Phoebus to edit screens.
-- **Alarm and archiver services.** Trends are live only, with no archived
-  history.
+- **Alarm services, and archivers other than the EPICS Archiver
+  Appliance.** Trends show history from an Archiver Appliance through
+  [archiveview](https://github.com/gilesknap/archiveview); see
+  [Trend PVs](../how-to/trends.md).
 
 Widgets bobview can't draw are shown as a grey placeholder labelled with the
 widget type and PV name, and the status line counts "N unsupported widgets".

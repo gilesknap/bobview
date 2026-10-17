@@ -34,8 +34,13 @@ bobview --no-layout         # ignores the default layout
 For each window: its display, Eclipse project and effective macros, its
 position and size, whether it is pinned, and whether a display window shows
 its toolbar; for the main window also its zoom and whether it shows the
-navigator. For each trend window: its PVs, time span, log scale, position
-and size. A layout from before windows were pinned pins them all if it was
+navigator. For each trend window: its PVs (with their colours, value axes
+and whether they are hidden), its time range (the last so long, live, or a
+fixed window), its value axes' ranges, log scales and names, its position
+and size. The archiver is not saved in a layout: trends use bobview's (see
+[Trend PVs](trends.md)). A layout from before trends showed archived
+history restores each trend's PVs, live over its time span, with its log
+scale. A layout from before windows were pinned pins them all if it was
 saved in multi-window mode, and none if not.
 
 Layouts are JSON files in `$XDG_CONFIG_HOME/bobview/layouts` (by default
