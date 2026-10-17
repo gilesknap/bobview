@@ -200,7 +200,10 @@ these rules, whatever target the screen gives it:</p>
 <p>The <strong>viewer</strong> is the unpinned window used last (focused, opened or
 unpinned), so clicking a window once makes it where the next link goes.
 "Already open" means the same display with the same macros, in another
-window.</p>
+window. The macros are all those the display would be opened with: the
+link's own, and those of the group, widget or embedded display it is on, so
+each gauge of a cell, opened through one gauge screen, gets its own window.
+A BOY display's <code>$(DID)</code> doesn't count, since each window gives it its own.</p>
 <h2 id="why-it-works-this-way"><a class="header" href="#why-it-works-this-way">Why it works this way</a></h2>
 <p>The main window starts pinned, so it stays where it is while the displays
 it links to come and go in one other window: an overview on one side and a
