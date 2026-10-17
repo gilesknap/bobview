@@ -147,6 +147,9 @@ struct Cli {
     /// Right-click here before the snapshot (repeatable)
     #[arg(long, value_name = "X,Y", value_parser = parse_point)]
     right_click: Vec<egui::Pos2>,
+    /// Middle-click here before the snapshot (repeatable)
+    #[arg(long, value_name = "X,Y", value_parser = parse_point)]
+    middle_click: Vec<egui::Pos2>,
     /// Time after the last click before the snapshot
     #[arg(long, value_name = "SECONDS", default_value_t = 1.0, value_parser = parse_seconds)]
     settle: f64,
@@ -168,7 +171,7 @@ impl Cli {
         (cli, clicks)
     }
 
-    /// Both kinds of click, in the order given.
+    /// Every kind of click, in the order given.
     fn clicks(&self, matches: &clap::ArgMatches) -> Vec<(egui::Pos2, egui::PointerButton)> {
         let at = |id| matches.indices_of(id).into_iter().flatten();
         let mut clicks: Vec<_> = (at("click").zip(&self.click))
@@ -177,6 +180,11 @@ impl Cli {
                 at("right_click")
                     .zip(&self.right_click)
                     .map(|(i, p)| (i, *p, egui::PointerButton::Secondary)),
+            )
+            .chain(
+                at("middle_click")
+                    .zip(&self.middle_click)
+                    .map(|(i, p)| (i, *p, egui::PointerButton::Middle)),
             )
             .collect();
         clicks.sort_by_key(|(i, ..)| *i);
@@ -671,7 +679,16 @@ mod tests {
 
         #[test]
         fn keeps_clicks_in_order() {
-            let args = ["--click", "1,2", "--right-click", "3, 4", "--click", "5,6"];
+            let args = [
+                "--click",
+                "1,2",
+                "--right-click",
+                "3, 4",
+                "--middle-click",
+                "7,8",
+                "--click",
+                "5,6",
+            ];
             let argv = std::iter::once("bobview").chain(args);
             let matches = Cli::command().try_get_matches_from(argv).unwrap();
             let cli = Cli::from_arg_matches(&matches).unwrap();
@@ -680,6 +697,7 @@ mod tests {
                 [
                     (pos2(1.0, 2.0), PointerButton::Primary),
                     (pos2(3.0, 4.0), PointerButton::Secondary),
+                    (pos2(7.0, 8.0), PointerButton::Middle),
                     (pos2(5.0, 6.0), PointerButton::Primary),
                 ]
             );
