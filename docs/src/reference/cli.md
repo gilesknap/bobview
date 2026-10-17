@@ -20,7 +20,7 @@ been saved, else opens `index.bob` from the bundled displays
 | `--read-only` | refuse every write to a PV except `loc://` ones; see [Writes and safety](../explanations/writes.md) |
 | `--archiver URL` | the EPICS Archiver Appliance trends fetch history from, e.g. `http://archiver:17668` (`/retrieval` is added); remembered for later runs (not with `--snapshot`). See [Trend PVs](../how-to/trends.md) |
 | `--no-archiver` | no archiver this run, even if `BOBVIEW_ARCHIVER` or the settings name one: trends are live only |
-| `--layout NAME` | restore the saved layout `NAME` |
+| `--layout NAME` or `FILE` | restore the saved layout `NAME`, or the layout in the JSON file `FILE` (a path with a directory in it or ending in `.json`); **Save layout** then writes back to that file. See [Save and restore a layout](../how-to/layouts.md) |
 | `--no-layout` | don't restore the default layout |
 | `--ui-scale F` or `auto` | size of the toolbar and menus relative to the desktop's scale, 1 being the desktop's own (default auto: smaller on a small high-DPI screen) |
 | `--snapshot OUT.png` | render to a PNG without a window and exit; see [Take snapshots](../how-to/snapshots.md) |

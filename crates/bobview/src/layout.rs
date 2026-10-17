@@ -2,8 +2,10 @@
 //!
 //! A layout is a JSON file in `$XDG_CONFIG_HOME/bobview/layouts` (by default
 //! `~/.config/bobview/layouts`, or `%APPDATA%\bobview\layouts` on Windows), named after the layout; `default.json` is
-//! restored at startup. Positions and sizes are in desktop points (egui's
-//! points times its zoom factor), so they don't depend on the controls' scale.
+//! restored at startup. `--layout` also takes a layout file's path, which is
+//! then the layout's name: loaded from and saved to that file. Positions and
+//! sizes are in desktop points (egui's points times its zoom factor), so they
+//! don't depend on the controls' scale.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -361,7 +363,36 @@ pub fn valid_name(name: &str) -> bool {
     !name.is_empty() && !name.starts_with('.') && !name.contains(['/', '\\'])
 }
 
+/// `--layout`'s argument as a layout's name: a JSON file's absolute path
+/// when it names a file (has a directory in it or ends in .json), so that
+/// saving the layout writes back to that file, else a saved layout's name.
+#[cfg_attr(
+    target_arch = "wasm32",
+    expect(dead_code, reason = "a browser starts from its address")
+)]
+pub fn named(arg: String) -> String {
+    let path = Path::new(&arg);
+    if path.components().count() < 2 && path.extension().is_none_or(|e| e != "json") {
+        return arg;
+    }
+    std::path::absolute(path).map_or(arg, |p| p.display().to_string())
+}
+
+/// How the toolbar shows layout `name`: a layout file by its name, without
+/// .json.
+pub fn label(name: &str) -> &str {
+    let path = Path::new(name);
+    match path.file_stem().and_then(|s| s.to_str()) {
+        Some(stem) if path.is_absolute() => stem,
+        _ => name,
+    }
+}
+
 fn file(name: &str) -> Option<PathBuf> {
+    let path = Path::new(name);
+    if path.is_absolute() {
+        return Some(path.to_path_buf());
+    }
     valid_name(name)
         .then(|| layouts_dir().map(|d| d.join(format!("{}.json", name.trim()))))
         .flatten()
@@ -862,5 +893,28 @@ mod tests {
         assert!(!valid_name("  "));
         assert!(!valid_name("../x"));
         assert!(!valid_name(".hidden"));
+    }
+
+    #[test]
+    fn a_layout_may_be_named_by_its_file() {
+        // Names stay names.
+        assert_eq!(named("rf-shift".into()), "rf-shift");
+        assert_eq!(label("rf-shift"), "rf-shift");
+        // A path, absolute or not, is the file's absolute path.
+        let cwd = std::env::current_dir().unwrap();
+        for arg in ["shift.json", "layouts/shift.json", "./shift"] {
+            let name = named(arg.into());
+            assert!(Path::new(&name).is_absolute(), "{arg}: {name}");
+            assert!(Path::new(&name).starts_with(&cwd), "{arg}: {name}");
+        }
+        // Saved to and loaded from that file, shown by its name.
+        let dir = std::env::temp_dir().join(format!("bobview-layout-path-{}", std::process::id()));
+        let name = dir.join("shift.json").display().to_string();
+        assert_eq!(label(&name), "shift");
+        let layout = Layout::new(Vec::new(), Vec::new());
+        save(&name, &layout).unwrap();
+        assert!(exists(&name));
+        assert_eq!(load(&name).unwrap(), layout);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
