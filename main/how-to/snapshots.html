@@ -198,9 +198,10 @@ and resizes it as a window manager would, on a monitor of 1920x1080 points.</p>
 <pre><code class="language-bash">bobview --snapshot out.png --wait 5 screen.bob
 </code></pre>
 <h2 id="click-first"><a class="header" href="#click-first">Click first</a></h2>
-<p><code>--click X,Y</code> and <code>--right-click X,Y</code> (repeatable, in the order given)
-interact with the display before the snapshot, which is taken <code>--settle</code>
-seconds (default 1) after the last click. Positions are in pixels.</p>
+<p><code>--click X,Y</code>, <code>--right-click X,Y</code> and <code>--middle-click X,Y</code> (repeatable,
+in the order given) interact with the display before the snapshot, which is
+taken <code>--settle</code> seconds (default 1) after the last click. Positions are in
+pixels.</p>
 <pre><code class="language-bash">bobview --snapshot menu.png --right-click 200,150 --settle 0.5 screen.bob
 </code></pre>
 <h2 id="snapshot-every-test-display"><a class="header" href="#snapshot-every-test-display">Snapshot every test display</a></h2>

@@ -209,8 +209,38 @@ instead of fitting the window.</p>
 <li><strong>Right-click</strong> (long-press on a touch screen) to copy the PV name, its
 value or a <code>caget</code>/<code>pvget</code> command, open the PV details, <strong>Trend</strong> it,
 <strong>Trend with rule PVs</strong>, or add it to an open trend.</li>
+<li><strong>Middle-click</strong> to copy its PV name, as in EDM and MEDM: a middle-click
+in a terminal then pastes it, and one in
+<a href="https://github.com/gilesknap/archiveview">archiveview</a> plots it. The
+widget flashes and the status line says "Copied <em>name</em>". See
+<a href="#copying-a-pv-name">Copying a PV name</a>.</li>
 <li>On a touch screen, pinch to zoom.</li>
 </ul>
+<h2 id="copying-a-pv-name"><a class="header" href="#copying-a-pv-name">Copying a PV name</a></h2>
+<p>A middle-click on a widget, or <strong>Copy PV name</strong> in its right-click menu,
+puts the PV name on both the clipboard (for Ctrl+V) and the primary
+selection (for a middle-click, on Linux). The name is the one other tools
+take:</p>
+<ul>
+<li>macros expanded, and a Channel Access name bare and whole
+(<code>BL01T-EA-DET-01:COUNT</code>, not <code>ca://BL01T-EA-DET-01:COUNT</code>);</li>
+<li>a PV Access name keeps its <code>pva://</code>;</li>
+<li>a <code>loc://</code> PV keeps its prefix but not its type and initial value
+(<code>loc://x</code>, not <code>loc://x&lt;VDouble&gt;(1.5)</code>); a <code>sim://</code> PV is copied whole,
+its parameters too (<code>sim://sine(0, 10, 0.1)</code>);</li>
+<li>a formula copies the PVs it reads, each named as above, not its text.</li>
+</ul>
+<p>A widget copies its own PV only, not the PVs its rules read. An XY plot or
+strip chart, which has no PV of its own, copies its traces' PVs. Several
+names are separated by spaces.</p>
+<p>On X11 bobview holds the primary selection itself, so it is lost when
+bobview exits, as with any X application; this works over <code>ssh -X</code> too. On
+Wayland bobview uses the compositor's data-control protocol where it has
+one, and XWayland's primary selection otherwise. Windows, macOS and the
+browser have no primary selection, so there the name goes to the clipboard
+only (in the browser, if it allows the page to write to the clipboard).
+Middle-click in the browser is untested, and the browser may start
+autoscrolling on it.</p>
 <h2 id="display-windows"><a class="header" href="#display-windows">Display windows</a></h2>
 <p>A display window (one opened beside the main window; see
 <a href="../explanations/windows.html">Pinned windows and the viewer</a>) has the native
@@ -257,8 +287,9 @@ is opened or clicked.</li>
 (unless maximised or full screen), so the display keeps its size and zoom.</li>
 </ul>
 <h2 id="status-line"><a class="header" href="#status-line">Status line</a></h2>
-<p>Shows write errors and refusals, and counts "N widgets with scripts ignored"
-and "N unsupported widgets" for a display that has them.</p>
+<p>Shows write errors and refusals, what a copy has just put on the clipboard,
+and counts "N widgets with scripts ignored" and "N unsupported widgets" for
+a display that has them.</p>
 
                     </main>
 

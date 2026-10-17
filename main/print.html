@@ -264,6 +264,8 @@ installed. You should see live values within a second or two.</p>
 <li><strong>Right-click</strong> a widget (long-press on a touch screen): copy the PV name
 or value, open the PV's details, or <strong>Trend</strong> it. A trend window plots the
 PV against time; leave it open.</li>
+<li><strong>Middle-click</strong> a widget to copy its PV name. On Linux a middle-click in
+a terminal pastes it; elsewhere, paste it as usual (Ctrl+V or ⌘V).</li>
 <li><strong>Click a button</strong> that opens another display. Use <strong>Back</strong> and
 <strong>Forward</strong> in the toolbar to move between them, and <strong>Home</strong> to return
 to <code>index.bob</code>.</li>
@@ -747,9 +749,10 @@ and resizes it as a window manager would, on a monitor of 1920x1080 points.</p>
 <pre><code class="language-bash">bobview --snapshot out.png --wait 5 screen.bob
 </code></pre>
 <h2 id="click-first"><a class="header" href="#click-first">Click first</a></h2>
-<p><code>--click X,Y</code> and <code>--right-click X,Y</code> (repeatable, in the order given)
-interact with the display before the snapshot, which is taken <code>--settle</code>
-seconds (default 1) after the last click. Positions are in pixels.</p>
+<p><code>--click X,Y</code>, <code>--right-click X,Y</code> and <code>--middle-click X,Y</code> (repeatable,
+in the order given) interact with the display before the snapshot, which is
+taken <code>--settle</code> seconds (default 1) after the last click. Positions are in
+pixels.</p>
 <pre><code class="language-bash">bobview --snapshot menu.png --right-click 200,150 --settle 0.5 screen.bob
 </code></pre>
 <h2 id="snapshot-every-test-display"><a class="header" href="#snapshot-every-test-display">Snapshot every test display</a></h2>
@@ -1266,6 +1269,7 @@ been saved, else opens <code>index.bob</code> from the bundled displays
 <tr><td><code>--wait SECONDS</code></td><td>time for PVs to connect before a snapshot (default 2)</td></tr>
 <tr><td><code>--click X,Y</code></td><td>click here before the snapshot (repeatable)</td></tr>
 <tr><td><code>--right-click X,Y</code></td><td>right-click here before the snapshot (repeatable)</td></tr>
+<tr><td><code>--middle-click X,Y</code></td><td>middle-click here before the snapshot (repeatable)</td></tr>
 <tr><td><code>--settle SECONDS</code></td><td>time after the last click before the snapshot (default 1)</td></tr>
 <tr><td><code>-h</code>, <code>--help</code></td><td>show help</td></tr>
 <tr><td><code>-V</code>, <code>--version</code></td><td>show the version</td></tr>
@@ -1358,7 +1362,8 @@ each. BOY <code>.opi</code> widgets are translated to these; see
 <tr><td>label, textupdate, textentry</td><td>formats: default, decimal, exponential, engineering, hex, compact, string, sexagesimal (also HMS and DMS), binary, significant; units, precision; typed text is parsed as Phoebus does (units dropped, <code>0x</code>/<code>0b</code> numbers, enum labels)</td></tr>
 <tr><td>led, multi_state_led, byte_monitor</td><td></td></tr>
 <tr><td>action_button, bool_button, slide_button, choice, radio, combo, checkbox</td><td>open display, write PV and open webpage actions; command actions only for DLS launcher scripts and StripTool (see <a href="reference/../explanations/boy.html#launcher-commands">How BOY screens are translated</a>)</td></tr>
-<tr><td>scaledslider, scrollbar, spinner</td><td></td></tr>
+<tr><td>scaledslider, scrollbar</td><td>set by a click or drag with the primary (left) button</td></tr>
+<tr><td>spinner</td><td>its arrows (on the left with <code>buttons_on_left</code>), or Up and Down while it has focus, step the value by <code>increment</code> within its range; or type a value and press Enter. As in Phoebus, a drag does nothing</td></tr>
 <tr><td>linearmeter</td><td>scale, warning regions from the levels (the PV's alarm limits with <code>limits_from_pv</code>), limit markers, needle; horizontal or vertical</td></tr>
 <tr><td>meter</td><td>a dial: scale (linear or <code>log_scale</code>), warning regions from the levels (the PV's alarm limits with <code>limits_from_pv</code>), needle</td></tr>
 <tr><td>progressbar, tank, thermometer</td><td>one shared bar renderer (tank and thermometer are vertical bars with their own default fill colours)</td></tr>
@@ -1477,8 +1482,38 @@ instead of fitting the window.</p>
 <li><strong>Right-click</strong> (long-press on a touch screen) to copy the PV name, its
 value or a <code>caget</code>/<code>pvget</code> command, open the PV details, <strong>Trend</strong> it,
 <strong>Trend with rule PVs</strong>, or add it to an open trend.</li>
+<li><strong>Middle-click</strong> to copy its PV name, as in EDM and MEDM: a middle-click
+in a terminal then pastes it, and one in
+<a href="https://github.com/gilesknap/archiveview">archiveview</a> plots it. The
+widget flashes and the status line says "Copied <em>name</em>". See
+<a href="reference/controls.html#copying-a-pv-name">Copying a PV name</a>.</li>
 <li>On a touch screen, pinch to zoom.</li>
 </ul>
+<h2 id="copying-a-pv-name"><a class="header" href="#copying-a-pv-name">Copying a PV name</a></h2>
+<p>A middle-click on a widget, or <strong>Copy PV name</strong> in its right-click menu,
+puts the PV name on both the clipboard (for Ctrl+V) and the primary
+selection (for a middle-click, on Linux). The name is the one other tools
+take:</p>
+<ul>
+<li>macros expanded, and a Channel Access name bare and whole
+(<code>BL01T-EA-DET-01:COUNT</code>, not <code>ca://BL01T-EA-DET-01:COUNT</code>);</li>
+<li>a PV Access name keeps its <code>pva://</code>;</li>
+<li>a <code>loc://</code> PV keeps its prefix but not its type and initial value
+(<code>loc://x</code>, not <code>loc://x&lt;VDouble&gt;(1.5)</code>); a <code>sim://</code> PV is copied whole,
+its parameters too (<code>sim://sine(0, 10, 0.1)</code>);</li>
+<li>a formula copies the PVs it reads, each named as above, not its text.</li>
+</ul>
+<p>A widget copies its own PV only, not the PVs its rules read. An XY plot or
+strip chart, which has no PV of its own, copies its traces' PVs. Several
+names are separated by spaces.</p>
+<p>On X11 bobview holds the primary selection itself, so it is lost when
+bobview exits, as with any X application; this works over <code>ssh -X</code> too. On
+Wayland bobview uses the compositor's data-control protocol where it has
+one, and XWayland's primary selection otherwise. Windows, macOS and the
+browser have no primary selection, so there the name goes to the clipboard
+only (in the browser, if it allows the page to write to the clipboard).
+Middle-click in the browser is untested, and the browser may start
+autoscrolling on it.</p>
 <h2 id="display-windows"><a class="header" href="#display-windows">Display windows</a></h2>
 <p>A display window (one opened beside the main window; see
 <a href="reference/../explanations/windows.html">Pinned windows and the viewer</a>) has the native
@@ -1525,8 +1560,9 @@ is opened or clicked.</li>
 (unless maximised or full screen), so the display keeps its size and zoom.</li>
 </ul>
 <h2 id="status-line"><a class="header" href="#status-line">Status line</a></h2>
-<p>Shows write errors and refusals, and counts "N widgets with scripts ignored"
-and "N unsupported widgets" for a display that has them.</p>
+<p>Shows write errors and refusals, what a copy has just put on the clipboard,
+and counts "N widgets with scripts ignored" and "N unsupported widgets" for
+a display that has them.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="browser-page-parameters"><a class="header" href="#browser-page-parameters">Browser page parameters</a></h1>
 <p>The web build's page takes these query parameters:</p>
 <pre><code class="language-text">http://HOST:PORT/?display=FILE.bob&amp;macros=P=X,R=Y&amp;zoom=1.5

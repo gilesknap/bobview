@@ -29,356 +29,450 @@
 <a href=#29 id=29 data-nosnippet>29</a>    <span class="kw">let </span>name = node.pv_name.as_str();
 <a href=#30 id=30 data-nosnippet>30</a>    <span class="kw">let </span>value = state.filter(|s| s.connected).map(|s| s.format(<span class="prelude-val">None</span>, <span class="bool-val">true</span>));
 <a href=#31 id=31 data-nosnippet>31</a>
-<a href=#32 id=32 data-nosnippet>32</a>    <span class="kw">if </span>ui.button(<span class="string">"Copy PV name"</span>).clicked() {
-<a href=#33 id=33 data-nosnippet>33</a>        ui.ctx().copy_text(name.to_string());
-<a href=#34 id=34 data-nosnippet>34</a>    }
-<a href=#35 id=35 data-nosnippet>35</a>    <span class="kw">if let </span>(<span class="prelude-val">Some</span>(state), <span class="prelude-val">Some</span>(value)) = (state, <span class="kw-2">&amp;</span>value) {
-<a href=#36 id=36 data-nosnippet>36</a>        <span class="kw">if </span>ui.button(<span class="string">"Copy value"</span>).clicked() {
-<a href=#37 id=37 data-nosnippet>37</a>            ui.ctx().copy_text(value.clone());
-<a href=#38 id=38 data-nosnippet>38</a>        }
-<a href=#39 id=39 data-nosnippet>39</a>        <span class="kw">if </span>ui.button(<span class="string">"Copy name and value"</span>).clicked() {
-<a href=#40 id=40 data-nosnippet>40</a>            ui.ctx().copy_text(<span class="macro">format!</span>(<span class="string">"{name} = {value}"</span>));
+<a href=#32 id=32 data-nosnippet>32</a>    <span class="comment">// Also to the primary selection, as a middle-click on the widget does.
+<a href=#33 id=33 data-nosnippet>33</a>    </span><span class="kw">if </span>ui.button(<span class="string">"Copy PV name"</span>).clicked()
+<a href=#34 id=34 data-nosnippet>34</a>        &amp;&amp; <span class="kw">let </span><span class="prelude-val">Some</span>(names) = copy_names(node)
+<a href=#35 id=35 data-nosnippet>35</a>    {
+<a href=#36 id=36 data-nosnippet>36</a>        requests.push(Request::Copy(names));
+<a href=#37 id=37 data-nosnippet>37</a>    }
+<a href=#38 id=38 data-nosnippet>38</a>    <span class="kw">if let </span>(<span class="prelude-val">Some</span>(state), <span class="prelude-val">Some</span>(value)) = (state, <span class="kw-2">&amp;</span>value) {
+<a href=#39 id=39 data-nosnippet>39</a>        <span class="kw">if </span>ui.button(<span class="string">"Copy value"</span>).clicked() {
+<a href=#40 id=40 data-nosnippet>40</a>            ui.ctx().copy_text(value.clone());
 <a href=#41 id=41 data-nosnippet>41</a>        }
-<a href=#42 id=42 data-nosnippet>42</a>        <span class="kw">if </span>ui.button(<span class="string">"Copy name, value, alarm and time"</span>).clicked() {
-<a href=#43 id=43 data-nosnippet>43</a>            ui.ctx().copy_text(full_line(name, state));
+<a href=#42 id=42 data-nosnippet>42</a>        <span class="kw">if </span>ui.button(<span class="string">"Copy name and value"</span>).clicked() {
+<a href=#43 id=43 data-nosnippet>43</a>            ui.ctx().copy_text(<span class="macro">format!</span>(<span class="string">"{name} = {value}"</span>));
 <a href=#44 id=44 data-nosnippet>44</a>        }
-<a href=#45 id=45 data-nosnippet>45</a>    }
-<a href=#46 id=46 data-nosnippet>46</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(cmd) = cli_command(<span class="kw-2">&amp;</span>PvName::parse(name))
-<a href=#47 id=47 data-nosnippet>47</a>        &amp;&amp; ui.button(<span class="macro">format!</span>(<span class="string">"Copy \"{cmd}\""</span>)).clicked()
-<a href=#48 id=48 data-nosnippet>48</a>    {
-<a href=#49 id=49 data-nosnippet>49</a>        ui.ctx().copy_text(cmd);
-<a href=#50 id=50 data-nosnippet>50</a>    }
-<a href=#51 id=51 data-nosnippet>51</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(pv) = <span class="kw-2">&amp;</span>node.pv {
-<a href=#52 id=52 data-nosnippet>52</a>        ui.separator();
-<a href=#53 id=53 data-nosnippet>53</a>        <span class="kw">if </span>ui.button(<span class="string">"Trend"</span>).clicked() {
-<a href=#54 id=54 data-nosnippet>54</a>            requests.push(Request::Trend(<span class="macro">vec!</span>[name.to_string()]));
-<a href=#55 id=55 data-nosnippet>55</a>        }
-<a href=#56 id=56 data-nosnippet>56</a>        <span class="kw">let </span>all = trend_names(node);
-<a href=#57 id=57 data-nosnippet>57</a>        <span class="kw">if </span>all.len() &gt; <span class="number">1
-<a href=#58 id=58 data-nosnippet>58</a>            </span>&amp;&amp; ui
-<a href=#59 id=59 data-nosnippet>59</a>                .button(<span class="macro">format!</span>(<span class="string">"Trend with rule PVs ({})"</span>, all.len()))
-<a href=#60 id=60 data-nosnippet>60</a>                .clicked()
-<a href=#61 id=61 data-nosnippet>61</a>        {
-<a href=#62 id=62 data-nosnippet>62</a>            requests.push(Request::Trend(all.clone()));
-<a href=#63 id=63 data-nosnippet>63</a>        }
-<a href=#64 id=64 data-nosnippet>64</a>        add_to_trend(ui, <span class="string">""</span>, <span class="kw-2">&amp;</span>[name.to_string()], trends, requests);
-<a href=#65 id=65 data-nosnippet>65</a>        <span class="kw">if </span>all.len() &gt; <span class="number">1 </span>{
-<a href=#66 id=66 data-nosnippet>66</a>            <span class="kw">let </span>with = <span class="macro">format!</span>(<span class="string">" with rule PVs ({})"</span>, all.len());
-<a href=#67 id=67 data-nosnippet>67</a>            add_to_trend(ui, <span class="kw-2">&amp;</span>with, <span class="kw-2">&amp;</span>all, trends, requests);
-<a href=#68 id=68 data-nosnippet>68</a>        }
-<a href=#69 id=69 data-nosnippet>69</a>        <span class="kw">if </span>ui.button(<span class="string">"PV details…"</span>).clicked() {
-<a href=#70 id=70 data-nosnippet>70</a>            requests.push(Request::Details(Details {
-<a href=#71 id=71 data-nosnippet>71</a>                pv: pv.clone(),
-<a href=#72 id=72 data-nosnippet>72</a>                widget: widget_label(node),
-<a href=#73 id=73 data-nosnippet>73</a>                file: node.base.clone(),
-<a href=#74 id=74 data-nosnippet>74</a>            }));
-<a href=#75 id=75 data-nosnippet>75</a>        }
-<a href=#76 id=76 data-nosnippet>76</a>    }
-<a href=#77 id=77 data-nosnippet>77</a>}
-<a href=#78 id=78 data-nosnippet>78</a>
-<a href=#79 id=79 data-nosnippet>79</a><span class="doccomment">/// "Add to trend" entries: a button for the one open trend window, or a
-<a href=#80 id=80 data-nosnippet>80</a>/// submenu listing them when there are several.
-<a href=#81 id=81 data-nosnippet>81</a></span><span class="kw">fn </span>add_to_trend(
-<a href=#82 id=82 data-nosnippet>82</a>    ui: <span class="kw-2">&amp;mut </span>Ui,
-<a href=#83 id=83 data-nosnippet>83</a>    what: <span class="kw-2">&amp;</span>str,
-<a href=#84 id=84 data-nosnippet>84</a>    names: <span class="kw-2">&amp;</span>[String],
-<a href=#85 id=85 data-nosnippet>85</a>    trends: <span class="kw-2">&amp;</span>[(u64, String)],
-<a href=#86 id=86 data-nosnippet>86</a>    requests: <span class="kw-2">&amp;mut </span>Vec&lt;Request&gt;,
-<a href=#87 id=87 data-nosnippet>87</a>) {
-<a href=#88 id=88 data-nosnippet>88</a>    <span class="kw">match </span>trends {
-<a href=#89 id=89 data-nosnippet>89</a>        [] =&gt; {}
-<a href=#90 id=90 data-nosnippet>90</a>        [(id, title)] =&gt; {
-<a href=#91 id=91 data-nosnippet>91</a>            <span class="kw">if </span>ui.button(<span class="macro">format!</span>(<span class="string">"Add{what} to \"{title}\""</span>)).clicked() {
-<a href=#92 id=92 data-nosnippet>92</a>                requests.push(Request::TrendAdd(<span class="kw-2">*</span>id, names.to_vec()));
-<a href=#93 id=93 data-nosnippet>93</a>            }
-<a href=#94 id=94 data-nosnippet>94</a>        }
-<a href=#95 id=95 data-nosnippet>95</a>        <span class="kw">_ </span>=&gt; {
-<a href=#96 id=96 data-nosnippet>96</a>            ui.menu_button(<span class="macro">format!</span>(<span class="string">"Add{what} to trend"</span>), |ui| {
-<a href=#97 id=97 data-nosnippet>97</a>                <span class="kw">for </span>(id, title) <span class="kw">in </span>trends {
-<a href=#98 id=98 data-nosnippet>98</a>                    <span class="kw">if </span>ui.button(title).clicked() {
-<a href=#99 id=99 data-nosnippet>99</a>                        requests.push(Request::TrendAdd(<span class="kw-2">*</span>id, names.to_vec()));
-<a href=#100 id=100 data-nosnippet>100</a>                    }
-<a href=#101 id=101 data-nosnippet>101</a>                }
-<a href=#102 id=102 data-nosnippet>102</a>            });
-<a href=#103 id=103 data-nosnippet>103</a>        }
-<a href=#104 id=104 data-nosnippet>104</a>    }
-<a href=#105 id=105 data-nosnippet>105</a>}
-<a href=#106 id=106 data-nosnippet>106</a>
-<a href=#107 id=107 data-nosnippet>107</a><span class="doccomment">/// The widget's PV and the other PVs its rules read, each once.
-<a href=#108 id=108 data-nosnippet>108</a></span><span class="kw">fn </span>trend_names(node: <span class="kw-2">&amp;</span>Node) -&gt; Vec&lt;String&gt; {
-<a href=#109 id=109 data-nosnippet>109</a>    <span class="kw">let </span><span class="kw-2">mut </span>names: Vec&lt;String&gt; = Vec::new();
-<a href=#110 id=110 data-nosnippet>110</a>    <span class="kw">let </span>rules = node.rules.iter().flat_map(|r| r.pvs());
-<a href=#111 id=111 data-nosnippet>111</a>    <span class="kw">for </span>pv <span class="kw">in </span>node.pv.iter().chain(rules) {
-<a href=#112 id=112 data-nosnippet>112</a>        <span class="kw">let </span>name = pv.name().to_string();
-<a href=#113 id=113 data-nosnippet>113</a>        <span class="kw">if </span>!names.contains(<span class="kw-2">&amp;</span>name) {
-<a href=#114 id=114 data-nosnippet>114</a>            names.push(name);
-<a href=#115 id=115 data-nosnippet>115</a>        }
-<a href=#116 id=116 data-nosnippet>116</a>    }
-<a href=#117 id=117 data-nosnippet>117</a>    names
-<a href=#118 id=118 data-nosnippet>118</a>}
-<a href=#119 id=119 data-nosnippet>119</a>
-<a href=#120 id=120 data-nosnippet>120</a><span class="doccomment">/// The body of the PV details window.
-<a href=#121 id=121 data-nosnippet>121</a></span><span class="kw">pub fn </span>details_ui(ui: <span class="kw-2">&amp;mut </span>Ui, details: <span class="kw-2">&amp;</span>Details) {
-<a href=#122 id=122 data-nosnippet>122</a>    <span class="kw">let </span>rows = details_rows(details, <span class="kw-2">&amp;</span>details.pv.state());
-<a href=#123 id=123 data-nosnippet>123</a>    egui::Grid::new(<span class="string">"pv-details"</span>)
-<a href=#124 id=124 data-nosnippet>124</a>        .num_columns(<span class="number">2</span>)
-<a href=#125 id=125 data-nosnippet>125</a>        .striped(<span class="bool-val">true</span>)
-<a href=#126 id=126 data-nosnippet>126</a>        .show(ui, |ui| {
-<a href=#127 id=127 data-nosnippet>127</a>            <span class="kw">for </span>(key, val) <span class="kw">in </span><span class="kw-2">&amp;</span>rows {
-<a href=#128 id=128 data-nosnippet>128</a>                ui.label(<span class="kw-2">*</span>key);
-<a href=#129 id=129 data-nosnippet>129</a>                ui.label(val);
-<a href=#130 id=130 data-nosnippet>130</a>                ui.end_row();
-<a href=#131 id=131 data-nosnippet>131</a>            }
-<a href=#132 id=132 data-nosnippet>132</a>        });
-<a href=#133 id=133 data-nosnippet>133</a>    ui.add_space(<span class="number">4.0</span>);
-<a href=#134 id=134 data-nosnippet>134</a>    <span class="kw">if </span>ui.button(<span class="string">"Copy all"</span>).clicked() {
-<a href=#135 id=135 data-nosnippet>135</a>        <span class="kw">let </span>text: Vec&lt;String&gt; = rows.iter().map(|(k, v)| <span class="macro">format!</span>(<span class="string">"{k}: {v}"</span>)).collect();
-<a href=#136 id=136 data-nosnippet>136</a>        ui.ctx().copy_text(text.join(<span class="string">"\n"</span>));
+<a href=#45 id=45 data-nosnippet>45</a>        <span class="kw">if </span>ui.button(<span class="string">"Copy name, value, alarm and time"</span>).clicked() {
+<a href=#46 id=46 data-nosnippet>46</a>            ui.ctx().copy_text(full_line(name, state));
+<a href=#47 id=47 data-nosnippet>47</a>        }
+<a href=#48 id=48 data-nosnippet>48</a>    }
+<a href=#49 id=49 data-nosnippet>49</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(cmd) = cli_command(<span class="kw-2">&amp;</span>PvName::parse(name))
+<a href=#50 id=50 data-nosnippet>50</a>        &amp;&amp; ui.button(<span class="macro">format!</span>(<span class="string">"Copy \"{cmd}\""</span>)).clicked()
+<a href=#51 id=51 data-nosnippet>51</a>    {
+<a href=#52 id=52 data-nosnippet>52</a>        ui.ctx().copy_text(cmd);
+<a href=#53 id=53 data-nosnippet>53</a>    }
+<a href=#54 id=54 data-nosnippet>54</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(pv) = <span class="kw-2">&amp;</span>node.pv {
+<a href=#55 id=55 data-nosnippet>55</a>        ui.separator();
+<a href=#56 id=56 data-nosnippet>56</a>        <span class="kw">if </span>ui.button(<span class="string">"Trend"</span>).clicked() {
+<a href=#57 id=57 data-nosnippet>57</a>            requests.push(Request::Trend(<span class="macro">vec!</span>[name.to_string()]));
+<a href=#58 id=58 data-nosnippet>58</a>        }
+<a href=#59 id=59 data-nosnippet>59</a>        <span class="kw">let </span>all = trend_names(node);
+<a href=#60 id=60 data-nosnippet>60</a>        <span class="kw">if </span>all.len() &gt; <span class="number">1
+<a href=#61 id=61 data-nosnippet>61</a>            </span>&amp;&amp; ui
+<a href=#62 id=62 data-nosnippet>62</a>                .button(<span class="macro">format!</span>(<span class="string">"Trend with rule PVs ({})"</span>, all.len()))
+<a href=#63 id=63 data-nosnippet>63</a>                .clicked()
+<a href=#64 id=64 data-nosnippet>64</a>        {
+<a href=#65 id=65 data-nosnippet>65</a>            requests.push(Request::Trend(all.clone()));
+<a href=#66 id=66 data-nosnippet>66</a>        }
+<a href=#67 id=67 data-nosnippet>67</a>        add_to_trend(ui, <span class="string">""</span>, <span class="kw-2">&amp;</span>[name.to_string()], trends, requests);
+<a href=#68 id=68 data-nosnippet>68</a>        <span class="kw">if </span>all.len() &gt; <span class="number">1 </span>{
+<a href=#69 id=69 data-nosnippet>69</a>            <span class="kw">let </span>with = <span class="macro">format!</span>(<span class="string">" with rule PVs ({})"</span>, all.len());
+<a href=#70 id=70 data-nosnippet>70</a>            add_to_trend(ui, <span class="kw-2">&amp;</span>with, <span class="kw-2">&amp;</span>all, trends, requests);
+<a href=#71 id=71 data-nosnippet>71</a>        }
+<a href=#72 id=72 data-nosnippet>72</a>        <span class="kw">if </span>ui.button(<span class="string">"PV details…"</span>).clicked() {
+<a href=#73 id=73 data-nosnippet>73</a>            requests.push(Request::Details(Details {
+<a href=#74 id=74 data-nosnippet>74</a>                pv: pv.clone(),
+<a href=#75 id=75 data-nosnippet>75</a>                widget: widget_label(node),
+<a href=#76 id=76 data-nosnippet>76</a>                file: node.base.clone(),
+<a href=#77 id=77 data-nosnippet>77</a>            }));
+<a href=#78 id=78 data-nosnippet>78</a>        }
+<a href=#79 id=79 data-nosnippet>79</a>    }
+<a href=#80 id=80 data-nosnippet>80</a>}
+<a href=#81 id=81 data-nosnippet>81</a>
+<a href=#82 id=82 data-nosnippet>82</a><span class="doccomment">/// "Add to trend" entries: a button for the one open trend window, or a
+<a href=#83 id=83 data-nosnippet>83</a>/// submenu listing them when there are several.
+<a href=#84 id=84 data-nosnippet>84</a></span><span class="kw">fn </span>add_to_trend(
+<a href=#85 id=85 data-nosnippet>85</a>    ui: <span class="kw-2">&amp;mut </span>Ui,
+<a href=#86 id=86 data-nosnippet>86</a>    what: <span class="kw-2">&amp;</span>str,
+<a href=#87 id=87 data-nosnippet>87</a>    names: <span class="kw-2">&amp;</span>[String],
+<a href=#88 id=88 data-nosnippet>88</a>    trends: <span class="kw-2">&amp;</span>[(u64, String)],
+<a href=#89 id=89 data-nosnippet>89</a>    requests: <span class="kw-2">&amp;mut </span>Vec&lt;Request&gt;,
+<a href=#90 id=90 data-nosnippet>90</a>) {
+<a href=#91 id=91 data-nosnippet>91</a>    <span class="kw">match </span>trends {
+<a href=#92 id=92 data-nosnippet>92</a>        [] =&gt; {}
+<a href=#93 id=93 data-nosnippet>93</a>        [(id, title)] =&gt; {
+<a href=#94 id=94 data-nosnippet>94</a>            <span class="kw">if </span>ui.button(<span class="macro">format!</span>(<span class="string">"Add{what} to \"{title}\""</span>)).clicked() {
+<a href=#95 id=95 data-nosnippet>95</a>                requests.push(Request::TrendAdd(<span class="kw-2">*</span>id, names.to_vec()));
+<a href=#96 id=96 data-nosnippet>96</a>            }
+<a href=#97 id=97 data-nosnippet>97</a>        }
+<a href=#98 id=98 data-nosnippet>98</a>        <span class="kw">_ </span>=&gt; {
+<a href=#99 id=99 data-nosnippet>99</a>            ui.menu_button(<span class="macro">format!</span>(<span class="string">"Add{what} to trend"</span>), |ui| {
+<a href=#100 id=100 data-nosnippet>100</a>                <span class="kw">for </span>(id, title) <span class="kw">in </span>trends {
+<a href=#101 id=101 data-nosnippet>101</a>                    <span class="kw">if </span>ui.button(title).clicked() {
+<a href=#102 id=102 data-nosnippet>102</a>                        requests.push(Request::TrendAdd(<span class="kw-2">*</span>id, names.to_vec()));
+<a href=#103 id=103 data-nosnippet>103</a>                    }
+<a href=#104 id=104 data-nosnippet>104</a>                }
+<a href=#105 id=105 data-nosnippet>105</a>            });
+<a href=#106 id=106 data-nosnippet>106</a>        }
+<a href=#107 id=107 data-nosnippet>107</a>    }
+<a href=#108 id=108 data-nosnippet>108</a>}
+<a href=#109 id=109 data-nosnippet>109</a>
+<a href=#110 id=110 data-nosnippet>110</a><span class="doccomment">/// The widget's PV and the other PVs its rules read, each once.
+<a href=#111 id=111 data-nosnippet>111</a></span><span class="kw">fn </span>trend_names(node: <span class="kw-2">&amp;</span>Node) -&gt; Vec&lt;String&gt; {
+<a href=#112 id=112 data-nosnippet>112</a>    <span class="kw">let </span><span class="kw-2">mut </span>names: Vec&lt;String&gt; = Vec::new();
+<a href=#113 id=113 data-nosnippet>113</a>    <span class="kw">let </span>rules = node.rules.iter().flat_map(|r| r.pvs());
+<a href=#114 id=114 data-nosnippet>114</a>    <span class="kw">for </span>pv <span class="kw">in </span>node.pv.iter().chain(rules) {
+<a href=#115 id=115 data-nosnippet>115</a>        <span class="kw">let </span>name = pv.name().to_string();
+<a href=#116 id=116 data-nosnippet>116</a>        <span class="kw">if </span>!names.contains(<span class="kw-2">&amp;</span>name) {
+<a href=#117 id=117 data-nosnippet>117</a>            names.push(name);
+<a href=#118 id=118 data-nosnippet>118</a>        }
+<a href=#119 id=119 data-nosnippet>119</a>    }
+<a href=#120 id=120 data-nosnippet>120</a>    names
+<a href=#121 id=121 data-nosnippet>121</a>}
+<a href=#122 id=122 data-nosnippet>122</a>
+<a href=#123 id=123 data-nosnippet>123</a><span class="doccomment">/// What a middle-click on the widget copies: its PV's name, or, for a plot
+<a href=#124 id=124 data-nosnippet>124</a>/// with no PV of its own (an XY plot or strip chart), its traces' PVs,
+<a href=#125 id=125 data-nosnippet>125</a>/// separated by spaces (see [`copy_name`]). Rule PVs are left out: they
+<a href=#126 id=126 data-nosnippet>126</a>/// choose how the widget looks, and are not what it shows.
+<a href=#127 id=127 data-nosnippet>127</a></span><span class="kw">pub fn </span>copy_names(node: <span class="kw-2">&amp;</span>Node) -&gt; <span class="prelude-ty">Option</span>&lt;String&gt; {
+<a href=#128 id=128 data-nosnippet>128</a>    <span class="kw">let </span><span class="kw-2">mut </span>names: Vec&lt;String&gt; = Vec::new();
+<a href=#129 id=129 data-nosnippet>129</a>    <span class="kw">if </span>!node.pv_name.is_empty() {
+<a href=#130 id=130 data-nosnippet>130</a>        copy_name(<span class="kw-2">&amp;</span>PvName::parse(<span class="kw-2">&amp;</span>node.pv_name), <span class="kw-2">&amp;mut </span>names);
+<a href=#131 id=131 data-nosnippet>131</a>    } <span class="kw">else </span>{
+<a href=#132 id=132 data-nosnippet>132</a>        <span class="kw">for </span>t <span class="kw">in </span><span class="kw-2">&amp;</span>node.traces {
+<a href=#133 id=133 data-nosnippet>133</a>            <span class="kw">for </span>pv <span class="kw">in </span>t.y.iter().chain(<span class="kw-2">&amp;</span>t.x) {
+<a href=#134 id=134 data-nosnippet>134</a>                copy_name(pv.name(), <span class="kw-2">&amp;mut </span>names);
+<a href=#135 id=135 data-nosnippet>135</a>            }
+<a href=#136 id=136 data-nosnippet>136</a>        }
 <a href=#137 id=137 data-nosnippet>137</a>    }
-<a href=#138 id=138 data-nosnippet>138</a>}
-<a href=#139 id=139 data-nosnippet>139</a>
-<a href=#140 id=140 data-nosnippet>140</a><span class="doccomment">/// What the details window shows, as (label, value) rows.
-<a href=#141 id=141 data-nosnippet>141</a></span><span class="kw">fn </span>details_rows(details: <span class="kw-2">&amp;</span>Details, s: <span class="kw-2">&amp;</span>PvState) -&gt; Vec&lt;(<span class="kw-2">&amp;</span><span class="lifetime">'static </span>str, String)&gt; {
-<a href=#142 id=142 data-nosnippet>142</a>    <span class="kw">let </span>name = details.pv.name();
-<a href=#143 id=143 data-nosnippet>143</a>    <span class="kw">let </span><span class="kw-2">mut </span>rows = <span class="macro">vec!</span>[
-<a href=#144 id=144 data-nosnippet>144</a>        (<span class="string">"Name"</span>, name.to_string()),
-<a href=#145 id=145 data-nosnippet>145</a>        (<span class="string">"Protocol"</span>, protocol(name.scheme).into()),
-<a href=#146 id=146 data-nosnippet>146</a>        (
-<a href=#147 id=147 data-nosnippet>147</a>            <span class="string">"Connection"</span>,
-<a href=#148 id=148 data-nosnippet>148</a>            <span class="kw">match </span>(<span class="kw-2">&amp;</span>s.connected, <span class="kw-2">&amp;</span>s.error) {
-<a href=#149 id=149 data-nosnippet>149</a>                (<span class="bool-val">true</span>, <span class="kw">_</span>) =&gt; <span class="string">"connected"</span>.into(),
-<a href=#150 id=150 data-nosnippet>150</a>                (<span class="bool-val">false</span>, <span class="prelude-val">Some</span>(e)) =&gt; <span class="macro">format!</span>(<span class="string">"disconnected: {e}"</span>),
-<a href=#151 id=151 data-nosnippet>151</a>                (<span class="bool-val">false</span>, <span class="prelude-val">None</span>) =&gt; <span class="string">"disconnected"</span>.into(),
-<a href=#152 id=152 data-nosnippet>152</a>            },
-<a href=#153 id=153 data-nosnippet>153</a>        ),
-<a href=#154 id=154 data-nosnippet>154</a>    ];
-<a href=#155 id=155 data-nosnippet>155</a>    <span class="kw">if </span>s.connected {
-<a href=#156 id=156 data-nosnippet>156</a>        rows.push((<span class="string">"Value"</span>, s.format(<span class="prelude-val">None</span>, <span class="bool-val">true</span>)));
-<a href=#157 id=157 data-nosnippet>157</a>        rows.push((<span class="string">"Type"</span>, value_type(<span class="kw-2">&amp;</span>s.value)));
-<a href=#158 id=158 data-nosnippet>158</a>        rows.push((
-<a href=#159 id=159 data-nosnippet>159</a>            <span class="string">"Alarm"</span>,
-<a href=#160 id=160 data-nosnippet>160</a>            <span class="macro">format!</span>(<span class="string">"{} (status {})"</span>, severity_name(s.severity), s.status),
-<a href=#161 id=161 data-nosnippet>161</a>        ));
-<a href=#162 id=162 data-nosnippet>162</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(t) = s.timestamp {
-<a href=#163 id=163 data-nosnippet>163</a>            rows.push((<span class="string">"Time"</span>, format_time(t)));
-<a href=#164 id=164 data-nosnippet>164</a>        }
-<a href=#165 id=165 data-nosnippet>165</a>        <span class="kw">if </span>!s.units.is_empty() {
-<a href=#166 id=166 data-nosnippet>166</a>            rows.push((<span class="string">"Units"</span>, s.units.clone()));
-<a href=#167 id=167 data-nosnippet>167</a>        }
-<a href=#168 id=168 data-nosnippet>168</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(p) = s.precision {
-<a href=#169 id=169 data-nosnippet>169</a>            rows.push((<span class="string">"Precision"</span>, p.to_string()));
-<a href=#170 id=170 data-nosnippet>170</a>        }
-<a href=#171 id=171 data-nosnippet>171</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>((lo, hi)) = s.display_range {
-<a href=#172 id=172 data-nosnippet>172</a>            rows.push((<span class="string">"Display limits"</span>, <span class="macro">format!</span>(<span class="string">"{lo} to {hi}"</span>)));
-<a href=#173 id=173 data-nosnippet>173</a>        }
-<a href=#174 id=174 data-nosnippet>174</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>((lo, hi)) = s.control_range {
-<a href=#175 id=175 data-nosnippet>175</a>            rows.push((<span class="string">"Control limits"</span>, <span class="macro">format!</span>(<span class="string">"{lo} to {hi}"</span>)));
-<a href=#176 id=176 data-nosnippet>176</a>        }
-<a href=#177 id=177 data-nosnippet>177</a>        <span class="kw">if </span>!s.labels.is_empty() {
-<a href=#178 id=178 data-nosnippet>178</a>            rows.push((<span class="string">"States"</span>, s.labels.join(<span class="string">", "</span>)));
-<a href=#179 id=179 data-nosnippet>179</a>        }
-<a href=#180 id=180 data-nosnippet>180</a>        rows.push((<span class="string">"Writable"</span>, writable_text(s).into()));
-<a href=#181 id=181 data-nosnippet>181</a>    }
-<a href=#182 id=182 data-nosnippet>182</a>    <span class="comment">// Kept while disconnected: a write may have failed for that very reason.
-<a href=#183 id=183 data-nosnippet>183</a>    </span><span class="kw">if let </span><span class="prelude-val">Some</span>(e) = <span class="kw-2">&amp;</span>s.write_error {
-<a href=#184 id=184 data-nosnippet>184</a>        rows.push((<span class="string">"Last write failed"</span>, e.clone()));
-<a href=#185 id=185 data-nosnippet>185</a>    }
-<a href=#186 id=186 data-nosnippet>186</a>    rows.push((<span class="string">"Widget"</span>, details.widget.clone()));
-<a href=#187 id=187 data-nosnippet>187</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(file) = <span class="kw-2">&amp;</span>details.file {
-<a href=#188 id=188 data-nosnippet>188</a>        rows.push((<span class="string">"Display"</span>, file.to_string()));
-<a href=#189 id=189 data-nosnippet>189</a>    }
-<a href=#190 id=190 data-nosnippet>190</a>    rows
-<a href=#191 id=191 data-nosnippet>191</a>}
-<a href=#192 id=192 data-nosnippet>192</a>
-<a href=#193 id=193 data-nosnippet>193</a><span class="doccomment">/// Whether a write is allowed: PV Access gives no access rights, so there
-<a href=#194 id=194 data-nosnippet>194</a>/// the answer is a guess until a put is refused.
-<a href=#195 id=195 data-nosnippet>195</a></span><span class="kw">fn </span>writable_text(s: <span class="kw-2">&amp;</span>PvState) -&gt; <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str {
-<a href=#196 id=196 data-nosnippet>196</a>    <span class="kw">match </span>(s.writable, s.writable_known) {
-<a href=#197 id=197 data-nosnippet>197</a>        (<span class="bool-val">true</span>, <span class="bool-val">true</span>) =&gt; <span class="string">"yes"</span>,
-<a href=#198 id=198 data-nosnippet>198</a>        (<span class="bool-val">false</span>, <span class="kw">_</span>) =&gt; <span class="string">"no"</span>,
-<a href=#199 id=199 data-nosnippet>199</a>        (<span class="bool-val">true</span>, <span class="bool-val">false</span>) =&gt; <span class="string">"unknown (the server decides when you write)"</span>,
-<a href=#200 id=200 data-nosnippet>200</a>    }
-<a href=#201 id=201 data-nosnippet>201</a>}
-<a href=#202 id=202 data-nosnippet>202</a>
-<a href=#203 id=203 data-nosnippet>203</a><span class="doccomment">/// A one-line summary for bug reports and logbooks.
-<a href=#204 id=204 data-nosnippet>204</a></span><span class="kw">fn </span>full_line(name: <span class="kw-2">&amp;</span>str, s: <span class="kw-2">&amp;</span>PvState) -&gt; String {
-<a href=#205 id=205 data-nosnippet>205</a>    <span class="kw">let </span><span class="kw-2">mut </span>line = <span class="macro">format!</span>(
-<a href=#206 id=206 data-nosnippet>206</a>        <span class="string">"{name} = {} {}"</span>,
-<a href=#207 id=207 data-nosnippet>207</a>        s.format(<span class="prelude-val">None</span>, <span class="bool-val">true</span>),
-<a href=#208 id=208 data-nosnippet>208</a>        severity_name(s.severity)
-<a href=#209 id=209 data-nosnippet>209</a>    );
-<a href=#210 id=210 data-nosnippet>210</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(t) = s.timestamp {
-<a href=#211 id=211 data-nosnippet>211</a>        line.push(<span class="string">' '</span>);
-<a href=#212 id=212 data-nosnippet>212</a>        line.push_str(<span class="kw-2">&amp;</span>format_time(t));
-<a href=#213 id=213 data-nosnippet>213</a>    }
-<a href=#214 id=214 data-nosnippet>214</a>    line
-<a href=#215 id=215 data-nosnippet>215</a>}
-<a href=#216 id=216 data-nosnippet>216</a>
-<a href=#217 id=217 data-nosnippet>217</a><span class="doccomment">/// A shell command that reads the PV, for the protocols that have one.
-<a href=#218 id=218 data-nosnippet>218</a></span><span class="kw">fn </span>cli_command(name: <span class="kw-2">&amp;</span>PvName) -&gt; <span class="prelude-ty">Option</span>&lt;String&gt; {
-<a href=#219 id=219 data-nosnippet>219</a>    <span class="kw">match </span>name.scheme {
-<a href=#220 id=220 data-nosnippet>220</a>        Scheme::Ca =&gt; <span class="prelude-val">Some</span>(<span class="macro">format!</span>(<span class="string">"caget {}"</span>, shell_quote(<span class="kw-2">&amp;</span>name.pv))),
-<a href=#221 id=221 data-nosnippet>221</a>        Scheme::Pva =&gt; <span class="prelude-val">Some</span>(<span class="macro">format!</span>(<span class="string">"pvget {}"</span>, shell_quote(<span class="kw-2">&amp;</span>name.pv))),
-<a href=#222 id=222 data-nosnippet>222</a>        Scheme::Loc | Scheme::Sim | Scheme::Formula | Scheme::Unsupported =&gt; <span class="prelude-val">None</span>,
-<a href=#223 id=223 data-nosnippet>223</a>    }
-<a href=#224 id=224 data-nosnippet>224</a>}
-<a href=#225 id=225 data-nosnippet>225</a>
-<a href=#226 id=226 data-nosnippet>226</a><span class="doccomment">/// Quote `s` as one shell word, so a pasted command can't run anything else.
-<a href=#227 id=227 data-nosnippet>227</a>/// Names made only of the usual PV characters are left bare.
-<a href=#228 id=228 data-nosnippet>228</a></span><span class="kw">fn </span>shell_quote(s: <span class="kw-2">&amp;</span>str) -&gt; String {
-<a href=#229 id=229 data-nosnippet>229</a>    <span class="kw">let </span>plain = |c: char| c.is_ascii_alphanumeric() || <span class="string">"_-:.+/=,@%"</span>.contains(c);
-<a href=#230 id=230 data-nosnippet>230</a>    <span class="kw">if </span>!s.is_empty() &amp;&amp; s.chars().all(plain) {
-<a href=#231 id=231 data-nosnippet>231</a>        s.to_string()
-<a href=#232 id=232 data-nosnippet>232</a>    } <span class="kw">else </span>{
-<a href=#233 id=233 data-nosnippet>233</a>        <span class="macro">format!</span>(<span class="string">"'{}'"</span>, s.replace(<span class="string">'\''</span>, <span class="string">r"'\''"</span>))
-<a href=#234 id=234 data-nosnippet>234</a>    }
-<a href=#235 id=235 data-nosnippet>235</a>}
-<a href=#236 id=236 data-nosnippet>236</a>
-<a href=#237 id=237 data-nosnippet>237</a><span class="kw">fn </span>widget_label(node: <span class="kw-2">&amp;</span>Node) -&gt; String {
-<a href=#238 id=238 data-nosnippet>238</a>    <span class="kw">match </span>node.w.text(<span class="string">"name"</span>) {
-<a href=#239 id=239 data-nosnippet>239</a>        <span class="prelude-val">Some</span>(name) <span class="kw">if </span>!name.is_empty() =&gt; <span class="macro">format!</span>(<span class="string">"{} \"{name}\""</span>, node.w.kind),
-<a href=#240 id=240 data-nosnippet>240</a>        <span class="kw">_ </span>=&gt; node.w.kind.clone(),
-<a href=#241 id=241 data-nosnippet>241</a>    }
-<a href=#242 id=242 data-nosnippet>242</a>}
-<a href=#243 id=243 data-nosnippet>243</a>
-<a href=#244 id=244 data-nosnippet>244</a><span class="kw">fn </span>protocol(scheme: Scheme) -&gt; <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str {
-<a href=#245 id=245 data-nosnippet>245</a>    <span class="kw">match </span>scheme {
-<a href=#246 id=246 data-nosnippet>246</a>        Scheme::Ca =&gt; <span class="string">"Channel Access"</span>,
-<a href=#247 id=247 data-nosnippet>247</a>        Scheme::Pva =&gt; <span class="string">"PV Access"</span>,
-<a href=#248 id=248 data-nosnippet>248</a>        Scheme::Loc =&gt; <span class="string">"local"</span>,
-<a href=#249 id=249 data-nosnippet>249</a>        Scheme::Sim =&gt; <span class="string">"simulated"</span>,
-<a href=#250 id=250 data-nosnippet>250</a>        Scheme::Formula =&gt; <span class="string">"formula"</span>,
-<a href=#251 id=251 data-nosnippet>251</a>        Scheme::Unsupported =&gt; <span class="string">"not supported"</span>,
-<a href=#252 id=252 data-nosnippet>252</a>    }
-<a href=#253 id=253 data-nosnippet>253</a>}
-<a href=#254 id=254 data-nosnippet>254</a>
-<a href=#255 id=255 data-nosnippet>255</a><span class="kw">fn </span>severity_name(sevr: Severity) -&gt; <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str {
-<a href=#256 id=256 data-nosnippet>256</a>    <span class="kw">match </span>sevr {
-<a href=#257 id=257 data-nosnippet>257</a>        Severity::NoAlarm =&gt; <span class="string">"NO_ALARM"</span>,
-<a href=#258 id=258 data-nosnippet>258</a>        Severity::Minor =&gt; <span class="string">"MINOR"</span>,
-<a href=#259 id=259 data-nosnippet>259</a>        Severity::Major =&gt; <span class="string">"MAJOR"</span>,
-<a href=#260 id=260 data-nosnippet>260</a>        Severity::Invalid =&gt; <span class="string">"INVALID"</span>,
-<a href=#261 id=261 data-nosnippet>261</a>    }
+<a href=#138 id=138 data-nosnippet>138</a>    (!names.is_empty()).then(|| names.join(<span class="string">" "</span>))
+<a href=#139 id=139 data-nosnippet>139</a>}
+<a href=#140 id=140 data-nosnippet>140</a>
+<a href=#141 id=141 data-nosnippet>141</a><span class="doccomment">/// Add a PV's name to `names` (unless it is there) as another EPICS tool
+<a href=#142 id=142 data-nosnippet>142</a>/// takes it: a Channel Access name bare and whole, a PV Access, local or
+<a href=#143 id=143 data-nosnippet>143</a>/// simulated one with its prefix (`loc://x`, without the type and initial
+<a href=#144 id=144 data-nosnippet>144</a>/// value of `loc://x&lt;VDouble&gt;(1.5)`; a simulated PV keeps its parameters).
+<a href=#145 id=145 data-nosnippet>145</a>/// A formula adds the PVs it reads instead, as its text has spaces.
+<a href=#146 id=146 data-nosnippet>146</a></span><span class="kw">fn </span>copy_name(name: <span class="kw-2">&amp;</span>PvName, names: <span class="kw-2">&amp;mut </span>Vec&lt;String&gt;) {
+<a href=#147 id=147 data-nosnippet>147</a>    <span class="kw">let </span>name = <span class="kw">match </span>name.scheme {
+<a href=#148 id=148 data-nosnippet>148</a>        Scheme::Ca =&gt; name.pv.clone(),
+<a href=#149 id=149 data-nosnippet>149</a>        Scheme::Pva | Scheme::Loc | Scheme::Sim =&gt; name.key(),
+<a href=#150 id=150 data-nosnippet>150</a>        Scheme::Unsupported =&gt; name.to_string(),
+<a href=#151 id=151 data-nosnippet>151</a>        Scheme::Formula =&gt; {
+<a href=#152 id=152 data-nosnippet>152</a>            <span class="kw">for </span>input <span class="kw">in </span>pv::formula_inputs(<span class="kw-2">&amp;</span>name.pv) {
+<a href=#153 id=153 data-nosnippet>153</a>                <span class="comment">// An input is never a formula itself: `=` starts no name.
+<a href=#154 id=154 data-nosnippet>154</a>                </span><span class="kw">let </span>input = PvName::parse(<span class="kw-2">&amp;</span>input);
+<a href=#155 id=155 data-nosnippet>155</a>                <span class="kw">if </span>input.scheme != Scheme::Formula {
+<a href=#156 id=156 data-nosnippet>156</a>                    copy_name(<span class="kw-2">&amp;</span>input, names);
+<a href=#157 id=157 data-nosnippet>157</a>                }
+<a href=#158 id=158 data-nosnippet>158</a>            }
+<a href=#159 id=159 data-nosnippet>159</a>            <span class="kw">return</span>;
+<a href=#160 id=160 data-nosnippet>160</a>        }
+<a href=#161 id=161 data-nosnippet>161</a>    };
+<a href=#162 id=162 data-nosnippet>162</a>    <span class="kw">if </span>!names.contains(<span class="kw-2">&amp;</span>name) {
+<a href=#163 id=163 data-nosnippet>163</a>        names.push(name);
+<a href=#164 id=164 data-nosnippet>164</a>    }
+<a href=#165 id=165 data-nosnippet>165</a>}
+<a href=#166 id=166 data-nosnippet>166</a>
+<a href=#167 id=167 data-nosnippet>167</a><span class="doccomment">/// The body of the PV details window.
+<a href=#168 id=168 data-nosnippet>168</a></span><span class="kw">pub fn </span>details_ui(ui: <span class="kw-2">&amp;mut </span>Ui, details: <span class="kw-2">&amp;</span>Details) {
+<a href=#169 id=169 data-nosnippet>169</a>    <span class="kw">let </span>rows = details_rows(details, <span class="kw-2">&amp;</span>details.pv.state());
+<a href=#170 id=170 data-nosnippet>170</a>    egui::Grid::new(<span class="string">"pv-details"</span>)
+<a href=#171 id=171 data-nosnippet>171</a>        .num_columns(<span class="number">2</span>)
+<a href=#172 id=172 data-nosnippet>172</a>        .striped(<span class="bool-val">true</span>)
+<a href=#173 id=173 data-nosnippet>173</a>        .show(ui, |ui| {
+<a href=#174 id=174 data-nosnippet>174</a>            <span class="kw">for </span>(key, val) <span class="kw">in </span><span class="kw-2">&amp;</span>rows {
+<a href=#175 id=175 data-nosnippet>175</a>                ui.label(<span class="kw-2">*</span>key);
+<a href=#176 id=176 data-nosnippet>176</a>                ui.label(val);
+<a href=#177 id=177 data-nosnippet>177</a>                ui.end_row();
+<a href=#178 id=178 data-nosnippet>178</a>            }
+<a href=#179 id=179 data-nosnippet>179</a>        });
+<a href=#180 id=180 data-nosnippet>180</a>    ui.add_space(<span class="number">4.0</span>);
+<a href=#181 id=181 data-nosnippet>181</a>    <span class="kw">if </span>ui.button(<span class="string">"Copy all"</span>).clicked() {
+<a href=#182 id=182 data-nosnippet>182</a>        <span class="kw">let </span>text: Vec&lt;String&gt; = rows.iter().map(|(k, v)| <span class="macro">format!</span>(<span class="string">"{k}: {v}"</span>)).collect();
+<a href=#183 id=183 data-nosnippet>183</a>        ui.ctx().copy_text(text.join(<span class="string">"\n"</span>));
+<a href=#184 id=184 data-nosnippet>184</a>    }
+<a href=#185 id=185 data-nosnippet>185</a>}
+<a href=#186 id=186 data-nosnippet>186</a>
+<a href=#187 id=187 data-nosnippet>187</a><span class="doccomment">/// What the details window shows, as (label, value) rows.
+<a href=#188 id=188 data-nosnippet>188</a></span><span class="kw">fn </span>details_rows(details: <span class="kw-2">&amp;</span>Details, s: <span class="kw-2">&amp;</span>PvState) -&gt; Vec&lt;(<span class="kw-2">&amp;</span><span class="lifetime">'static </span>str, String)&gt; {
+<a href=#189 id=189 data-nosnippet>189</a>    <span class="kw">let </span>name = details.pv.name();
+<a href=#190 id=190 data-nosnippet>190</a>    <span class="kw">let </span><span class="kw-2">mut </span>rows = <span class="macro">vec!</span>[
+<a href=#191 id=191 data-nosnippet>191</a>        (<span class="string">"Name"</span>, name.to_string()),
+<a href=#192 id=192 data-nosnippet>192</a>        (<span class="string">"Protocol"</span>, protocol(name.scheme).into()),
+<a href=#193 id=193 data-nosnippet>193</a>        (
+<a href=#194 id=194 data-nosnippet>194</a>            <span class="string">"Connection"</span>,
+<a href=#195 id=195 data-nosnippet>195</a>            <span class="kw">match </span>(<span class="kw-2">&amp;</span>s.connected, <span class="kw-2">&amp;</span>s.error) {
+<a href=#196 id=196 data-nosnippet>196</a>                (<span class="bool-val">true</span>, <span class="kw">_</span>) =&gt; <span class="string">"connected"</span>.into(),
+<a href=#197 id=197 data-nosnippet>197</a>                (<span class="bool-val">false</span>, <span class="prelude-val">Some</span>(e)) =&gt; <span class="macro">format!</span>(<span class="string">"disconnected: {e}"</span>),
+<a href=#198 id=198 data-nosnippet>198</a>                (<span class="bool-val">false</span>, <span class="prelude-val">None</span>) =&gt; <span class="string">"disconnected"</span>.into(),
+<a href=#199 id=199 data-nosnippet>199</a>            },
+<a href=#200 id=200 data-nosnippet>200</a>        ),
+<a href=#201 id=201 data-nosnippet>201</a>    ];
+<a href=#202 id=202 data-nosnippet>202</a>    <span class="kw">if </span>s.connected {
+<a href=#203 id=203 data-nosnippet>203</a>        rows.push((<span class="string">"Value"</span>, s.format(<span class="prelude-val">None</span>, <span class="bool-val">true</span>)));
+<a href=#204 id=204 data-nosnippet>204</a>        rows.push((<span class="string">"Type"</span>, value_type(<span class="kw-2">&amp;</span>s.value)));
+<a href=#205 id=205 data-nosnippet>205</a>        rows.push((
+<a href=#206 id=206 data-nosnippet>206</a>            <span class="string">"Alarm"</span>,
+<a href=#207 id=207 data-nosnippet>207</a>            <span class="macro">format!</span>(<span class="string">"{} (status {})"</span>, severity_name(s.severity), s.status),
+<a href=#208 id=208 data-nosnippet>208</a>        ));
+<a href=#209 id=209 data-nosnippet>209</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(t) = s.timestamp {
+<a href=#210 id=210 data-nosnippet>210</a>            rows.push((<span class="string">"Time"</span>, format_time(t)));
+<a href=#211 id=211 data-nosnippet>211</a>        }
+<a href=#212 id=212 data-nosnippet>212</a>        <span class="kw">if </span>!s.units.is_empty() {
+<a href=#213 id=213 data-nosnippet>213</a>            rows.push((<span class="string">"Units"</span>, s.units.clone()));
+<a href=#214 id=214 data-nosnippet>214</a>        }
+<a href=#215 id=215 data-nosnippet>215</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(p) = s.precision {
+<a href=#216 id=216 data-nosnippet>216</a>            rows.push((<span class="string">"Precision"</span>, p.to_string()));
+<a href=#217 id=217 data-nosnippet>217</a>        }
+<a href=#218 id=218 data-nosnippet>218</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>((lo, hi)) = s.display_range {
+<a href=#219 id=219 data-nosnippet>219</a>            rows.push((<span class="string">"Display limits"</span>, <span class="macro">format!</span>(<span class="string">"{lo} to {hi}"</span>)));
+<a href=#220 id=220 data-nosnippet>220</a>        }
+<a href=#221 id=221 data-nosnippet>221</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>((lo, hi)) = s.control_range {
+<a href=#222 id=222 data-nosnippet>222</a>            rows.push((<span class="string">"Control limits"</span>, <span class="macro">format!</span>(<span class="string">"{lo} to {hi}"</span>)));
+<a href=#223 id=223 data-nosnippet>223</a>        }
+<a href=#224 id=224 data-nosnippet>224</a>        <span class="kw">if </span>!s.labels.is_empty() {
+<a href=#225 id=225 data-nosnippet>225</a>            rows.push((<span class="string">"States"</span>, s.labels.join(<span class="string">", "</span>)));
+<a href=#226 id=226 data-nosnippet>226</a>        }
+<a href=#227 id=227 data-nosnippet>227</a>        rows.push((<span class="string">"Writable"</span>, writable_text(s).into()));
+<a href=#228 id=228 data-nosnippet>228</a>    }
+<a href=#229 id=229 data-nosnippet>229</a>    <span class="comment">// Kept while disconnected: a write may have failed for that very reason.
+<a href=#230 id=230 data-nosnippet>230</a>    </span><span class="kw">if let </span><span class="prelude-val">Some</span>(e) = <span class="kw-2">&amp;</span>s.write_error {
+<a href=#231 id=231 data-nosnippet>231</a>        rows.push((<span class="string">"Last write failed"</span>, e.clone()));
+<a href=#232 id=232 data-nosnippet>232</a>    }
+<a href=#233 id=233 data-nosnippet>233</a>    rows.push((<span class="string">"Widget"</span>, details.widget.clone()));
+<a href=#234 id=234 data-nosnippet>234</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(file) = <span class="kw-2">&amp;</span>details.file {
+<a href=#235 id=235 data-nosnippet>235</a>        rows.push((<span class="string">"Display"</span>, file.to_string()));
+<a href=#236 id=236 data-nosnippet>236</a>    }
+<a href=#237 id=237 data-nosnippet>237</a>    rows
+<a href=#238 id=238 data-nosnippet>238</a>}
+<a href=#239 id=239 data-nosnippet>239</a>
+<a href=#240 id=240 data-nosnippet>240</a><span class="doccomment">/// Whether a write is allowed: PV Access gives no access rights, so there
+<a href=#241 id=241 data-nosnippet>241</a>/// the answer is a guess until a put is refused.
+<a href=#242 id=242 data-nosnippet>242</a></span><span class="kw">fn </span>writable_text(s: <span class="kw-2">&amp;</span>PvState) -&gt; <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str {
+<a href=#243 id=243 data-nosnippet>243</a>    <span class="kw">match </span>(s.writable, s.writable_known) {
+<a href=#244 id=244 data-nosnippet>244</a>        (<span class="bool-val">true</span>, <span class="bool-val">true</span>) =&gt; <span class="string">"yes"</span>,
+<a href=#245 id=245 data-nosnippet>245</a>        (<span class="bool-val">false</span>, <span class="kw">_</span>) =&gt; <span class="string">"no"</span>,
+<a href=#246 id=246 data-nosnippet>246</a>        (<span class="bool-val">true</span>, <span class="bool-val">false</span>) =&gt; <span class="string">"unknown (the server decides when you write)"</span>,
+<a href=#247 id=247 data-nosnippet>247</a>    }
+<a href=#248 id=248 data-nosnippet>248</a>}
+<a href=#249 id=249 data-nosnippet>249</a>
+<a href=#250 id=250 data-nosnippet>250</a><span class="doccomment">/// A one-line summary for bug reports and logbooks.
+<a href=#251 id=251 data-nosnippet>251</a></span><span class="kw">fn </span>full_line(name: <span class="kw-2">&amp;</span>str, s: <span class="kw-2">&amp;</span>PvState) -&gt; String {
+<a href=#252 id=252 data-nosnippet>252</a>    <span class="kw">let </span><span class="kw-2">mut </span>line = <span class="macro">format!</span>(
+<a href=#253 id=253 data-nosnippet>253</a>        <span class="string">"{name} = {} {}"</span>,
+<a href=#254 id=254 data-nosnippet>254</a>        s.format(<span class="prelude-val">None</span>, <span class="bool-val">true</span>),
+<a href=#255 id=255 data-nosnippet>255</a>        severity_name(s.severity)
+<a href=#256 id=256 data-nosnippet>256</a>    );
+<a href=#257 id=257 data-nosnippet>257</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(t) = s.timestamp {
+<a href=#258 id=258 data-nosnippet>258</a>        line.push(<span class="string">' '</span>);
+<a href=#259 id=259 data-nosnippet>259</a>        line.push_str(<span class="kw-2">&amp;</span>format_time(t));
+<a href=#260 id=260 data-nosnippet>260</a>    }
+<a href=#261 id=261 data-nosnippet>261</a>    line
 <a href=#262 id=262 data-nosnippet>262</a>}
 <a href=#263 id=263 data-nosnippet>263</a>
-<a href=#264 id=264 data-nosnippet>264</a><span class="kw">fn </span>value_type(v: <span class="kw-2">&amp;</span>Value) -&gt; String {
-<a href=#265 id=265 data-nosnippet>265</a>    <span class="kw">match </span>v {
-<a href=#266 id=266 data-nosnippet>266</a>        Value::None =&gt; <span class="string">"none"</span>.into(),
-<a href=#267 id=267 data-nosnippet>267</a>        Value::Double(<span class="kw">_</span>) =&gt; <span class="string">"double"</span>.into(),
-<a href=#268 id=268 data-nosnippet>268</a>        Value::Long(<span class="kw">_</span>) =&gt; <span class="string">"integer"</span>.into(),
-<a href=#269 id=269 data-nosnippet>269</a>        Value::Str(<span class="kw">_</span>) =&gt; <span class="string">"string"</span>.into(),
-<a href=#270 id=270 data-nosnippet>270</a>        Value::Enum(<span class="kw">_</span>) =&gt; <span class="string">"enum"</span>.into(),
-<a href=#271 id=271 data-nosnippet>271</a>        Value::DoubleArray(a) =&gt; <span class="macro">format!</span>(<span class="string">"double[{}]"</span>, a.len()),
-<a href=#272 id=272 data-nosnippet>272</a>        Value::LongArray(a) =&gt; <span class="macro">format!</span>(<span class="string">"integer[{}]"</span>, a.len()),
-<a href=#273 id=273 data-nosnippet>273</a>        Value::StrArray(a) =&gt; <span class="macro">format!</span>(<span class="string">"string[{}]"</span>, a.len()),
-<a href=#274 id=274 data-nosnippet>274</a>        Value::Image(img) =&gt; <span class="macro">format!</span>(<span class="string">"image {}x{}"</span>, img.width, img.height),
-<a href=#275 id=275 data-nosnippet>275</a>    }
-<a href=#276 id=276 data-nosnippet>276</a>}
-<a href=#277 id=277 data-nosnippet>277</a>
-<a href=#278 id=278 data-nosnippet>278</a><span class="doccomment">/// ISO 8601 UTC with milliseconds, e.g. `2026-10-14T19:08:33.123Z`.
-<a href=#279 id=279 data-nosnippet>279</a></span><span class="kw">fn </span>format_time(t: SystemTime) -&gt; String {
-<a href=#280 id=280 data-nosnippet>280</a>    <span class="kw">let </span><span class="prelude-val">Ok</span>(d) = t.duration_since(UNIX_EPOCH) <span class="kw">else </span>{
-<a href=#281 id=281 data-nosnippet>281</a>        <span class="kw">return </span><span class="string">"before 1970"</span>.into();
-<a href=#282 id=282 data-nosnippet>282</a>    };
-<a href=#283 id=283 data-nosnippet>283</a>    <span class="kw">let </span>secs = d.as_secs();
-<a href=#284 id=284 data-nosnippet>284</a>    <span class="kw">let </span>(days, rem) = (secs / <span class="number">86_400</span>, secs % <span class="number">86_400</span>);
-<a href=#285 id=285 data-nosnippet>285</a>    <span class="kw">let </span>(y, m, day) = civil_from_days(days <span class="kw">as </span>i64);
-<a href=#286 id=286 data-nosnippet>286</a>    <span class="macro">format!</span>(
-<a href=#287 id=287 data-nosnippet>287</a>        <span class="string">"{y:04}-{m:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z"</span>,
-<a href=#288 id=288 data-nosnippet>288</a>        rem / <span class="number">3600</span>,
-<a href=#289 id=289 data-nosnippet>289</a>        rem / <span class="number">60 </span>% <span class="number">60</span>,
-<a href=#290 id=290 data-nosnippet>290</a>        rem % <span class="number">60</span>,
-<a href=#291 id=291 data-nosnippet>291</a>        d.subsec_millis()
-<a href=#292 id=292 data-nosnippet>292</a>    )
-<a href=#293 id=293 data-nosnippet>293</a>}
-<a href=#294 id=294 data-nosnippet>294</a>
-<a href=#295 id=295 data-nosnippet>295</a><span class="doccomment">/// Days since 1970-01-01 to (year, month, day), after Howard Hinnant's
-<a href=#296 id=296 data-nosnippet>296</a>/// `civil_from_days`.
-<a href=#297 id=297 data-nosnippet>297</a></span><span class="kw">fn </span>civil_from_days(z: i64) -&gt; (i64, u32, u32) {
-<a href=#298 id=298 data-nosnippet>298</a>    <span class="kw">let </span>z = z + <span class="number">719_468</span>;
-<a href=#299 id=299 data-nosnippet>299</a>    <span class="kw">let </span>era = z.div_euclid(<span class="number">146_097</span>);
-<a href=#300 id=300 data-nosnippet>300</a>    <span class="kw">let </span>doe = z.rem_euclid(<span class="number">146_097</span>);
-<a href=#301 id=301 data-nosnippet>301</a>    <span class="kw">let </span>yoe = (doe - doe / <span class="number">1460 </span>+ doe / <span class="number">36_524 </span>- doe / <span class="number">146_096</span>) / <span class="number">365</span>;
-<a href=#302 id=302 data-nosnippet>302</a>    <span class="kw">let </span>doy = doe - (<span class="number">365 </span>* yoe + yoe / <span class="number">4 </span>- yoe / <span class="number">100</span>);
-<a href=#303 id=303 data-nosnippet>303</a>    <span class="kw">let </span>mp = (<span class="number">5 </span>* doy + <span class="number">2</span>) / <span class="number">153</span>;
-<a href=#304 id=304 data-nosnippet>304</a>    <span class="kw">let </span>d = (doy - (<span class="number">153 </span>* mp + <span class="number">2</span>) / <span class="number">5 </span>+ <span class="number">1</span>) <span class="kw">as </span>u32;
-<a href=#305 id=305 data-nosnippet>305</a>    <span class="kw">let </span>m = <span class="kw">if </span>mp &lt; <span class="number">10 </span>{ mp + <span class="number">3 </span>} <span class="kw">else </span>{ mp - <span class="number">9 </span>} <span class="kw">as </span>u32;
-<a href=#306 id=306 data-nosnippet>306</a>    <span class="kw">let </span>y = yoe + era * <span class="number">400 </span>+ i64::from(m &lt;= <span class="number">2</span>);
-<a href=#307 id=307 data-nosnippet>307</a>    (y, m, d)
-<a href=#308 id=308 data-nosnippet>308</a>}
-<a href=#309 id=309 data-nosnippet>309</a>
-<a href=#310 id=310 data-nosnippet>310</a><span class="attr">#[cfg(test)]
-<a href=#311 id=311 data-nosnippet>311</a></span><span class="kw">mod </span>tests {
-<a href=#312 id=312 data-nosnippet>312</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
-<a href=#313 id=313 data-nosnippet>313</a>    <span class="kw">use </span>std::time::Duration;
-<a href=#314 id=314 data-nosnippet>314</a>
-<a href=#315 id=315 data-nosnippet>315</a>    <span class="attr">#[test]
-<a href=#316 id=316 data-nosnippet>316</a>    </span><span class="kw">fn </span>writable_text_says_when_it_is_only_a_guess() {
-<a href=#317 id=317 data-nosnippet>317</a>        <span class="kw">let </span><span class="kw-2">mut </span>s = PvState::default();
-<a href=#318 id=318 data-nosnippet>318</a>        <span class="macro">assert_eq!</span>(writable_text(<span class="kw-2">&amp;</span>s), <span class="string">"no"</span>);
-<a href=#319 id=319 data-nosnippet>319</a>        s.writable = <span class="bool-val">true</span>;
-<a href=#320 id=320 data-nosnippet>320</a>        <span class="macro">assert!</span>(writable_text(<span class="kw-2">&amp;</span>s).starts_with(<span class="string">"unknown"</span>));
-<a href=#321 id=321 data-nosnippet>321</a>        s.writable_known = <span class="bool-val">true</span>;
-<a href=#322 id=322 data-nosnippet>322</a>        <span class="macro">assert_eq!</span>(writable_text(<span class="kw-2">&amp;</span>s), <span class="string">"yes"</span>);
-<a href=#323 id=323 data-nosnippet>323</a>    }
+<a href=#264 id=264 data-nosnippet>264</a><span class="doccomment">/// A shell command that reads the PV, for the protocols that have one.
+<a href=#265 id=265 data-nosnippet>265</a></span><span class="kw">fn </span>cli_command(name: <span class="kw-2">&amp;</span>PvName) -&gt; <span class="prelude-ty">Option</span>&lt;String&gt; {
+<a href=#266 id=266 data-nosnippet>266</a>    <span class="kw">match </span>name.scheme {
+<a href=#267 id=267 data-nosnippet>267</a>        Scheme::Ca =&gt; <span class="prelude-val">Some</span>(<span class="macro">format!</span>(<span class="string">"caget {}"</span>, shell_quote(<span class="kw-2">&amp;</span>name.pv))),
+<a href=#268 id=268 data-nosnippet>268</a>        Scheme::Pva =&gt; <span class="prelude-val">Some</span>(<span class="macro">format!</span>(<span class="string">"pvget {}"</span>, shell_quote(<span class="kw-2">&amp;</span>name.pv))),
+<a href=#269 id=269 data-nosnippet>269</a>        Scheme::Loc | Scheme::Sim | Scheme::Formula | Scheme::Unsupported =&gt; <span class="prelude-val">None</span>,
+<a href=#270 id=270 data-nosnippet>270</a>    }
+<a href=#271 id=271 data-nosnippet>271</a>}
+<a href=#272 id=272 data-nosnippet>272</a>
+<a href=#273 id=273 data-nosnippet>273</a><span class="doccomment">/// Quote `s` as one shell word, so a pasted command can't run anything else.
+<a href=#274 id=274 data-nosnippet>274</a>/// Names made only of the usual PV characters are left bare.
+<a href=#275 id=275 data-nosnippet>275</a></span><span class="kw">fn </span>shell_quote(s: <span class="kw-2">&amp;</span>str) -&gt; String {
+<a href=#276 id=276 data-nosnippet>276</a>    <span class="kw">let </span>plain = |c: char| c.is_ascii_alphanumeric() || <span class="string">"_-:.+/=,@%"</span>.contains(c);
+<a href=#277 id=277 data-nosnippet>277</a>    <span class="kw">if </span>!s.is_empty() &amp;&amp; s.chars().all(plain) {
+<a href=#278 id=278 data-nosnippet>278</a>        s.to_string()
+<a href=#279 id=279 data-nosnippet>279</a>    } <span class="kw">else </span>{
+<a href=#280 id=280 data-nosnippet>280</a>        <span class="macro">format!</span>(<span class="string">"'{}'"</span>, s.replace(<span class="string">'\''</span>, <span class="string">r"'\''"</span>))
+<a href=#281 id=281 data-nosnippet>281</a>    }
+<a href=#282 id=282 data-nosnippet>282</a>}
+<a href=#283 id=283 data-nosnippet>283</a>
+<a href=#284 id=284 data-nosnippet>284</a><span class="kw">fn </span>widget_label(node: <span class="kw-2">&amp;</span>Node) -&gt; String {
+<a href=#285 id=285 data-nosnippet>285</a>    <span class="kw">match </span>node.w.text(<span class="string">"name"</span>) {
+<a href=#286 id=286 data-nosnippet>286</a>        <span class="prelude-val">Some</span>(name) <span class="kw">if </span>!name.is_empty() =&gt; <span class="macro">format!</span>(<span class="string">"{} \"{name}\""</span>, node.w.kind),
+<a href=#287 id=287 data-nosnippet>287</a>        <span class="kw">_ </span>=&gt; node.w.kind.clone(),
+<a href=#288 id=288 data-nosnippet>288</a>    }
+<a href=#289 id=289 data-nosnippet>289</a>}
+<a href=#290 id=290 data-nosnippet>290</a>
+<a href=#291 id=291 data-nosnippet>291</a><span class="kw">fn </span>protocol(scheme: Scheme) -&gt; <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str {
+<a href=#292 id=292 data-nosnippet>292</a>    <span class="kw">match </span>scheme {
+<a href=#293 id=293 data-nosnippet>293</a>        Scheme::Ca =&gt; <span class="string">"Channel Access"</span>,
+<a href=#294 id=294 data-nosnippet>294</a>        Scheme::Pva =&gt; <span class="string">"PV Access"</span>,
+<a href=#295 id=295 data-nosnippet>295</a>        Scheme::Loc =&gt; <span class="string">"local"</span>,
+<a href=#296 id=296 data-nosnippet>296</a>        Scheme::Sim =&gt; <span class="string">"simulated"</span>,
+<a href=#297 id=297 data-nosnippet>297</a>        Scheme::Formula =&gt; <span class="string">"formula"</span>,
+<a href=#298 id=298 data-nosnippet>298</a>        Scheme::Unsupported =&gt; <span class="string">"not supported"</span>,
+<a href=#299 id=299 data-nosnippet>299</a>    }
+<a href=#300 id=300 data-nosnippet>300</a>}
+<a href=#301 id=301 data-nosnippet>301</a>
+<a href=#302 id=302 data-nosnippet>302</a><span class="kw">fn </span>severity_name(sevr: Severity) -&gt; <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str {
+<a href=#303 id=303 data-nosnippet>303</a>    <span class="kw">match </span>sevr {
+<a href=#304 id=304 data-nosnippet>304</a>        Severity::NoAlarm =&gt; <span class="string">"NO_ALARM"</span>,
+<a href=#305 id=305 data-nosnippet>305</a>        Severity::Minor =&gt; <span class="string">"MINOR"</span>,
+<a href=#306 id=306 data-nosnippet>306</a>        Severity::Major =&gt; <span class="string">"MAJOR"</span>,
+<a href=#307 id=307 data-nosnippet>307</a>        Severity::Invalid =&gt; <span class="string">"INVALID"</span>,
+<a href=#308 id=308 data-nosnippet>308</a>    }
+<a href=#309 id=309 data-nosnippet>309</a>}
+<a href=#310 id=310 data-nosnippet>310</a>
+<a href=#311 id=311 data-nosnippet>311</a><span class="kw">fn </span>value_type(v: <span class="kw-2">&amp;</span>Value) -&gt; String {
+<a href=#312 id=312 data-nosnippet>312</a>    <span class="kw">match </span>v {
+<a href=#313 id=313 data-nosnippet>313</a>        Value::None =&gt; <span class="string">"none"</span>.into(),
+<a href=#314 id=314 data-nosnippet>314</a>        Value::Double(<span class="kw">_</span>) =&gt; <span class="string">"double"</span>.into(),
+<a href=#315 id=315 data-nosnippet>315</a>        Value::Long(<span class="kw">_</span>) =&gt; <span class="string">"integer"</span>.into(),
+<a href=#316 id=316 data-nosnippet>316</a>        Value::Str(<span class="kw">_</span>) =&gt; <span class="string">"string"</span>.into(),
+<a href=#317 id=317 data-nosnippet>317</a>        Value::Enum(<span class="kw">_</span>) =&gt; <span class="string">"enum"</span>.into(),
+<a href=#318 id=318 data-nosnippet>318</a>        Value::DoubleArray(a) =&gt; <span class="macro">format!</span>(<span class="string">"double[{}]"</span>, a.len()),
+<a href=#319 id=319 data-nosnippet>319</a>        Value::LongArray(a) =&gt; <span class="macro">format!</span>(<span class="string">"integer[{}]"</span>, a.len()),
+<a href=#320 id=320 data-nosnippet>320</a>        Value::StrArray(a) =&gt; <span class="macro">format!</span>(<span class="string">"string[{}]"</span>, a.len()),
+<a href=#321 id=321 data-nosnippet>321</a>        Value::Image(img) =&gt; <span class="macro">format!</span>(<span class="string">"image {}x{}"</span>, img.width, img.height),
+<a href=#322 id=322 data-nosnippet>322</a>    }
+<a href=#323 id=323 data-nosnippet>323</a>}
 <a href=#324 id=324 data-nosnippet>324</a>
-<a href=#325 id=325 data-nosnippet>325</a>    <span class="attr">#[test]
-<a href=#326 id=326 data-nosnippet>326</a>    </span><span class="kw">fn </span>formats_utc_time() {
-<a href=#327 id=327 data-nosnippet>327</a>        <span class="kw">let </span>t = UNIX_EPOCH + Duration::from_millis(<span class="number">1_792_004_913_123</span>);
-<a href=#328 id=328 data-nosnippet>328</a>        <span class="macro">assert_eq!</span>(format_time(t), <span class="string">"2026-10-14T19:08:33.123Z"</span>);
-<a href=#329 id=329 data-nosnippet>329</a>        <span class="macro">assert_eq!</span>(format_time(UNIX_EPOCH), <span class="string">"1970-01-01T00:00:00.000Z"</span>);
-<a href=#330 id=330 data-nosnippet>330</a>        <span class="comment">// a leap day
-<a href=#331 id=331 data-nosnippet>331</a>        </span><span class="kw">let </span>t = UNIX_EPOCH + Duration::from_secs(<span class="number">951_782_400</span>);
-<a href=#332 id=332 data-nosnippet>332</a>        <span class="macro">assert_eq!</span>(format_time(t), <span class="string">"2000-02-29T00:00:00.000Z"</span>);
-<a href=#333 id=333 data-nosnippet>333</a>    }
-<a href=#334 id=334 data-nosnippet>334</a>
-<a href=#335 id=335 data-nosnippet>335</a>    <span class="attr">#[test]
-<a href=#336 id=336 data-nosnippet>336</a>    </span><span class="kw">fn </span>cli_commands_by_protocol() {
-<a href=#337 id=337 data-nosnippet>337</a>        <span class="kw">let </span>cmd = |n| cli_command(<span class="kw-2">&amp;</span>PvName::parse(n));
-<a href=#338 id=338 data-nosnippet>338</a>        <span class="macro">assert_eq!</span>(cmd(<span class="string">"BL01T:X"</span>).as_deref(), <span class="prelude-val">Some</span>(<span class="string">"caget BL01T:X"</span>));
-<a href=#339 id=339 data-nosnippet>339</a>        <span class="macro">assert_eq!</span>(cmd(<span class="string">"ca://BL01T:X"</span>).as_deref(), <span class="prelude-val">Some</span>(<span class="string">"caget BL01T:X"</span>));
-<a href=#340 id=340 data-nosnippet>340</a>        <span class="macro">assert_eq!</span>(cmd(<span class="string">"pva://BL01T:IMG"</span>).as_deref(), <span class="prelude-val">Some</span>(<span class="string">"pvget BL01T:IMG"</span>));
-<a href=#341 id=341 data-nosnippet>341</a>        <span class="macro">assert_eq!</span>(cmd(<span class="string">"loc://x&lt;VDouble&gt;(3)"</span>), <span class="prelude-val">None</span>);
-<a href=#342 id=342 data-nosnippet>342</a>        <span class="macro">assert_eq!</span>(cmd(<span class="string">"sim://sine"</span>), <span class="prelude-val">None</span>);
-<a href=#343 id=343 data-nosnippet>343</a>        <span class="macro">assert_eq!</span>(cmd(<span class="string">"PV;id"</span>).as_deref(), <span class="prelude-val">Some</span>(<span class="string">"caget 'PV;id'"</span>));
-<a href=#344 id=344 data-nosnippet>344</a>        <span class="macro">assert_eq!</span>(cmd(<span class="string">"pva://a'b $x"</span>).as_deref(), <span class="prelude-val">Some</span>(<span class="string">r"pvget 'a'\''b $x'"</span>));
-<a href=#345 id=345 data-nosnippet>345</a>    }
-<a href=#346 id=346 data-nosnippet>346</a>
-<a href=#347 id=347 data-nosnippet>347</a>    <span class="attr">#[test]
-<a href=#348 id=348 data-nosnippet>348</a>    </span><span class="kw">fn </span>full_line_has_value_alarm_and_time() {
-<a href=#349 id=349 data-nosnippet>349</a>        <span class="kw">let </span>s = PvState {
-<a href=#350 id=350 data-nosnippet>350</a>            connected: <span class="bool-val">true</span>,
-<a href=#351 id=351 data-nosnippet>351</a>            value: Value::Double(<span class="number">2.5</span>),
-<a href=#352 id=352 data-nosnippet>352</a>            units: <span class="string">"mm"</span>.into(),
-<a href=#353 id=353 data-nosnippet>353</a>            precision: <span class="prelude-val">Some</span>(<span class="number">2</span>),
-<a href=#354 id=354 data-nosnippet>354</a>            severity: Severity::Minor,
-<a href=#355 id=355 data-nosnippet>355</a>            timestamp: <span class="prelude-val">Some</span>(UNIX_EPOCH),
-<a href=#356 id=356 data-nosnippet>356</a>            ..Default::default()
-<a href=#357 id=357 data-nosnippet>357</a>        };
-<a href=#358 id=358 data-nosnippet>358</a>        <span class="macro">assert_eq!</span>(
-<a href=#359 id=359 data-nosnippet>359</a>            full_line(<span class="string">"BL01T:M1"</span>, <span class="kw-2">&amp;</span>s),
-<a href=#360 id=360 data-nosnippet>360</a>            <span class="string">"BL01T:M1 = 2.50 mm MINOR 1970-01-01T00:00:00.000Z"
-<a href=#361 id=361 data-nosnippet>361</a>        </span>);
-<a href=#362 id=362 data-nosnippet>362</a>    }
-<a href=#363 id=363 data-nosnippet>363</a>
-<a href=#364 id=364 data-nosnippet>364</a>    <span class="attr">#[test]
-<a href=#365 id=365 data-nosnippet>365</a>    </span><span class="kw">fn </span>a_failed_write_is_shown_while_disconnected() {
-<a href=#366 id=366 data-nosnippet>366</a>        <span class="kw">let </span>pvs = pv::PvManager::new();
-<a href=#367 id=367 data-nosnippet>367</a>        <span class="kw">let </span>details = Details {
-<a href=#368 id=368 data-nosnippet>368</a>            pv: pvs.subscribe(<span class="string">"loc://details_test(1)"</span>),
-<a href=#369 id=369 data-nosnippet>369</a>            widget: <span class="string">"Text Update"</span>.into(),
-<a href=#370 id=370 data-nosnippet>370</a>            file: <span class="prelude-val">None</span>,
-<a href=#371 id=371 data-nosnippet>371</a>        };
-<a href=#372 id=372 data-nosnippet>372</a>        <span class="kw">let </span>s = PvState {
-<a href=#373 id=373 data-nosnippet>373</a>            connected: <span class="bool-val">false</span>,
-<a href=#374 id=374 data-nosnippet>374</a>            write_error: <span class="prelude-val">Some</span>(<span class="string">"not connected"</span>.into()),
-<a href=#375 id=375 data-nosnippet>375</a>            ..Default::default()
-<a href=#376 id=376 data-nosnippet>376</a>        };
-<a href=#377 id=377 data-nosnippet>377</a>        <span class="kw">let </span>rows = details_rows(<span class="kw-2">&amp;</span>details, <span class="kw-2">&amp;</span>s);
-<a href=#378 id=378 data-nosnippet>378</a>        <span class="macro">assert!</span>(
-<a href=#379 id=379 data-nosnippet>379</a>            rows.contains(<span class="kw-2">&amp;</span>(<span class="string">"Last write failed"</span>, <span class="string">"not connected"</span>.into())),
-<a href=#380 id=380 data-nosnippet>380</a>            <span class="string">"{rows:?}"
-<a href=#381 id=381 data-nosnippet>381</a>        </span>);
-<a href=#382 id=382 data-nosnippet>382</a>    }
-<a href=#383 id=383 data-nosnippet>383</a>}
+<a href=#325 id=325 data-nosnippet>325</a><span class="doccomment">/// ISO 8601 UTC with milliseconds, e.g. `2026-10-14T19:08:33.123Z`.
+<a href=#326 id=326 data-nosnippet>326</a></span><span class="kw">fn </span>format_time(t: SystemTime) -&gt; String {
+<a href=#327 id=327 data-nosnippet>327</a>    <span class="kw">let </span><span class="prelude-val">Ok</span>(d) = t.duration_since(UNIX_EPOCH) <span class="kw">else </span>{
+<a href=#328 id=328 data-nosnippet>328</a>        <span class="kw">return </span><span class="string">"before 1970"</span>.into();
+<a href=#329 id=329 data-nosnippet>329</a>    };
+<a href=#330 id=330 data-nosnippet>330</a>    <span class="kw">let </span>secs = d.as_secs();
+<a href=#331 id=331 data-nosnippet>331</a>    <span class="kw">let </span>(days, rem) = (secs / <span class="number">86_400</span>, secs % <span class="number">86_400</span>);
+<a href=#332 id=332 data-nosnippet>332</a>    <span class="kw">let </span>(y, m, day) = civil_from_days(days <span class="kw">as </span>i64);
+<a href=#333 id=333 data-nosnippet>333</a>    <span class="macro">format!</span>(
+<a href=#334 id=334 data-nosnippet>334</a>        <span class="string">"{y:04}-{m:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z"</span>,
+<a href=#335 id=335 data-nosnippet>335</a>        rem / <span class="number">3600</span>,
+<a href=#336 id=336 data-nosnippet>336</a>        rem / <span class="number">60 </span>% <span class="number">60</span>,
+<a href=#337 id=337 data-nosnippet>337</a>        rem % <span class="number">60</span>,
+<a href=#338 id=338 data-nosnippet>338</a>        d.subsec_millis()
+<a href=#339 id=339 data-nosnippet>339</a>    )
+<a href=#340 id=340 data-nosnippet>340</a>}
+<a href=#341 id=341 data-nosnippet>341</a>
+<a href=#342 id=342 data-nosnippet>342</a><span class="doccomment">/// Days since 1970-01-01 to (year, month, day), after Howard Hinnant's
+<a href=#343 id=343 data-nosnippet>343</a>/// `civil_from_days`.
+<a href=#344 id=344 data-nosnippet>344</a></span><span class="kw">fn </span>civil_from_days(z: i64) -&gt; (i64, u32, u32) {
+<a href=#345 id=345 data-nosnippet>345</a>    <span class="kw">let </span>z = z + <span class="number">719_468</span>;
+<a href=#346 id=346 data-nosnippet>346</a>    <span class="kw">let </span>era = z.div_euclid(<span class="number">146_097</span>);
+<a href=#347 id=347 data-nosnippet>347</a>    <span class="kw">let </span>doe = z.rem_euclid(<span class="number">146_097</span>);
+<a href=#348 id=348 data-nosnippet>348</a>    <span class="kw">let </span>yoe = (doe - doe / <span class="number">1460 </span>+ doe / <span class="number">36_524 </span>- doe / <span class="number">146_096</span>) / <span class="number">365</span>;
+<a href=#349 id=349 data-nosnippet>349</a>    <span class="kw">let </span>doy = doe - (<span class="number">365 </span>* yoe + yoe / <span class="number">4 </span>- yoe / <span class="number">100</span>);
+<a href=#350 id=350 data-nosnippet>350</a>    <span class="kw">let </span>mp = (<span class="number">5 </span>* doy + <span class="number">2</span>) / <span class="number">153</span>;
+<a href=#351 id=351 data-nosnippet>351</a>    <span class="kw">let </span>d = (doy - (<span class="number">153 </span>* mp + <span class="number">2</span>) / <span class="number">5 </span>+ <span class="number">1</span>) <span class="kw">as </span>u32;
+<a href=#352 id=352 data-nosnippet>352</a>    <span class="kw">let </span>m = <span class="kw">if </span>mp &lt; <span class="number">10 </span>{ mp + <span class="number">3 </span>} <span class="kw">else </span>{ mp - <span class="number">9 </span>} <span class="kw">as </span>u32;
+<a href=#353 id=353 data-nosnippet>353</a>    <span class="kw">let </span>y = yoe + era * <span class="number">400 </span>+ i64::from(m &lt;= <span class="number">2</span>);
+<a href=#354 id=354 data-nosnippet>354</a>    (y, m, d)
+<a href=#355 id=355 data-nosnippet>355</a>}
+<a href=#356 id=356 data-nosnippet>356</a>
+<a href=#357 id=357 data-nosnippet>357</a><span class="attr">#[cfg(test)]
+<a href=#358 id=358 data-nosnippet>358</a></span><span class="kw">mod </span>tests {
+<a href=#359 id=359 data-nosnippet>359</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#360 id=360 data-nosnippet>360</a>    <span class="kw">use </span>std::time::Duration;
+<a href=#361 id=361 data-nosnippet>361</a>
+<a href=#362 id=362 data-nosnippet>362</a>    <span class="attr">#[test]
+<a href=#363 id=363 data-nosnippet>363</a>    </span><span class="kw">fn </span>writable_text_says_when_it_is_only_a_guess() {
+<a href=#364 id=364 data-nosnippet>364</a>        <span class="kw">let </span><span class="kw-2">mut </span>s = PvState::default();
+<a href=#365 id=365 data-nosnippet>365</a>        <span class="macro">assert_eq!</span>(writable_text(<span class="kw-2">&amp;</span>s), <span class="string">"no"</span>);
+<a href=#366 id=366 data-nosnippet>366</a>        s.writable = <span class="bool-val">true</span>;
+<a href=#367 id=367 data-nosnippet>367</a>        <span class="macro">assert!</span>(writable_text(<span class="kw-2">&amp;</span>s).starts_with(<span class="string">"unknown"</span>));
+<a href=#368 id=368 data-nosnippet>368</a>        s.writable_known = <span class="bool-val">true</span>;
+<a href=#369 id=369 data-nosnippet>369</a>        <span class="macro">assert_eq!</span>(writable_text(<span class="kw-2">&amp;</span>s), <span class="string">"yes"</span>);
+<a href=#370 id=370 data-nosnippet>370</a>    }
+<a href=#371 id=371 data-nosnippet>371</a>
+<a href=#372 id=372 data-nosnippet>372</a>    <span class="attr">#[test]
+<a href=#373 id=373 data-nosnippet>373</a>    </span><span class="kw">fn </span>formats_utc_time() {
+<a href=#374 id=374 data-nosnippet>374</a>        <span class="kw">let </span>t = UNIX_EPOCH + Duration::from_millis(<span class="number">1_792_004_913_123</span>);
+<a href=#375 id=375 data-nosnippet>375</a>        <span class="macro">assert_eq!</span>(format_time(t), <span class="string">"2026-10-14T19:08:33.123Z"</span>);
+<a href=#376 id=376 data-nosnippet>376</a>        <span class="macro">assert_eq!</span>(format_time(UNIX_EPOCH), <span class="string">"1970-01-01T00:00:00.000Z"</span>);
+<a href=#377 id=377 data-nosnippet>377</a>        <span class="comment">// a leap day
+<a href=#378 id=378 data-nosnippet>378</a>        </span><span class="kw">let </span>t = UNIX_EPOCH + Duration::from_secs(<span class="number">951_782_400</span>);
+<a href=#379 id=379 data-nosnippet>379</a>        <span class="macro">assert_eq!</span>(format_time(t), <span class="string">"2000-02-29T00:00:00.000Z"</span>);
+<a href=#380 id=380 data-nosnippet>380</a>    }
+<a href=#381 id=381 data-nosnippet>381</a>
+<a href=#382 id=382 data-nosnippet>382</a>    <span class="attr">#[test]
+<a href=#383 id=383 data-nosnippet>383</a>    </span><span class="kw">fn </span>cli_commands_by_protocol() {
+<a href=#384 id=384 data-nosnippet>384</a>        <span class="kw">let </span>cmd = |n| cli_command(<span class="kw-2">&amp;</span>PvName::parse(n));
+<a href=#385 id=385 data-nosnippet>385</a>        <span class="macro">assert_eq!</span>(cmd(<span class="string">"BL01T:X"</span>).as_deref(), <span class="prelude-val">Some</span>(<span class="string">"caget BL01T:X"</span>));
+<a href=#386 id=386 data-nosnippet>386</a>        <span class="macro">assert_eq!</span>(cmd(<span class="string">"ca://BL01T:X"</span>).as_deref(), <span class="prelude-val">Some</span>(<span class="string">"caget BL01T:X"</span>));
+<a href=#387 id=387 data-nosnippet>387</a>        <span class="macro">assert_eq!</span>(cmd(<span class="string">"pva://BL01T:IMG"</span>).as_deref(), <span class="prelude-val">Some</span>(<span class="string">"pvget BL01T:IMG"</span>));
+<a href=#388 id=388 data-nosnippet>388</a>        <span class="macro">assert_eq!</span>(cmd(<span class="string">"loc://x&lt;VDouble&gt;(3)"</span>), <span class="prelude-val">None</span>);
+<a href=#389 id=389 data-nosnippet>389</a>        <span class="macro">assert_eq!</span>(cmd(<span class="string">"sim://sine"</span>), <span class="prelude-val">None</span>);
+<a href=#390 id=390 data-nosnippet>390</a>        <span class="macro">assert_eq!</span>(cmd(<span class="string">"PV;id"</span>).as_deref(), <span class="prelude-val">Some</span>(<span class="string">"caget 'PV;id'"</span>));
+<a href=#391 id=391 data-nosnippet>391</a>        <span class="macro">assert_eq!</span>(cmd(<span class="string">"pva://a'b $x"</span>).as_deref(), <span class="prelude-val">Some</span>(<span class="string">r"pvget 'a'\''b $x'"</span>));
+<a href=#392 id=392 data-nosnippet>392</a>    }
+<a href=#393 id=393 data-nosnippet>393</a>
+<a href=#394 id=394 data-nosnippet>394</a>    <span class="attr">#[test]
+<a href=#395 id=395 data-nosnippet>395</a>    </span><span class="kw">fn </span>copied_names_are_as_other_tools_take_them() {
+<a href=#396 id=396 data-nosnippet>396</a>        <span class="kw">let </span>name = |n| {
+<a href=#397 id=397 data-nosnippet>397</a>            <span class="kw">let </span><span class="kw-2">mut </span>names = Vec::new();
+<a href=#398 id=398 data-nosnippet>398</a>            copy_name(<span class="kw-2">&amp;</span>PvName::parse(n), <span class="kw-2">&amp;mut </span>names);
+<a href=#399 id=399 data-nosnippet>399</a>            names.join(<span class="string">" "</span>)
+<a href=#400 id=400 data-nosnippet>400</a>        };
+<a href=#401 id=401 data-nosnippet>401</a>        <span class="macro">assert_eq!</span>(name(<span class="string">"BL01T:X"</span>), <span class="string">"BL01T:X"</span>);
+<a href=#402 id=402 data-nosnippet>402</a>        <span class="macro">assert_eq!</span>(name(<span class="string">"ca://BL01T:X"</span>), <span class="string">"BL01T:X"</span>);
+<a href=#403 id=403 data-nosnippet>403</a>        <span class="comment">// EPICS record names may hold `&lt;` and `(`.
+<a href=#404 id=404 data-nosnippet>404</a>        </span><span class="macro">assert_eq!</span>(name(<span class="string">"ca://T&lt;1&gt;(2)"</span>), <span class="string">"T&lt;1&gt;(2)"</span>);
+<a href=#405 id=405 data-nosnippet>405</a>        <span class="macro">assert_eq!</span>(name(<span class="string">"pva://BL01T:IMG"</span>), <span class="string">"pva://BL01T:IMG"</span>);
+<a href=#406 id=406 data-nosnippet>406</a>        <span class="macro">assert_eq!</span>(name(<span class="string">"loc://x&lt;VDouble&gt;(1.5)"</span>), <span class="string">"loc://x"</span>);
+<a href=#407 id=407 data-nosnippet>407</a>        <span class="macro">assert_eq!</span>(name(<span class="string">"sim://sine(0, 10, 0.1)"</span>), <span class="string">"sim://sine(0, 10, 0.1)"</span>);
+<a href=#408 id=408 data-nosnippet>408</a>        <span class="comment">// A formula's inputs, each once.
+<a href=#409 id=409 data-nosnippet>409</a>        </span><span class="macro">assert_eq!</span>(
+<a href=#410 id=410 data-nosnippet>410</a>            name(<span class="string">"=`ca://A:B` + 'pva://C' * `A:B` + 'loc://m&lt;VLong&gt;(1)'"</span>),
+<a href=#411 id=411 data-nosnippet>411</a>            <span class="string">"A:B pva://C loc://m"
+<a href=#412 id=412 data-nosnippet>412</a>        </span>);
+<a href=#413 id=413 data-nosnippet>413</a>        <span class="macro">assert_eq!</span>(name(<span class="string">"=1 + 2"</span>), <span class="string">""</span>);
+<a href=#414 id=414 data-nosnippet>414</a>    }
+<a href=#415 id=415 data-nosnippet>415</a>
+<a href=#416 id=416 data-nosnippet>416</a>    <span class="attr">#[test]
+<a href=#417 id=417 data-nosnippet>417</a>    </span><span class="kw">fn </span>a_widget_copies_its_pv_and_a_plot_its_traces() {
+<a href=#418 id=418 data-nosnippet>418</a>        <span class="kw">let </span>xml = <span class="string">r#"&lt;display&gt;&lt;macros&gt;&lt;P&gt;BL01T&lt;/P&gt;&lt;/macros&gt;
+<a href=#419 id=419 data-nosnippet>419</a>            &lt;widget type="textupdate"&gt;&lt;pv_name&gt;ca://$(P):M1&lt;/pv_name&gt;
+<a href=#420 id=420 data-nosnippet>420</a>              &lt;rules&gt;&lt;rule name="r" prop_id="visible"&gt;&lt;exp bool_exp="pv0 == 1"&gt;&lt;value&gt;false&lt;/value&gt;&lt;/exp&gt;
+<a href=#421 id=421 data-nosnippet>421</a>              &lt;pv_name&gt;$(P):HIDE&lt;/pv_name&gt;&lt;/rule&gt;&lt;/rules&gt;&lt;/widget&gt;
+<a href=#422 id=422 data-nosnippet>422</a>            &lt;widget type="xyplot"&gt;&lt;traces&gt;
+<a href=#423 id=423 data-nosnippet>423</a>              &lt;trace&gt;&lt;x_pv&gt;$(P):X&lt;/x_pv&gt;&lt;y_pv&gt;pva://$(P):Y1&lt;/y_pv&gt;&lt;/trace&gt;
+<a href=#424 id=424 data-nosnippet>424</a>              &lt;trace&gt;&lt;x_pv&gt;$(P):X&lt;/x_pv&gt;&lt;y_pv&gt;$(P):Y2&lt;/y_pv&gt;&lt;/trace&gt;&lt;/traces&gt;&lt;/widget&gt;
+<a href=#425 id=425 data-nosnippet>425</a>            &lt;widget type="xyplot"&gt;&lt;/widget&gt;&lt;/display&gt;"#</span>;
+<a href=#426 id=426 data-nosnippet>426</a>        <span class="kw">let </span>pvs = pv::PvManager::new();
+<a href=#427 id=427 data-nosnippet>427</a>        <span class="kw">let </span>display = bob::Display::parse(xml).unwrap();
+<a href=#428 id=428 data-nosnippet>428</a>        <span class="kw">let </span>screen =
+<a href=#429 id=429 data-nosnippet>429</a>            <span class="kw">crate</span>::screen::Builder::new(<span class="kw-2">&amp;</span>pvs).screen(display, <span class="kw-2">&amp;</span>bob::Macros::default(), <span class="prelude-val">None</span>, <span class="number">0</span>);
+<a href=#430 id=430 data-nosnippet>430</a>        <span class="kw">let </span>copied: Vec&lt;<span class="prelude-ty">Option</span>&lt;String&gt;&gt; = screen.nodes.iter().map(copy_names).collect();
+<a href=#431 id=431 data-nosnippet>431</a>        <span class="macro">assert_eq!</span>(
+<a href=#432 id=432 data-nosnippet>432</a>            copied,
+<a href=#433 id=433 data-nosnippet>433</a>            [
+<a href=#434 id=434 data-nosnippet>434</a>                <span class="prelude-val">Some</span>(<span class="string">"BL01T:M1"</span>.into()),
+<a href=#435 id=435 data-nosnippet>435</a>                <span class="prelude-val">Some</span>(<span class="string">"pva://BL01T:Y1 BL01T:X BL01T:Y2"</span>.into()),
+<a href=#436 id=436 data-nosnippet>436</a>                <span class="prelude-val">None
+<a href=#437 id=437 data-nosnippet>437</a>            </span>]
+<a href=#438 id=438 data-nosnippet>438</a>        );
+<a href=#439 id=439 data-nosnippet>439</a>    }
+<a href=#440 id=440 data-nosnippet>440</a>
+<a href=#441 id=441 data-nosnippet>441</a>    <span class="attr">#[test]
+<a href=#442 id=442 data-nosnippet>442</a>    </span><span class="kw">fn </span>full_line_has_value_alarm_and_time() {
+<a href=#443 id=443 data-nosnippet>443</a>        <span class="kw">let </span>s = PvState {
+<a href=#444 id=444 data-nosnippet>444</a>            connected: <span class="bool-val">true</span>,
+<a href=#445 id=445 data-nosnippet>445</a>            value: Value::Double(<span class="number">2.5</span>),
+<a href=#446 id=446 data-nosnippet>446</a>            units: <span class="string">"mm"</span>.into(),
+<a href=#447 id=447 data-nosnippet>447</a>            precision: <span class="prelude-val">Some</span>(<span class="number">2</span>),
+<a href=#448 id=448 data-nosnippet>448</a>            severity: Severity::Minor,
+<a href=#449 id=449 data-nosnippet>449</a>            timestamp: <span class="prelude-val">Some</span>(UNIX_EPOCH),
+<a href=#450 id=450 data-nosnippet>450</a>            ..Default::default()
+<a href=#451 id=451 data-nosnippet>451</a>        };
+<a href=#452 id=452 data-nosnippet>452</a>        <span class="macro">assert_eq!</span>(
+<a href=#453 id=453 data-nosnippet>453</a>            full_line(<span class="string">"BL01T:M1"</span>, <span class="kw-2">&amp;</span>s),
+<a href=#454 id=454 data-nosnippet>454</a>            <span class="string">"BL01T:M1 = 2.50 mm MINOR 1970-01-01T00:00:00.000Z"
+<a href=#455 id=455 data-nosnippet>455</a>        </span>);
+<a href=#456 id=456 data-nosnippet>456</a>    }
+<a href=#457 id=457 data-nosnippet>457</a>
+<a href=#458 id=458 data-nosnippet>458</a>    <span class="attr">#[test]
+<a href=#459 id=459 data-nosnippet>459</a>    </span><span class="kw">fn </span>a_failed_write_is_shown_while_disconnected() {
+<a href=#460 id=460 data-nosnippet>460</a>        <span class="kw">let </span>pvs = pv::PvManager::new();
+<a href=#461 id=461 data-nosnippet>461</a>        <span class="kw">let </span>details = Details {
+<a href=#462 id=462 data-nosnippet>462</a>            pv: pvs.subscribe(<span class="string">"loc://details_test(1)"</span>),
+<a href=#463 id=463 data-nosnippet>463</a>            widget: <span class="string">"Text Update"</span>.into(),
+<a href=#464 id=464 data-nosnippet>464</a>            file: <span class="prelude-val">None</span>,
+<a href=#465 id=465 data-nosnippet>465</a>        };
+<a href=#466 id=466 data-nosnippet>466</a>        <span class="kw">let </span>s = PvState {
+<a href=#467 id=467 data-nosnippet>467</a>            connected: <span class="bool-val">false</span>,
+<a href=#468 id=468 data-nosnippet>468</a>            write_error: <span class="prelude-val">Some</span>(<span class="string">"not connected"</span>.into()),
+<a href=#469 id=469 data-nosnippet>469</a>            ..Default::default()
+<a href=#470 id=470 data-nosnippet>470</a>        };
+<a href=#471 id=471 data-nosnippet>471</a>        <span class="kw">let </span>rows = details_rows(<span class="kw-2">&amp;</span>details, <span class="kw-2">&amp;</span>s);
+<a href=#472 id=472 data-nosnippet>472</a>        <span class="macro">assert!</span>(
+<a href=#473 id=473 data-nosnippet>473</a>            rows.contains(<span class="kw-2">&amp;</span>(<span class="string">"Last write failed"</span>, <span class="string">"not connected"</span>.into())),
+<a href=#474 id=474 data-nosnippet>474</a>            <span class="string">"{rows:?}"
+<a href=#475 id=475 data-nosnippet>475</a>        </span>);
+<a href=#476 id=476 data-nosnippet>476</a>    }
+<a href=#477 id=477 data-nosnippet>477</a>}
 </code></pre></div></section></main></body></html>
