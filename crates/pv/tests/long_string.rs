@@ -26,7 +26,9 @@ fn reads(pv: &Pv, want: &str) {
 
 #[test]
 fn char_waveforms_take_long_strings() {
-    let port = 40000 + (std::process::id() % 10000) as u16 * 2;
+    // Three ports (CA, PVA, PVA broadcast), below the dynamic range that
+    // Windows reserves blocks of.
+    let port = 20000 + (std::process::id() % 5000) as u16 * 3;
     let pva_port = port + 1;
     // Safety: set before any other thread exists.
     unsafe {
