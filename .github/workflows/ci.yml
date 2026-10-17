@@ -22,7 +22,7 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Clippy the browser build
-        run: cargo clippy -p pv -p bobview --target wasm32-unknown-unknown -- -D warnings
+        run: cargo clippy -p bobview-pv -p bobview --target wasm32-unknown-unknown -- -D warnings
       - run: cargo test --workspace
       - name: Snapshot the test displays against bobview-testioc
         env:
@@ -95,10 +95,15 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: ${{ matrix.platform == 'linux' && 'cargo-zigbuild, ' || '' }}wasm-bindgen@${{ env.WASM_BINDGEN }}
-      - name: Take the version from the release tag
+      - name: Check the release tag matches the version in Cargo.toml
         if: startsWith(github.ref, 'refs/tags/v')
-        # perl rather than sed -i, which differs between GNU and BSD (macOS)
-        run: V=${GITHUB_REF_NAME#v} perl -0pi -e 's/^version = .*$/version = "$ENV{V}"/m' Cargo.toml
+        # crates.io takes the version from Cargo.toml, so the tag must match it
+        run: |
+          V=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [[ "v${V}" != "${GITHUB_REF_NAME}" ]]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match version ${V} in Cargo.toml"
+            exit 1
+          fi
       - if: matrix.platform == 'linux'
         run: cargo zigbuild --release --workspace --target ${TARGET}.${GLIBC}
       - if: matrix.platform == 'macos'
@@ -188,3 +193,22 @@ jobs:
             gh release create "${GITHUB_REF_NAME}" bobview-*.tar.gz \
               --repo "${GITHUB_REPOSITORY}" --title "${GITHUB_REF_NAME}" --generate-notes
           fi
+
+  publish:
+    # Publish the crates to crates.io with trusted publishing (no stored
+    # token). Turned on by the repository variable PUBLISH_CRATES=true, once
+    # the crates exist on crates.io and each lists this workflow as a trusted
+    # publisher; see docs/src/how-to/release.md.
+    if: startsWith(github.ref, 'refs/tags/v') && vars.PUBLISH_CRATES == 'true'
+    needs: [release]
+    runs-on: ubuntu-24.04
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - run: cargo publish --workspace --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

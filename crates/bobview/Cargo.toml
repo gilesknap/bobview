@@ -1,16 +1,22 @@
 [package]
 name = "bobview"
+description = "A lean viewer for Phoebus Display Builder .bob and CS-Studio BOY .opi screens, with live EPICS PVs"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["epics", "phoebus", "cs-studio", "control-system", "egui"]
+categories = ["gui", "science", "visualization"]
 
 [dependencies]
 eframe = { version = "0.36.2", default-features = false, features = ["glow", "wayland", "x11", "default_fonts"] }
 egui = "0.36.2"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 log = "0.4.34"
-bob = { path = "../bob" }
-pv = { path = "../pv" }
+bob.workspace = true
+pv.workspace = true
 png = "0.18.1"
 imagesize = "0.15"
 resvg = { version = "0.48.1", default-features = false, features = ["raster-images"] }

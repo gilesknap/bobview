@@ -36,7 +36,7 @@ A frame is posted for every frame counted (10 Hz by default) while
 frame counter. To look at a frame without a viewer:
 
 ```
-cargo run -p testioc --example frame_png -- /tmp/frame 1 50
+cargo run -p bobview-testioc --example frame_png -- /tmp/frame 1 50
 ```
 
 ## Run
@@ -61,5 +61,5 @@ EPICS_CA_ADDR_LIST=127.0.0.1 bobview
 Build for the phone from x86_64:
 
 ```
-cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.36 -p testioc
+cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.36 -p bobview-testioc
 ```

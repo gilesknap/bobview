@@ -335,18 +335,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "bob"
-version = "0.2.1"
-dependencies = [
- "log",
- "roxmltree",
-]
-
-[[package]]
 name = "bobview"
-version = "0.2.1"
+version = "1.8.1"
 dependencies = [
- "bob",
+ "bobview-bob",
+ "bobview-pv",
  "chrono",
  "clap",
  "eframe",
@@ -357,7 +350,6 @@ dependencies = [
  "log",
  "parking_lot",
  "png",
- "pv",
  "resvg",
  "roxmltree",
  "serde",
@@ -371,22 +363,64 @@ dependencies = [
 ]
 
 [[package]]
+name = "bobview-bob"
+version = "1.8.1"
+dependencies = [
+ "log",
+ "roxmltree",
+]
+
+[[package]]
+name = "bobview-pv"
+version = "1.8.1"
+dependencies = [
+ "base64 0.23.1",
+ "bobview-testioc",
+ "epics-base-rs",
+ "epics-ca-rs",
+ "epics-pva-rs",
+ "futures-util",
+ "gloo-timers",
+ "log",
+ "parking_lot",
+ "serde_json",
+ "tokio",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
+]
+
+[[package]]
 name = "bobview-server"
-version = "0.2.1"
+version = "1.8.1"
 dependencies = [
  "axum",
  "base64 0.23.1",
+ "bobview-pv",
  "env_logger",
  "httpdate",
  "libc",
  "log",
  "mime_guess",
  "percent-encoding",
- "pv",
  "serde_json",
  "tokio",
  "tokio-util",
  "tower-http",
+]
+
+[[package]]
+name = "bobview-testioc"
+version = "1.8.1"
+dependencies = [
+ "asyn-rs",
+ "epics-base-rs",
+ "epics-ca-rs",
+ "epics-pva-rs",
+ "motor-rs",
+ "png",
+ "tokio",
 ]
 
 [[package]]
@@ -2684,27 +2718,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
-name = "pv"
-version = "0.2.1"
-dependencies = [
- "base64 0.23.1",
- "epics-base-rs",
- "epics-ca-rs",
- "epics-pva-rs",
- "futures-util",
- "gloo-timers",
- "log",
- "parking_lot",
- "serde_json",
- "testioc",
- "tokio",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
- "web-time",
-]
-
-[[package]]
 name = "pxfm"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3399,19 +3412,6 @@ checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix 1.1.5",
  "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "testioc"
-version = "0.2.1"
-dependencies = [
- "asyn-rs",
- "epics-base-rs",
- "epics-ca-rs",
- "epics-pva-rs",
- "motor-rs",
- "png",
- "tokio",
 ]
 
 [[package]]

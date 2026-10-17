@@ -1,5 +1,5 @@
 //! Write simulated camera frames as greyscale PNGs, to eyeball the pattern.
-//! usage: cargo run -p testioc --example frame_png -- OUT_PREFIX [FRAME]...
+//! usage: cargo run -p bobview-testioc --example frame_png -- OUT_PREFIX [FRAME]...
 
 use std::fs::File;
 use std::io::BufWriter;

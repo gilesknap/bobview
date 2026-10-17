@@ -49,7 +49,7 @@ book into `docs/book`.
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo clippy -p pv -p bobview --target wasm32-unknown-unknown -- -D warnings
+cargo clippy -p bobview-pv -p bobview --target wasm32-unknown-unknown -- -D warnings
 cargo test --workspace
 ```
 

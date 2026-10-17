@@ -7,7 +7,8 @@ the [epics-containers example-services](https://github.com/epics-containers/exam
 BL01T beamline.
 
 You need an x86_64 or aarch64 Linux machine (an Android phone's Linux
-Terminal works), or a Mac.
+Terminal works), or a Mac. To build it with Cargo instead, see
+[Install from crates.io](crates-io.md).
 
 ## 1. Install
 

@@ -1,9 +1,17 @@
 [package]
-name = "pv"
+name = "bobview-pv"
 description = "PV access layer for bobview: CA, PVA, loc:// and sim:// behind one interface"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["epics", "channel-access", "pv-access", "control-system"]
+categories = ["network-programming", "science"]
+
+[lib]
+name = "pv"
 
 [dependencies]
 log = "0.4"
@@ -27,7 +35,7 @@ wasm-bindgen-futures = "0.4.79"
 web-sys = { version = "0.3.106", features = ["WebSocket", "MessageEvent", "Window", "Location", "Url"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-testioc = { path = "../testioc" }
+testioc = { package = "bobview-testioc", path = "../testioc" }
 # For testing the PVWS decoding natively.
 base64 = "0.23.1"
 serde_json = "1.0.154"

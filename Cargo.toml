@@ -3,10 +3,19 @@ resolver = "3"
 members = ["crates/bob", "crates/pv", "crates/bobview", "crates/bobview-server", "crates/testioc"]
 
 [workspace.package]
-version = "0.2.1"
+version = "1.8.1"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/gilesknap/bobview"
+homepage = "https://gilesknap.github.io/bobview/"
+
+# The crates bobview and bobview-server use from this workspace. `bob` and
+# `pv` were taken on crates.io, so they are published as bobview-bob and
+# bobview-pv (and testioc as bobview-testioc), and keep their names in code. The versions match the
+# workspace's, as crates.io needs.
+[workspace.dependencies]
+bob = { package = "bobview-bob", path = "crates/bob", version = "=1.8.1" }
+pv = { package = "bobview-pv", path = "crates/pv", version = "=1.8.1" }
 
 [profile.release]
 opt-level = "s"

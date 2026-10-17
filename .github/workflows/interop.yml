@@ -65,14 +65,14 @@ jobs:
           BOBVIEW_INTEROP_PVA_PV: INTEROP:AI
           BOBVIEW_INTEROP_WRITE_PV: INTEROP:AO
           BOBVIEW_INTEROP_REQUIRE: "1"
-        run: cargo test -p pv --test interop -- --nocapture --skip ca_through_gateway
+        run: cargo test -p bobview-pv --test interop -- --nocapture --skip ca_through_gateway
       - name: Run the gateway test
         env:
           EPICS_CA_ADDR_LIST: 127.0.0.1:9064
           EPICS_CA_AUTO_ADDR_LIST: "NO"
           BOBVIEW_INTEROP_GW_PV: INTEROP:LI
           BOBVIEW_INTEROP_REQUIRE: "1"
-        run: cargo test -p pv --test interop ca_through_gateway -- --nocapture
+        run: cargo test -p bobview-pv --test interop ca_through_gateway -- --nocapture
       - name: Container logs
         if: always()
         run: docker logs ioc; docker logs gw

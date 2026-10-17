@@ -2,7 +2,8 @@
 
 bobview runs on x86_64 and aarch64 Linux (including the Android 16 Linux
 Terminal, Debian 13) and on macOS 11 or later (Apple silicon or Intel).
-`install.sh` picks the release build to match the machine.
+`install.sh` picks the release build to match the machine. To build it from
+crates.io with Cargo instead, see [Install from crates.io](../tutorials/crates-io.md).
 
 ## Install the prerequisites
 
