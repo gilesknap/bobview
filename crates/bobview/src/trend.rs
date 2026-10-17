@@ -37,9 +37,6 @@ pub struct Trend {
     /// Text selected in the search box, and when, until it has been
     /// steady for [`PRIMARY_DEBOUNCE`] to become the primary selection.
     search_selection: Option<(String, Instant)>,
-    /// The floor on the plot's own repaints, as last set: see
-    /// [`Trend::ui`].
-    min_repaint: Duration,
 }
 
 /// Text selected in the search box becomes the primary selection once it
@@ -87,7 +84,6 @@ impl Trend {
             reading: None,
             notice: None,
             search_selection: None,
-            min_repaint: Duration::ZERO,
         }
     }
 
@@ -101,12 +97,6 @@ impl Trend {
     #[cfg(test)]
     pub fn notice(&self) -> Option<(&str, bool)> {
         self.notice.as_ref().map(|n| (n.text.as_str(), n.error))
-    }
-
-    /// The floor on the plot's own repaints, as last drawn.
-    #[cfg(test)]
-    pub fn min_repaint(&self) -> Duration {
-        self.min_repaint
     }
 
     /// The PVs' names, as added.
@@ -251,15 +241,13 @@ impl Trend {
     /// its own pace. Set as it is drawn, so it holds for every trend
     /// however it was opened, and whenever the embedding was decided.
     pub fn ui(&mut self, ui: &mut egui::Ui) {
-        let min_repaint = if ui.ctx().embed_viewports() {
-            Duration::from_secs_f64(MIN_SCROLL_REPAINT)
-        } else {
-            Duration::ZERO
-        };
-        if min_repaint != self.min_repaint {
-            self.min_repaint = min_repaint;
-            self.plot.set_min_repaint_interval(min_repaint);
-        }
+        // A plain setter: set each pass rather than tracked.
+        self.plot
+            .set_min_repaint_interval(if ui.ctx().embed_viewports() {
+                Duration::from_secs_f64(MIN_SCROLL_REPAINT)
+            } else {
+                Duration::ZERO
+            });
         let rect = ui.available_rect_before_wrap();
         let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(rect));
         self.plot.ui(&mut inner);
@@ -429,26 +417,42 @@ mod tests {
         assert_eq!(t.names(), ["A", "B:C"]);
     }
 
-    /// Draw `t` for a pass of `ctx`.
-    fn draw(ctx: &egui::Context, t: &mut Trend) {
-        let mut out = ctx.run_ui(Default::default(), |ui| t.ui(ui));
-        out.textures_delta.clear();
+    /// The repaint a new live trend of `sim://sine` asks for, after a few
+    /// passes (the plot's own, with no input), drawn embedded or not.
+    fn live_repaint(embedded: bool) -> Duration {
+        let pvs = PvManager::new();
+        let mut t = Trend::new(0, &names(&["sim://sine"]), &pvs, None, &[]);
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(embedded);
+        let mut delay = Duration::MAX;
+        for i in 0..5 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 600.0),
+                )),
+                time: Some(i as f64 * 0.05),
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| t.ui(ui));
+            out.textures_delta.clear();
+            delay = out.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+        }
+        // egui takes the next frame's predicted time off the delay.
+        delay + Duration::from_secs_f64(1.0 / 60.0)
     }
 
     #[test]
     fn embedded_trends_hold_their_repaints_to_the_strip_charts() {
-        let pvs = PvManager::new();
-        let mut t = Trend::new(0, &names(&["A"]), &pvs, None, &[]);
-        assert_eq!(t.min_repaint(), Duration::ZERO);
-        // In the root viewport (the browser, snapshots).
-        let ctx = egui::Context::default();
-        ctx.set_embed_viewports(true);
-        draw(&ctx, &mut t);
-        assert_eq!(t.min_repaint().as_secs_f64(), MIN_SCROLL_REPAINT);
-        // In a native window of its own: its own pace.
-        ctx.set_embed_viewports(false);
-        draw(&ctx, &mut t);
-        assert_eq!(t.min_repaint(), Duration::ZERO);
+        // Just gone live, the plot's Live pill pulses at about 15 fps.
+        let native = live_repaint(false);
+        assert!(native < Duration::from_millis(100), "{native:?}");
+        // In the root viewport (the browser, snapshots) no faster than a
+        // strip chart scrolls.
+        let embedded = live_repaint(true);
+        let floor = Duration::from_secs_f64(MIN_SCROLL_REPAINT);
+        assert!(embedded >= floor - Duration::from_millis(1), "{embedded:?}");
+        assert!(embedded < Duration::MAX / 2, "still repaints: {embedded:?}");
     }
 
     #[test]

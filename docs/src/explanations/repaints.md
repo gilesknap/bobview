@@ -86,8 +86,11 @@ A trend window's plot is archiveview's `Plot`, built on the trend window's
 own tagged `PvManager`, so its PVs repaint only that window. It repaints
 itself for the rest: archive fetches run on the `pv` crate's runtime and
 ask for a repaint of the viewport the plot was last drawn in, and a live
-plot asks for the next repaint as it scrolls (at up to 15 frames a second,
-and while the pointer is over it).
+plot asks for the next repaint as it scrolls (at most 15 frames a
+second). Its Live pill also pulses, at about 15 frames a second, for 3 s
+after it goes live and while the pointer is over the plot: so a live trend
+in its own native window, with the pointer resting on it, repaints at about
+15 frames a second, but only that window.
 
 Where windows are embedded, a trend's plot is drawn in the main window, so
 each repaint it asks for itself redraws the whole display: there
