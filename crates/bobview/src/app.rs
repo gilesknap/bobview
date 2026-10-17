@@ -114,7 +114,18 @@ pub struct BobApp {
     chrome: Chrome,
     /// Where a copied PV name also goes, for a middle-click to paste.
     primary: Box<dyn selection::Primary>,
+    /// Reads the primary selection for a middle-click on a trend, on a
+    /// thread of its own, made by `make_reader` at the first such click.
+    /// Neither where there is no primary selection, nor in snapshots.
+    reader: Option<selection::Reader<SelectionRead>>,
+    make_reader: Option<selection::MakeRead>,
+    /// Middle-clicks on trends so far, to number them.
+    clicks: u64,
 }
+
+/// A read of the primary selection for a middle-click on a trend: the
+/// trend's id, the click's number, and where on the trend it landed.
+type SelectionRead = (u64, u64, archiveview::plot::MiddleClick);
 
 /// Repaints one window when a PV it shows changes, at most ~10 times a
 /// second, asking once per pass of the window: egui keeps a record of every
@@ -441,6 +452,9 @@ impl BobApp {
             launched: std::sync::mpsc::channel(),
             chrome: Chrome::new(ui_scale),
             primary: selection::system(),
+            reader: None,
+            make_reader: selection::system_reader(),
+            clicks: 0,
         };
         if let Some(loc) = start {
             app.main.show(loc);
@@ -462,6 +476,74 @@ impl BobApp {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn set_primary(&mut self, primary: Box<dyn selection::Primary>) {
         self.primary = primary;
+    }
+
+    /// Read the primary selection, for a middle-click on a trend, through
+    /// `make` (on a thread of its own), or never with `None`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_selection_reader(&mut self, make: Option<selection::MakeRead>) {
+        self.reader = None;
+        self.make_reader = make;
+    }
+
+    /// Answer the trends' middle-clicks from the primary selection: ask
+    /// for it for a new click, hand each answer to its trend, and give up
+    /// on a click whose answer is slow; and make text selected in a
+    /// trend's search box the primary selection. Called after any trend
+    /// is drawn.
+    fn trend_selections(&mut self, ctx: &egui::Context) {
+        let now = web_time::Instant::now();
+        for trend in &mut self.trends {
+            // Taken where there is no selection too, and dropped.
+            let Some(click) = trend.take_middle_click() else {
+                continue;
+            };
+            if self.reader.is_none()
+                && let Some(make) = self.make_reader.take()
+            {
+                let ctx = ctx.clone();
+                let wake = move |&(id, ..): &SelectionRead| {
+                    repaint_after(&ctx, trend_viewport(id), Duration::ZERO);
+                };
+                self.reader = Some(selection::Reader::spawn(make, wake));
+            }
+            if let Some(reader) = &self.reader {
+                self.clicks += 1;
+                reader.read((trend.id, self.clicks, click));
+                trend.reading(self.clicks, now);
+                // To time it out, if no answer has come by then.
+                let wait = crate::trend::SELECTION_WAIT + Duration::from_millis(50);
+                repaint_after(ctx, trend_viewport(trend.id), wait);
+            }
+        }
+        // Before the answers: one that came after the wait (a frame came
+        // late) is too late, as one coming later still would be.
+        for trend in &mut self.trends {
+            if trend.time_out_reading(now) {
+                repaint_after(ctx, trend_viewport(trend.id), Duration::ZERO);
+            }
+        }
+        if let Some(reader) = &self.reader {
+            while let Some(((id, n, click), text)) = reader.answer() {
+                if let Some(trend) = self.trends.iter_mut().find(|t| t.id == id) {
+                    trend.selected(n, click, text);
+                    repaint_after(ctx, trend_viewport(id), Duration::ZERO);
+                }
+            }
+        }
+        for trend in &mut self.trends {
+            // Text selected in its search box, once steady, as standalone
+            // archiveview does.
+            match trend.take_search_selection(now) {
+                (Some(text), _) => {
+                    if let Err(e) = self.primary.set(&text) {
+                        log::debug!("no primary selection: {e}");
+                    }
+                }
+                (None, Some(wait)) => repaint_after(ctx, trend_viewport(trend.id), wait),
+                (None, None) => {}
+            }
+        }
     }
 
     /// Fetch the trends' history from `archiver`, or none (live only),
@@ -1800,7 +1882,9 @@ impl BobApp {
         let mut children = Vec::new();
         if embedded {
             self.embedded_trends(&ctx);
-        } else {
+        }
+        self.trend_selections(&ctx);
+        if !embedded {
             // After this pass's requests, which may open or close some.
             children = self.display_viewports();
             children.extend(self.trend_viewports(&ctx));
@@ -2143,6 +2227,7 @@ impl BobApp {
                 self.trends.remove(i);
             }
         }
+        self.trend_selections(&ctx);
         if let Some(trend) = self.trends.get_mut(i).filter(|t| t.id == id)
             && trend.take_archiver_change()
         {
@@ -3142,6 +3227,156 @@ mod tests {
             self.0.lock().push(text.to_string());
             Ok(())
         }
+    }
+
+    /// A primary selection a test fills.
+    struct FakeRead(Option<String>);
+
+    impl crate::selection::ReadPrimary for FakeRead {
+        fn get(&mut self) -> Option<String> {
+            self.0.clone()
+        }
+    }
+
+    /// A primary selection whose owner answers only when the test says.
+    struct SlowRead(std::sync::mpsc::Receiver<()>);
+
+    impl crate::selection::ReadPrimary for SlowRead {
+        fn get(&mut self) -> Option<String> {
+            self.0.recv().ok();
+            Some("LATE:PV".into())
+        }
+    }
+
+    #[test]
+    fn a_selection_answering_after_the_wait_is_dropped() {
+        use super::BobApp;
+        use crate::chrome::UiScale;
+        use eframe::egui::{self, Event, Modifiers, PointerButton, Pos2};
+        let ctx = egui::Context::default();
+        let mut app = BobApp::new(&ctx, None, Some(1.0), UiScale::Fixed(1.0));
+        let req = crate::widgets::Request::Trend(vec!["LATE:A".into()]);
+        app.request(&ctx, super::Origin::default(), req);
+        let mut size = crate::chrome::DEFAULT_WINDOW;
+        run(&ctx, &mut app, &mut size, 5);
+        let plot = ctx
+            .memory(|m| m.area_rect(super::trend_window_id(0)))
+            .expect("the trend is drawn")
+            .center();
+        let (answer, wait) = std::sync::mpsc::channel();
+        app.set_selection_reader(Some(Box::new(move || Box::new(SlowRead(wait)))));
+        let press = |pressed| Event::PointerButton {
+            pos: plot,
+            button: PointerButton::Middle,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        for events in [
+            vec![Event::PointerMoved(plot)],
+            vec![press(true)],
+            vec![press(false)],
+        ] {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, size)),
+                events,
+                ..Default::default()
+            };
+            ctx.run_ui(input, |ui| app.draw(ui)).textures_delta.clear();
+        }
+        assert!(app.trends[0].is_reading(), "asked for the selection");
+        // No frame until past the wait, and the answer is in by then.
+        std::thread::sleep(crate::trend::SELECTION_WAIT);
+        answer.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        run(&ctx, &mut app, &mut size, 2);
+        assert!(!app.trends[0].is_reading());
+        assert_eq!(
+            app.trends[0].names(),
+            ["LATE:A"],
+            "the late answer is dropped"
+        );
+        let (text, error) = app.trends[0].notice().unwrap();
+        assert!(error && text.contains("Could not read"), "{text}");
+    }
+
+    #[test]
+    fn a_middle_click_on_a_trend_adds_the_selected_pvs() {
+        use super::BobApp;
+        use crate::chrome::UiScale;
+        use eframe::egui::{self, Event, Modifiers, PointerButton, Pos2};
+        let ctx = egui::Context::default();
+        let mut app = BobApp::new(&ctx, None, Some(1.0), UiScale::Fixed(1.0));
+        let req = crate::widgets::Request::Trend(vec!["loc://mid_a(0)".into()]);
+        app.request(&ctx, super::Origin::default(), req);
+        let mut size = crate::chrome::DEFAULT_WINDOW;
+        run(&ctx, &mut app, &mut size, 5);
+        // The middle of the trend's window: its plot.
+        let plot = ctx
+            .memory(|m| m.area_rect(super::trend_window_id(0)))
+            .expect("the trend is drawn")
+            .center();
+        let mut middle_click = |app: &mut BobApp, selected: Option<&str>| {
+            let fake = FakeRead(selected.map(str::to_string));
+            app.set_selection_reader(Some(Box::new(move || Box::new(fake))));
+            let press = |pressed| Event::PointerButton {
+                pos: plot,
+                button: PointerButton::Middle,
+                pressed,
+                modifiers: Modifiers::NONE,
+            };
+            for events in [
+                vec![Event::PointerMoved(plot)],
+                vec![press(true)],
+                vec![press(false)],
+            ] {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, size)),
+                    events,
+                    ..Default::default()
+                };
+                ctx.run_ui(input, |ui| app.draw(ui)).textures_delta.clear();
+            }
+            assert!(app.trends[0].is_reading(), "asked for the selection");
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while app.trends[0].is_reading() {
+                assert!(std::time::Instant::now() < until, "never answered");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                run(&ctx, app, &mut size, 1);
+            }
+            // The next frame says what the paste did.
+            run(&ctx, app, &mut size, 1);
+        };
+        middle_click(&mut app, Some("MID:B MID:C, INFO:root:x"));
+        assert_eq!(app.trends[0].names(), ["loc://mid_a(0)", "MID:B", "MID:C"]);
+        assert_eq!(app.trends[0].notice(), Some(("Added 2 PVs", false)));
+        // Nothing selected, or no PVs: nothing added, and it says so.
+        middle_click(&mut app, None);
+        assert_eq!(app.trends[0].names().len(), 3);
+        let (text, error) = app.trends[0].notice().unwrap();
+        assert!(error && text.contains("empty"), "{text}");
+        middle_click(&mut app, Some("just some words"));
+        assert_eq!(app.trends[0].names().len(), 3);
+        let (text, error) = app.trends[0].notice().unwrap();
+        assert!(error && text.contains("No PV names"), "{text}");
+        // With no primary selection (snapshots, Windows, macOS) a
+        // middle-click does nothing.
+        app.set_selection_reader(None);
+        let press = |pressed| Event::PointerButton {
+            pos: plot,
+            button: PointerButton::Middle,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        for events in [vec![press(true)], vec![press(false)]] {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, size)),
+                events,
+                ..Default::default()
+            };
+            ctx.run_ui(input, |ui| app.draw(ui)).textures_delta.clear();
+        }
+        assert!(!app.trends[0].is_reading());
+        assert_eq!(app.trends[0].names().len(), 3);
     }
 
     #[test]

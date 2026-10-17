@@ -3,10 +3,18 @@
 //! a BOY "Graph" button, or a Data Browser or StripTool launcher. The
 //! plot fetches history from the Archiver Appliance bobview was given
 //! (`--archiver`), or is live only without one.
+//!
+//! A middle-click on the plot adds the PVs the primary selection names,
+//! and one in its search box pastes the selection there: the plot reports
+//! the click, `BobApp` reads the selection (on a thread, see
+//! [`crate::selection::Reader`]) and hands the text back to
+//! [`Trend::selected`].
 
+use archiveview::plot::MiddleClick;
 use archiveview::{ArchiverClient, Plot, View};
 use eframe::egui;
 use pv::PvManager;
+use web_time::{Duration, Instant};
 
 use crate::layout::Geometry;
 
@@ -19,6 +27,36 @@ pub struct Trend {
     pub place: Geometry,
     /// Where the window is, for saving a layout.
     pub geometry: Geometry,
+    /// The middle-click waiting for the primary selection: its number,
+    /// and when it was (not egui time, which each native window counts
+    /// from its own start).
+    reading: Option<(u64, Instant)>,
+    /// What a paste did, floating over the bottom of the plot for a while.
+    notice: Option<Notice>,
+    /// Text selected in the search box, and when, until it has been
+    /// steady for [`PRIMARY_DEBOUNCE`] to become the primary selection.
+    search_selection: Option<(String, Instant)>,
+}
+
+/// Text selected in the search box becomes the primary selection once it
+/// has stayed the same this long, as in archiveview: not at every
+/// shift+arrow, which over `ssh -X` costs a round trip each.
+const PRIMARY_DEBOUNCE: Duration = Duration::from_millis(150);
+
+/// How long a middle-click waits for the primary selection, as in
+/// archiveview: long enough for a slow owner (or `ssh -X`), short enough
+/// that a hung one (arboard waits up to 4 s per format) gets a "Could not
+/// read the selection" while the click is still fresh, rather than PVs
+/// turning up long after.
+pub const SELECTION_WAIT: Duration = Duration::from_secs(2);
+
+/// A short message over the plot.
+struct Notice {
+    text: String,
+    error: bool,
+    /// When it goes (egui time), from when it is first drawn.
+    until: Option<f64>,
+    secs: f64,
 }
 
 impl Trend {
@@ -42,7 +80,22 @@ impl Trend {
             plot,
             place: Geometry::default(),
             geometry: Geometry::default(),
+            reading: None,
+            notice: None,
+            search_selection: None,
         }
+    }
+
+    /// Whether a middle-click is waiting for the primary selection.
+    #[cfg(test)]
+    pub fn is_reading(&self) -> bool {
+        self.reading.is_some()
+    }
+
+    /// The notice's text, and whether it is an error.
+    #[cfg(test)]
+    pub fn notice(&self) -> Option<(&str, bool)> {
+        self.notice.as_ref().map(|n| (n.text.as_str(), n.error))
     }
 
     /// The PVs' names, as added.
@@ -107,6 +160,75 @@ impl Trend {
         }
     }
 
+    /// Where a middle-click on it since last asked landed, if there was
+    /// one: the caller reads the primary selection for it.
+    pub fn take_middle_click(&mut self) -> Option<MiddleClick> {
+        self.plot.take_middle_click()
+    }
+
+    /// Text selected in its search box that has been steady since before
+    /// `now` less [`PRIMARY_DEBOUNCE`], once, to make the primary
+    /// selection; and when to ask again, while some is waiting.
+    pub fn take_search_selection(&mut self, now: Instant) -> (Option<String>, Option<Duration>) {
+        if let Some(text) = self.plot.take_search_selection() {
+            self.search_selection = Some((text, now));
+        }
+        match &self.search_selection {
+            Some((_, since)) if now.duration_since(*since) >= PRIMARY_DEBOUNCE => {
+                (self.search_selection.take().map(|(t, _)| t), None)
+            }
+            Some((_, since)) => (None, Some(PRIMARY_DEBOUNCE - now.duration_since(*since))),
+            None => (None, None),
+        }
+    }
+
+    /// The middle-click numbered `n`, at `now`, is waiting for the
+    /// selection (an earlier one's answer is then ignored).
+    pub fn reading(&mut self, n: u64, now: Instant) {
+        self.reading = Some((n, now));
+    }
+
+    /// The primary selection's `text` for the middle-click numbered `n` on
+    /// `click`: add the PVs it names, or paste it into the search box. An
+    /// answer for an older click, or one that came too late, is dropped.
+    pub fn selected(&mut self, n: u64, click: MiddleClick, text: Option<String>) {
+        if self.reading.is_none_or(|(r, _)| r != n) {
+            return;
+        }
+        self.reading = None;
+        let text = text.unwrap_or_default();
+        match click {
+            // Says what it added in `ui`, from `take_pasted`.
+            MiddleClick::Plot => {
+                self.plot.paste_pvs(&text);
+            }
+            MiddleClick::Search => self.plot.paste_into_search(&text),
+        }
+    }
+
+    /// Give up on a middle-click that has waited [`SELECTION_WAIT`] by
+    /// `now` for the selection (its owner may have hung), and say so;
+    /// whether it did.
+    pub fn time_out_reading(&mut self, now: Instant) -> bool {
+        let late = self
+            .reading
+            .is_some_and(|(_, since)| now.duration_since(since) >= SELECTION_WAIT);
+        if late {
+            self.reading = None;
+            self.notify("Could not read the selection", true, 4.0);
+        }
+        late
+    }
+
+    fn notify(&mut self, text: impl Into<String>, error: bool, secs: f64) {
+        self.notice = Some(Notice {
+            text: text.into(),
+            error,
+            until: None,
+            secs,
+        });
+    }
+
     /// Draw it in the space `ui` offers, and no more: in a window inside
     /// the main one (an auto-sized `egui::Window`) the plot's legend
     /// would otherwise push the window taller every frame.
@@ -114,7 +236,44 @@ impl Trend {
         let rect = ui.available_rect_before_wrap();
         let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(rect));
         self.plot.ui(&mut inner);
+        // A paste: a middle-click's, or Ctrl+V's.
+        if let Some(pasted) = self.plot.take_pasted() {
+            let error = pasted.added.is_empty() && pasted.present.is_empty();
+            self.notify(pasted.message(), error, 3.0);
+        }
+        self.toast(ui, rect);
         ui.advance_cursor_after_rect(rect);
+    }
+
+    /// The notice, over the bottom middle of `rect`, until it expires.
+    fn toast(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
+        let Some(notice) = &mut self.notice else {
+            return;
+        };
+        let now = ui.input(|i| i.time);
+        let until = *notice.until.get_or_insert(now + notice.secs);
+        if now > until {
+            self.notice = None;
+            return;
+        }
+        ui.ctx()
+            .request_repaint_after(Duration::from_secs_f64(until - now));
+        let color = if notice.error {
+            ui.visuals().error_fg_color
+        } else {
+            ui.visuals().text_color()
+        };
+        let text = egui::RichText::new(&notice.text).color(color);
+        // In the trend's own layer, over the plot drawn before it: a trend
+        // window behind another (where windows are embedded) keeps its
+        // notice behind too.
+        let layout = egui::Layout::bottom_up(egui::Align::Center);
+        let mut over = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(layout));
+        over.add_space(56.0);
+        egui::Frame::popup(over.style())
+            .corner_radius(16.0)
+            .inner_margin(egui::Margin::symmetric(14, 8))
+            .show(&mut over, |ui| ui.label(text));
     }
 }
 
@@ -146,6 +305,34 @@ mod tests {
         // colours as in a new trend of all three.
         assert_eq!(t.names(), ["A", "B", "C"]);
         assert_eq!(t.title(), "Trend: A and 2 more");
+    }
+
+    #[test]
+    fn the_selection_answers_only_the_latest_middle_click_in_time() {
+        let pvs = PvManager::new();
+        let mut t = Trend::new(0, &names(&["A"]), &pvs, None, &[]);
+        let start = Instant::now();
+        t.reading(1, start);
+        t.reading(2, start);
+        // An earlier click's answer is dropped.
+        t.selected(1, MiddleClick::Plot, Some("OLD:PV".into()));
+        assert_eq!(t.names(), ["A"]);
+        assert!(t.is_reading());
+        t.selected(2, MiddleClick::Plot, Some("B:C".into()));
+        assert_eq!(t.names(), ["A", "B:C"]);
+        assert!(!t.is_reading());
+        // Too late: given up on, with a notice, and the answer dropped.
+        t.reading(3, start);
+        assert!(!t.time_out_reading(start + Duration::from_millis(500)));
+        assert!(t.time_out_reading(start + SELECTION_WAIT));
+        let (text, error) = t.notice().unwrap();
+        assert!(error && text.contains("Could not read"), "{text}");
+        t.selected(3, MiddleClick::Plot, Some("LATE:PV".into()));
+        assert_eq!(t.names(), ["A", "B:C"]);
+        // Into the search box: pasted there, not added.
+        t.reading(4, start);
+        t.selected(4, MiddleClick::Search, Some("D:E".into()));
+        assert_eq!(t.names(), ["A", "B:C"]);
     }
 
     #[test]
