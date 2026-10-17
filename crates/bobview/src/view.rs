@@ -267,7 +267,9 @@ impl View {
 
     /// Whether this shows `loc`: the same display with the same macros, its
     /// own defaults under both, as a link on it has them (while it loads,
-    /// as it was opened). Macros from a link's group or widget still count.
+    /// as it was opened). Macros from a link's group, widget or embedding
+    /// still count: two links to one file from the same display differ
+    /// only in those.
     pub fn shows(&self, loc: &Location) -> bool {
         let Some(cur) = &self.current else {
             return false;
@@ -275,9 +277,15 @@ impl View {
         let Some(screen) = &self.screen else {
             return cur.same_display(loc);
         };
+        // As the display is built with them: the link's whole chain of
+        // macros over the display's defaults, not only its last layer.
         let defaults = |l: &Location| Location {
             source: l.source.clone(),
-            macros: screen.display.macros.with(&l.macros),
+            macros: bob::Macros::over(
+                &screen.display.macros,
+                &l.macros,
+                &std::sync::atomic::AtomicUsize::new(bob::MAX_LOAD_BYTES),
+            ),
         };
         defaults(cur).same_display(&defaults(loc))
     }
@@ -589,6 +597,114 @@ mod tests {
             view.error.as_deref(),
             Some("cannot read /x/a.bob: the build failed (see the log)")
         );
+    }
+
+    /// The display a click on each widget with an action under `nodes`
+    /// opens, embedded displays and all.
+    fn links(nodes: &mut [Node], pvs: &PvManager, out: &mut Vec<Location>) {
+        for n in nodes {
+            while n.poll_building(Duration::from_millis(10)) {}
+            if let Some(action) = n.w.actions().first() {
+                let mut requests = Vec::new();
+                let mut cx = Cx {
+                    view: style::View {
+                        origin: egui::Pos2::ZERO,
+                        zoom: 1.0,
+                    },
+                    clip: egui::Rect::EVERYTHING,
+                    pvs,
+                    requests: &mut requests,
+                    depth: 0,
+                    touch: false,
+                    trends: &[],
+                    window: WindowKey::Main,
+                };
+                widgets::run_action(n, action, &mut cx);
+                for r in requests {
+                    if let Request::Open { source, macros, .. } = r {
+                        out.push(Location { source, macros });
+                    }
+                }
+            }
+            links(&mut n.children, pvs, out);
+            if let Some(s) = &mut n.embedded {
+                links(&mut s.nodes, pvs, out);
+            }
+        }
+    }
+
+    #[test]
+    fn links_to_one_display_differ_by_their_widgets_macros() {
+        // As a DLS vacuum cell: one gauge display, opened with the same
+        // action macros from each embedding of a gauge widget, and from a
+        // group, which set which gauge it is.
+        let dir = std::env::temp_dir().join(format!("bobview-gauges-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let opi = |body: &str| {
+            format!(
+                r#"<display typeId="org.csstudio.opibuilder.Display" version="1.0.0">
+                <macros><include_parent_macros>true</include_parent_macros></macros>
+                {body}</display>"#
+            )
+        };
+        let rect = r#"<widget typeId="org.csstudio.opibuilder.widgets.Rectangle" version="1.0.0">
+            <actions hook="true" hook_all="false"><action type="OPEN_DISPLAY">
+            <path>gauge.opi</path>
+            <macros><include_parent_macros>true</include_parent_macros><NOIMG>0</NOIMG></macros>
+            <mode>8</mode></action></actions></widget>"#;
+        std::fs::write(dir.join("widget.opi"), opi(rect)).unwrap();
+        std::fs::write(
+            dir.join("gauge.opi"),
+            opi("").replace("<macros>", "<macros><NOIMG>1</NOIMG>"),
+        )
+        .unwrap();
+        let embed = |id: &str| {
+            format!(
+                r#"<widget typeId="org.csstudio.opibuilder.widgets.linkingContainer" version="1.0.0">
+                <macros><include_parent_macros>true</include_parent_macros>
+                <dom>$(cell)S</dom><id>{id}</id></macros>
+                <opi_file>widget.opi</opi_file></widget>"#
+            )
+        };
+        let group = format!(
+            r#"<widget typeId="org.csstudio.opibuilder.widgets.groupingContainer" version="1.0.0">
+            <macros><include_parent_macros>true</include_parent_macros>
+            <dom>$(cell)A</dom><id>01</id></macros>{rect}</widget>"#
+        );
+        let host = dir.join("cell.opi");
+        std::fs::write(
+            &host,
+            opi(&format!("{}{}{group}", embed("01"), embed("02"))),
+        )
+        .unwrap();
+
+        let pvs = PvManager::new();
+        let cell = bob::Macros::from_pairs([("cell", "SR11")]);
+        let load = || {
+            let mut s = Screen::load(&bob::Source::File(host.clone()), &cell, &pvs).unwrap();
+            let mut out = Vec::new();
+            links(&mut s.nodes, &pvs, &mut out);
+            out
+        };
+        let found = load();
+        let ids: Vec<_> = found
+            .iter()
+            .map(|l| (l.macros.get("dom").unwrap(), l.macros.get("id").unwrap()))
+            .collect();
+        assert_eq!(ids, [("SR11S", "01"), ("SR11S", "02"), ("SR11A", "01")]);
+
+        let mut view = View::new(&pvs, Some(1.0));
+        view.open(found[0].clone());
+        while view.is_loading() {
+            view.poll_loading(&egui::Context::default());
+        }
+        assert!(view.screen.is_some(), "{:?}", view.error);
+        assert!(view.shows(&found[0]));
+        assert!(!view.shows(&found[1]), "gauge 02 is not gauge 01");
+        assert!(!view.shows(&found[2]), "the group's gauge is not gauge 01");
+        // The same gauge from the cell opened again (with a new `$(DID)`).
+        assert!(view.shows(&load()[0]));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
