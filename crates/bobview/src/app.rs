@@ -516,6 +516,13 @@ impl BobApp {
                 repaint_after(ctx, trend_viewport(trend.id), wait);
             }
         }
+        // Before the answers: one that came after the wait (a frame came
+        // late) is too late, as one coming later still would be.
+        for trend in &mut self.trends {
+            if trend.time_out_reading(now) {
+                repaint_after(ctx, trend_viewport(trend.id), Duration::ZERO);
+            }
+        }
         if let Some(reader) = &self.reader {
             while let Some(((id, n, click), text)) = reader.answer() {
                 if let Some(trend) = self.trends.iter_mut().find(|t| t.id == id) {
@@ -525,9 +532,6 @@ impl BobApp {
             }
         }
         for trend in &mut self.trends {
-            if trend.time_out_reading(now) {
-                repaint_after(ctx, trend_viewport(trend.id), Duration::ZERO);
-            }
             // Text selected in its search box, once steady, as standalone
             // archiveview does.
             match trend.take_search_selection(now) {
@@ -3232,6 +3236,67 @@ mod tests {
         fn get(&mut self) -> Option<String> {
             self.0.clone()
         }
+    }
+
+    /// A primary selection whose owner answers only when the test says.
+    struct SlowRead(std::sync::mpsc::Receiver<()>);
+
+    impl crate::selection::ReadPrimary for SlowRead {
+        fn get(&mut self) -> Option<String> {
+            self.0.recv().ok();
+            Some("LATE:PV".into())
+        }
+    }
+
+    #[test]
+    fn a_selection_answering_after_the_wait_is_dropped() {
+        use super::BobApp;
+        use crate::chrome::UiScale;
+        use eframe::egui::{self, Event, Modifiers, PointerButton, Pos2};
+        let ctx = egui::Context::default();
+        let mut app = BobApp::new(&ctx, None, Some(1.0), UiScale::Fixed(1.0));
+        let req = crate::widgets::Request::Trend(vec!["LATE:A".into()]);
+        app.request(&ctx, super::Origin::default(), req);
+        let mut size = crate::chrome::DEFAULT_WINDOW;
+        run(&ctx, &mut app, &mut size, 5);
+        let plot = ctx
+            .memory(|m| m.area_rect(super::trend_window_id(0)))
+            .expect("the trend is drawn")
+            .center();
+        let (answer, wait) = std::sync::mpsc::channel();
+        app.set_selection_reader(Some(Box::new(move || Box::new(SlowRead(wait)))));
+        let press = |pressed| Event::PointerButton {
+            pos: plot,
+            button: PointerButton::Middle,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        for events in [
+            vec![Event::PointerMoved(plot)],
+            vec![press(true)],
+            vec![press(false)],
+        ] {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, size)),
+                events,
+                ..Default::default()
+            };
+            ctx.run_ui(input, |ui| app.draw(ui)).textures_delta.clear();
+        }
+        assert!(app.trends[0].is_reading(), "asked for the selection");
+        // No frame until past the wait, and the answer is in by then.
+        std::thread::sleep(crate::trend::SELECTION_WAIT);
+        answer.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        run(&ctx, &mut app, &mut size, 2);
+        assert!(!app.trends[0].is_reading());
+        assert_eq!(
+            app.trends[0].names(),
+            ["LATE:A"],
+            "the late answer is dropped"
+        );
+        let (text, error) = app.trends[0].notice().unwrap();
+        assert!(error && text.contains("Could not read"), "{text}");
     }
 
     #[test]
