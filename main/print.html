@@ -713,12 +713,13 @@ PV's colour, name and value: click one to hide its line, hover to pick it
 out, and <strong>×</strong> to remove it. Ctrl+V over the plot adds the PVs named in
 the clipboard.</li>
 <li><strong>Middle-click.</strong> On Linux (X11 or Wayland) a middle-click on the plot or
-legend adds the Channel Access and PV Access PVs named in the primary
-selection, as in the standalone archiveview: middle-click a widget in a
-display to select its PV name, or select names in a terminal or editor,
-then middle-click the trend. Other PVs, such as <code>loc://</code> and <code>sim://</code>
-ones, aren't added this way: use <strong>Trend</strong> in the widget's right-click
-menu. A middle-click in the search box pastes the selection there, and
+legend adds the PVs named in the primary selection, as in the standalone
+archiveview: middle-click a widget in a display to select its PV name, or
+select names in a terminal or editor, then middle-click the trend. Channel
+Access, PV Access, <code>loc://</code> and <code>sim://</code> names are added (a <code>sim://</code> one
+such as <code>sim://sine(0, 10, 0.1)</code> whole, with its arguments); a formula
+(<code>=</code> or <code>eq://</code>) isn't: use <strong>Trend</strong> in the widget's right-click menu.
+A middle-click in the search box pastes the selection there, and
 text selected in the search box becomes the primary selection. A note over
 the plot says what was added, or that the selection named no PVs (one
 naming more than 20 adds none). Windows and macOS have no primary
@@ -1153,7 +1154,17 @@ for the next repaint when the plot has moved a pixel.</p>
 own tagged <code>PvManager</code>, so its PVs repaint only that window. It repaints
 itself for the rest: archive fetches run on the <code>pv</code> crate's runtime and
 ask for a repaint of the viewport the plot was last drawn in, and a live
-plot asks for the next repaint as it scrolls.</p>
+plot asks for the next repaint as it scrolls (at most 15 frames a
+second). Its Live pill also pulses, at about 15 frames a second, for 3 s
+after it goes live and while the pointer is over the plot: so a live trend
+in its own native window, with the pointer resting on it, repaints at about
+15 frames a second, but only that window.</p>
+<p>Where windows are embedded, a trend's plot is drawn in the main window, so
+each repaint it asks for itself redraws the whole display: there
+<code>Trend::ui</code> holds them to a strip chart's floor, <code>MIN_SCROLL_REPAINT</code>
+(0.25 s), with <code>Plot::set_min_repaint_interval</code>. A trend in its own native
+window repaints only itself, and keeps the plot's own pace. Repaints for
+the user's pans and zooms, and for a fetch finishing, are not held back.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="pinned-windows-and-the-viewer"><a class="header" href="#pinned-windows-and-the-viewer">Pinned windows and the viewer</a></h1>
 <p>For a control room, several displays can be open side by side, each in a
 window of its own, and the arrangement saved as a
@@ -1584,7 +1595,8 @@ value or a <code>caget</code>/<code>pvget</code> command, open the PV details, <
 in a terminal then pastes it, and one on a
 <a href="reference/../how-to/trends.html">trend</a> or in
 <a href="https://github.com/gilesknap/archiveview">archiveview</a> plots it (a
-Channel Access or PV Access name). The
+Channel Access, PV Access, <code>loc://</code> or <code>sim://</code> name; for a formula use
+<strong>Trend</strong>). The
 widget flashes and the status line says "Copied <em>name</em>". See
 <a href="reference/controls.html#copying-a-pv-name">Copying a PV name</a>.</li>
 <li>On a touch screen, pinch to zoom.</li>

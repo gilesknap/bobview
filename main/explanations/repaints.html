@@ -257,7 +257,17 @@ for the next repaint when the plot has moved a pixel.</p>
 own tagged <code>PvManager</code>, so its PVs repaint only that window. It repaints
 itself for the rest: archive fetches run on the <code>pv</code> crate's runtime and
 ask for a repaint of the viewport the plot was last drawn in, and a live
-plot asks for the next repaint as it scrolls.</p>
+plot asks for the next repaint as it scrolls (at most 15 frames a
+second). Its Live pill also pulses, at about 15 frames a second, for 3 s
+after it goes live and while the pointer is over the plot: so a live trend
+in its own native window, with the pointer resting on it, repaints at about
+15 frames a second, but only that window.</p>
+<p>Where windows are embedded, a trend's plot is drawn in the main window, so
+each repaint it asks for itself redraws the whole display: there
+<code>Trend::ui</code> holds them to a strip chart's floor, <code>MIN_SCROLL_REPAINT</code>
+(0.25 s), with <code>Plot::set_min_repaint_interval</code>. A trend in its own native
+window repaints only itself, and keeps the plot's own pace. Repaints for
+the user's pans and zooms, and for a fetch finishing, are not held back.</p>
 
                     </main>
 
