@@ -11,10 +11,16 @@ edit-url-template = "https://github.com/gilesknap/bobview/edit/main/docs/{path}"
 # CI sets the site URL of each version, /bobview/<version>/
 site-url = "/bobview/main/"
 additional-css = ["theme/grid.css", "theme/sidebar.css"]
-additional-js = ["theme/switcher.js"]
+additional-js = ["theme/switcher.js", "theme/mermaid.min.js", "theme/mermaid-init.js"]
 default-theme = "light"
 preferred-dark-theme = "navy"
 
 [output.html.fold]
 enable = true
 level = 1
+
+# Diagrams: mdbook-mermaid (see how-to/build.md) turns ```mermaid blocks
+# into <pre class="mermaid">, drawn in the browser by theme/mermaid.min.js
+# (Mermaid 11.6, from `mdbook-mermaid install`) and theme/mermaid-init.js.
+[preprocessor.mermaid]
+command = "mdbook-mermaid"

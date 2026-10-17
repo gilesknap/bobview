@@ -3,6 +3,14 @@
 A viewer that can write to a control system needs to be predictable about
 when it does. This page explains the rules.
 
+Every write takes one route. A control or a `write_pv` action calls
+`Pv::write` (or `Pv::write_long_string`, for text a string-format widget
+writes to a char array). Read-only mode refuses it there. Otherwise it goes
+to the PV's writer: the queue of its backend task for CA and PVA, which
+converts the text to the PV's type and sends it; the value itself for
+`loc://`; or the PV Web Socket in a browser. A refused or failed write
+becomes a message in the status line.
+
 ## Read-only mode
 
 `--read-only` refuses every write to a PV: controls are disabled and a write

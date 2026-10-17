@@ -26,6 +26,7 @@
 
 - [Scope and fidelity to Phoebus](explanations/scope.md)
 - [Architecture](explanations/architecture.md)
+- [Threads, windows and repaints](explanations/repaints.md)
 - [Pinned windows and the viewer](explanations/windows.md)
 - [How BOY screens are translated](explanations/boy.md)
 - [Writes and safety](explanations/writes.md)
