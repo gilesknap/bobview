@@ -31,7 +31,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
-          tool: mdbook@0.4.40
+          # mdbook-mermaid 0.15 is built for mdBook 0.4.36 and later 0.4s
+          tool: mdbook@0.4.40,mdbook-mermaid@0.15.0
 
       - name: Sanitize ref name for docs version
         run: echo "DOCS_VERSION=${GITHUB_REF_NAME//[^A-Za-z0-9._-]/_}" >> "$GITHUB_ENV"
@@ -45,6 +46,10 @@ jobs:
           for crate in bob pv testioc bobview bobview_server bobview_probe bobview_testioc; do
             test -f "docs/book/api/${crate}/index.html"
           done
+          # the diagrams: Mermaid's script, and a diagram it has to draw
+          test -s docs/book/theme/mermaid.min.js
+          grep -q 'theme/mermaid-init.js' docs/book/explanations/architecture.html
+          grep -q '<pre class="mermaid">' docs/book/explanations/architecture.html
 
       - name: Move to versioned directory
         run: |

@@ -32,10 +32,12 @@ writes `dist/web`. It needs the `wasm32-unknown-unknown` target and the
 
 ## Build these docs
 
-The docs are an [mdBook](https://rust-lang.github.io/mdBook/):
+The docs are an [mdBook](https://rust-lang.github.io/mdBook/), with
+diagrams drawn by [mdbook-mermaid](https://github.com/badboy/mdbook-mermaid).
+Install the versions CI uses (newer mdbook-mermaid needs a newer mdBook):
 
 ```bash
-cargo install mdbook
+cargo install mdbook@0.4.40 mdbook-mermaid@0.15.0
 scripts/build-docs.sh serve --open
 ```
 
