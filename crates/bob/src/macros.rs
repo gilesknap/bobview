@@ -79,19 +79,29 @@ impl Macros {
             && self.0.base.as_ref().is_none_or(|b| b.is_empty())
     }
 
+    /// Every definition, in the order [`Macros::get`] lets later ones win:
+    /// a layer's `base` first, then its `parent` (and all below it), then
+    /// its own.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
-        let mut layers = vec![self];
-        while let Some(p) = &layers[layers.len() - 1].0.parent {
-            layers.push(p);
+        let mut out = Vec::new();
+        self.collect_into(&mut out);
+        out.into_iter()
+    }
+
+    fn collect_into<'a>(&'a self, out: &mut Vec<(&'a str, &'a str)>) {
+        if let Some(b) = &self.0.base {
+            b.collect_into(out);
         }
-        layers
-            .into_iter()
-            .rev()
-            .flat_map(|m| m.0.own.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        if let Some(p) = &self.0.parent {
+            p.collect_into(out);
+        }
+        out.extend(self.0.own.iter().map(|(k, v)| (k.as_str(), v.as_str())));
     }
 
     /// These macros with `inner` layered on top. Values in `inner` are first
-    /// expanded against `self`, so `<P>$(P):SUB</P>` works.
+    /// expanded against `self`, so `<P>$(P):SUB</P>` works. Only `inner`'s
+    /// own definitions are used, not the layers under it: for a whole chain,
+    /// such as a link's, use [`Macros::over`].
     pub fn with(&self, inner: &Macros) -> Macros {
         self.with_budget(inner, &AtomicUsize::new(MAX_LAYER_BYTES))
     }
@@ -335,6 +345,23 @@ mod tests {
         assert!(set.own_bytes() < 10_000);
         let more = set.with_budget(&inner, &left);
         assert_eq!(more.get("N0"), Some("$(V)"));
+    }
+
+    #[test]
+    fn iter_lists_every_layer_as_get_sees_them() {
+        // An embedded display's defaults (the base) under its caller's
+        // chain: iterating, later definitions win as `get` has them.
+        let defaults = Macros::from_pairs([("D", "dflt"), ("P", "D")]);
+        let caller = Macros::from_pairs([("P", "CALL")]).with(&Macros::from_pairs([("id", "01")]));
+        let m = Macros::over(&defaults, &caller, &AtomicUsize::new(1 << 20));
+        let last: std::collections::BTreeMap<_, _> = m.iter().collect();
+        for (k, v) in &last {
+            assert_eq!(m.get(k), Some(*v), "{k}");
+        }
+        assert_eq!(
+            last.into_iter().collect::<Vec<_>>(),
+            [("D", "dflt"), ("P", "CALL"), ("id", "01")]
+        );
     }
 
     #[test]

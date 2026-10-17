@@ -31,12 +31,25 @@ pub struct Location {
 
 impl Location {
     /// The same display with the same effective macros, however they were
-    /// layered (later definitions win).
+    /// layered (see `effective`).
     pub(crate) fn same_display(&self, other: &Location) -> bool {
-        fn effective(m: &Macros) -> std::collections::BTreeMap<&str, &str> {
-            m.iter().collect()
-        }
-        self.source == other.source && effective(&self.macros) == effective(&other.macros)
+        self.source == other.source && self.effective() == other.effective()
+    }
+
+    /// The macros that tell this display apart, later definitions winning.
+    /// A BOY display's `$(DID)` is left out: one opened in a window of its
+    /// own is given a fresh one whatever a link passes (the id of the
+    /// display the link is on).
+    pub(crate) fn effective(&self) -> std::collections::BTreeMap<&str, &str> {
+        let opi = self
+            .source
+            .to_string()
+            .to_ascii_lowercase()
+            .ends_with(".opi");
+        self.macros
+            .iter()
+            .filter(|(k, _)| !(opi && *k == "DID"))
+            .collect()
     }
 }
 
@@ -2929,6 +2942,14 @@ mod tests {
             ..flat.clone()
         };
         assert!(!flat.same_display(&other));
+        // A BOY display's `$(DID)` is its own, whatever the link passed.
+        let opi = |pairs: &[(&str, &str)]| Location {
+            source: Source::parse("a.opi"),
+            ..loc(pairs)
+        };
+        assert!(opi(&[("P", "X"), ("DID", "DID_1")]).same_display(&opi(&[("P", "X")])));
+        assert!(!opi(&[("P", "X"), ("DID", "DID_1")]).same_display(&opi(&[("P", "Y")])));
+        assert!(!loc(&[("DID", "1")]).same_display(&loc(&[("DID", "2")])));
     }
 
     #[test]
