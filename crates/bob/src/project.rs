@@ -571,7 +571,12 @@ fn location_path(location: &str, dir: &Path) -> Option<PathBuf> {
             Some(rest) => &rest[rest.find('/')?..],
             None => uri,
         };
-        PathBuf::from(percent_decode(crate::source::file_url_path(path)))
+        // Decoded first, as the drive may be escaped (`/C%3A/x`).
+        let path = percent_decode(path);
+        match path.to_str() {
+            Some(p) => PathBuf::from(crate::source::file_url_path(p)),
+            None => PathBuf::from(path),
+        }
     } else if let Some(path) = project_relative(location) {
         path
     } else {

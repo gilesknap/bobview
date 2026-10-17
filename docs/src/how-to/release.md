@@ -13,8 +13,9 @@ CI checks that the tag matches the version in `Cargo.toml` and fails the
 build if not. It creates the GitHub Release itself and builds on a runner
 for each platform (`ubuntu-24.04`, `ubuntu-24.04-arm`, `macos-15`, which
 also cross-builds the x86_64 Mac build, and `windows-2022`), attaching a
-`bobview-<arch>-<os>.tar.gz` for each, such as `bobview-x86_64-linux.tar.gz`
-and `bobview-aarch64-macos.tar.gz`, and `bobview-x86_64-windows.zip`.
+`bobview-<arch>-<os>.tar.gz` for each Linux and macOS build, such as
+`bobview-x86_64-linux.tar.gz` and `bobview-aarch64-macos.tar.gz`, and
+`bobview-x86_64-windows.zip` for Windows.
 
 The Linux builds use `cargo zigbuild` to link against glibc 2.28, so they
 run on RHEL 8+, Ubuntu 20.04+ and Debian 10+. Each archive carries

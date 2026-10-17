@@ -83,9 +83,10 @@ impl Roots {
             };
             let checked = || -> Option<Metadata> {
                 let real = std::fs::canonicalize(&file).ok()?;
-                let (now, then) = (std::fs::metadata(&real).ok()?, opened.metadata().ok()?);
+                let then = opened.metadata().ok()?;
                 // The real path is inside, and is the file that was opened.
-                (inside(&real) && then.is_file() && same_file(&now, &then)).then_some(then)
+                (inside(&real) && then.is_file() && is_opened(&real, &opened, &then)?)
+                    .then_some(then)
             };
             return match checked() {
                 Some(meta) => Found::File(opened, file, meta),
@@ -111,19 +112,29 @@ fn open_file(file: &Path) -> std::io::Result<File> {
     File::open(file)
 }
 
-/// Whether `a` and `b` are of the same file.
+/// Whether the file at `real` is `opened` (whose metadata is `meta`).
 #[cfg(unix)]
-fn same_file(a: &Metadata, b: &Metadata) -> bool {
+fn is_opened(real: &Path, _opened: &File, meta: &Metadata) -> Option<bool> {
     use std::os::unix::fs::MetadataExt;
-    (a.dev(), a.ino()) == (b.dev(), b.ino())
+    let now = std::fs::metadata(real).ok()?;
+    Some((now.dev(), now.ino()) == (meta.dev(), meta.ino()))
 }
 
-/// Whether `a` and `b` are of the same file, as near as stable std can
-/// tell without a file index: the same size and times.
-#[cfg(not(unix))]
-fn same_file(a: &Metadata, b: &Metadata) -> bool {
-    let times = |m: &Metadata| (m.len(), m.modified().ok(), m.created().ok());
-    times(a) == times(b)
+/// Whether the file at `real` is `opened`: the same volume and file index.
+#[cfg(windows)]
+fn is_opened(real: &Path, opened: &File, _meta: &Metadata) -> Option<bool> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+    let id = |f: &File| {
+        // SAFETY: an open file's handle, and a struct the call fills in.
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        let ok = unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut info) };
+        let index = (info.nFileIndexHigh, info.nFileIndexLow);
+        (ok != 0).then_some((info.dwVolumeSerialNumber, index))
+    };
+    Some(id(&File::open(real).ok()?)? == id(opened)?)
 }
 
 /// What a request path names.
