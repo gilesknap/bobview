@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/bob", "crates/pv", "crates/bobview", "crates/bobview-server", "crates/testioc"]
 
 [workspace.package]
-version = "1.8.5"
+version = "1.9.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/gilesknap/bobview"
@@ -14,8 +14,8 @@ homepage = "https://gilesknap.github.io/bobview/"
 # bobview-pv (and testioc as bobview-testioc), and keep their names in code. The versions match the
 # workspace's, as crates.io needs.
 [workspace.dependencies]
-bob = { package = "bobview-bob", path = "crates/bob", version = "=1.8.5" }
-pv = { package = "bobview-pv", path = "crates/pv", version = "=1.8.5" }
+bob = { package = "bobview-bob", path = "crates/bob", version = "=1.9.0" }
+pv = { package = "bobview-pv", path = "crates/pv", version = "=1.9.0" }
 # The trend windows' plot (archived and live PVs): the library only, with
 # no eframe, clap or clipboard.
 archiveview = { version = "0.2.0", default-features = false }
