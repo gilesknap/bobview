@@ -277,6 +277,10 @@ impl View {
         let Some(screen) = &self.screen else {
             return cur.same_display(loc);
         };
+        // Most links the navigator asks about are to other files.
+        if cur.source != loc.source {
+            return false;
+        }
         // As the display is built with them: the link's whole chain of
         // macros over the display's defaults, not only its last layer.
         let defaults = |l: &Location| Location {
@@ -702,6 +706,7 @@ mod tests {
         while view.is_loading() {
             assert!(std::time::Instant::now() < until, "never loaded");
             view.poll_loading(&egui::Context::default());
+            std::thread::sleep(Duration::from_millis(10));
         }
         assert!(view.screen.is_some(), "{:?}", view.error);
         assert!(view.shows(&found[0]));

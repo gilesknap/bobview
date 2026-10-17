@@ -99,7 +99,9 @@ impl Macros {
     }
 
     /// These macros with `inner` layered on top. Values in `inner` are first
-    /// expanded against `self`, so `<P>$(P):SUB</P>` works.
+    /// expanded against `self`, so `<P>$(P):SUB</P>` works. Only `inner`'s
+    /// own definitions are used, not the layers under it: for a whole chain,
+    /// such as a link's, use [`Macros::over`].
     pub fn with(&self, inner: &Macros) -> Macros {
         self.with_budget(inner, &AtomicUsize::new(MAX_LAYER_BYTES))
     }
