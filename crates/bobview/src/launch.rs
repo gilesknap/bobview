@@ -75,8 +75,10 @@ fn target(
         return None;
     }
     let real = bob::project::locate(&script);
-    if others_may_write(&real) {
-        log::warn!("not running '{command}': other users may change it");
+    if refused(&real) {
+        log::warn!(
+            "not running '{command}': everyone may change it (see --allow-writable-launchers)"
+        );
         return None;
     }
     let text = std::fs::read(&real).ok()?;
@@ -105,13 +107,36 @@ fn allowed(display_dir: &Path, path: &Path) -> bool {
     roots(display_dir).iter().any(|root| real.starts_with(root))
 }
 
-/// Whether users other than the owner may write to `file` or the folder
-/// holding it, and so could have planted a launcher there.
-fn others_may_write(file: &Path) -> bool {
+/// Whether launchers that anyone can change may be run (`--allow-writable-launchers`).
+/// Set once at start-up from the command line only: never saved, and no UI.
+static ALLOW_WRITABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Run launchers even if anyone can change them (for testing).
+pub fn allow_writable_launchers(allow: bool) {
+    ALLOW_WRITABLE.store(allow, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether `file` is to be refused: unless allowed by
+/// [`allow_writable_launchers`], when it or a folder above it is
+/// world-writable.
+fn refused(file: &Path) -> bool {
+    !ALLOW_WRITABLE.load(std::sync::atomic::Ordering::Relaxed) && everyone_may_write(file)
+}
+
+/// Whether every user may write `file`, or may replace it by writing a
+/// folder above it. A sticky folder (as `/tmp`) only lets people change
+/// their own files, so its write bit does not count.
+fn everyone_may_write(file: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
-    let writable = |p: &Path| std::fs::metadata(p).map_or(true, |m| m.mode() & 0o002 != 0);
-    let dir = file.parent().filter(|d| !d.as_os_str().is_empty());
-    writable(file) || writable(dir.unwrap_or(Path::new(".")))
+    let unsafe_entry = |p: &Path, is_file: bool| {
+        std::fs::metadata(p).map_or(true, |m| {
+            m.mode() & 0o002 != 0 && (is_file || m.mode() & 0o1000 == 0)
+        })
+    };
+    let Ok(real) = std::fs::canonicalize(file) else {
+        return true;
+    };
+    unsafe_entry(&real, true) || real.ancestors().skip(1).any(|d| unsafe_entry(d, false))
 }
 
 /// The real directories a display in `display_dir` may run scripts from:
@@ -342,6 +367,11 @@ fn run_in(
             None => std::thread::sleep(Duration::from_millis(5)),
         }
     }
+    // Whatever it left running in the background goes too. The group is
+    // named by the child's pid, which stays the group id while any member
+    // lives; with none left the call just fails.
+    // SAFETY: kill(2) with a group id and a signal.
+    unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
     let Ok(out) = std::fs::read(dir.join("args")) else {
         return Ok(None);
     };
@@ -497,6 +527,42 @@ exec "${SRC}/runcss.sh" $OPI -m $MACROS "$@"
         assert!(!marker.exists());
         mode(&dir, 0o755).unwrap();
         assert!(command_target(Some(&display), None, "./launch").is_some());
+        // Group-writable is fine: shared installs are.
+        mode(&dir.join("launch"), 0o770).unwrap();
+        mode(&dir, 0o775).unwrap();
+        assert!(command_target(Some(&display), None, "./launch").is_some());
+        mode(&dir.join("launch"), 0o700).unwrap();
+        mode(&dir, 0o755).unwrap();
+        // And a folder further up that others can write to.
+        let inner = dir.join("inner");
+        std::fs::create_dir(&inner).unwrap();
+        marking_launcher(&inner, &marker);
+        let display = Source::File(inner.join("x.opi"));
+        assert!(command_target(Some(&display), None, "./launch").is_some());
+        mode(&dir, 0o757).unwrap();
+        assert!(command_target(Some(&display), None, "./launch").is_none());
+        // Unless the flag allows it.
+        assert!(everyone_may_write(&inner.join("launch")));
+        allow_writable_launchers(true);
+        assert!(!refused(&inner.join("launch")));
+        allow_writable_launchers(false);
+        assert!(refused(&inner.join("launch")));
+        mode(&dir, 0o755).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn stops_what_a_finished_launcher_left_running() {
+        let dir = tmp("leftover");
+        let marker = dir.join("late");
+        let script = format!(
+            "#!/bin/sh\n(sleep 1; touch '{}') &\nruncss.sh x.opi\n",
+            marker.display()
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        assert!(run(script.as_bytes(), &[], deadline).is_some());
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(!marker.exists(), "the script's background job outlived it");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

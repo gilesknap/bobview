@@ -34,6 +34,9 @@ mod launch {
     pub fn defaults(_file: &Path) -> Option<Macros> {
         None
     }
+
+    /// No launchers run here, so there is nothing to allow.
+    pub fn allow_writable_launchers(_allow: bool) {}
 }
 mod layout;
 mod meter;
@@ -114,6 +117,11 @@ struct Cli {
     /// nothing
     #[arg(long)]
     read_only: bool,
+    /// Run launcher scripts even if every user may change them (a world-
+    /// writable script or folder), which is refused by default; for testing,
+    /// only for this run
+    #[arg(long)]
+    allow_writable_launchers: bool,
     /// Restore the saved window layout NAME
     #[arg(long, value_name = "NAME")]
     layout: Option<String>,
@@ -287,6 +295,7 @@ fn run(cli: Cli, clicks: Vec<(egui::Pos2, egui::PointerButton)>) -> Result<(), F
              window open in another window, shift+click in a new one"
         );
     }
+    launch::allow_writable_launchers(cli.allow_writable_launchers);
     let mut file = cli.display.as_deref().map(fetch::user_named);
     let mut macros = parse_macros(cli.macros.as_deref().unwrap_or_default());
     let ui_scale = cli.ui_scale.unwrap_or_else(chrome::UiScale::from_env);

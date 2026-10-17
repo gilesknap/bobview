@@ -20,18 +20,42 @@ case $(uname -s) in
 esac
 name=bobview-${arch}-${os}
 prefix=${PREFIX:-$HOME/.local}
-here=$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" && pwd)
+# Local mode only when this is a real file (an unpacked release tarball). Under
+# `curl | bash` there is no script file, and $PWD must never be trusted: it
+# could be a shared directory where someone planted bin/bobview.
+here=
+if [[ -n ${BASH_SOURCE[0]:-} && -f ${BASH_SOURCE[0]} ]]; then
+    here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+fi
 
-if [[ -x "${here}/bin/bobview" ]]; then
+sha256() {
+    if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi
+}
+
+if [[ -n ${here} && -x "${here}/bin/bobview" ]]; then
     src=${here}
 else
     tmp=$(mktemp -d)
     trap 'rm -rf "${tmp}"' EXIT
     if command -v gh >/dev/null; then
-        gh release download --repo "${repo}" -p "${name}.tar.gz" -D "${tmp}"
+        gh release download --repo "${repo}" -p "${name}.tar.gz" -p SHA256SUMS -D "${tmp}"
     else
         curl -sSfL -o "${tmp}/${name}.tar.gz" \
             "https://github.com/${repo}/releases/latest/download/${name}.tar.gz"
+        # a release without checksums is refused below, with a message
+        curl -sSfL -o "${tmp}/SHA256SUMS" \
+            "https://github.com/${repo}/releases/latest/download/SHA256SUMS" || true
+    fi
+    # the release publishes SHA256SUMS; refuse a tarball that does not match
+    if [[ ! -f ${tmp}/SHA256SUMS ]]; then
+        echo "bobview: this release has no SHA256SUMS, refusing to install an unverified download" >&2
+        exit 1
+    fi
+    want=$(awk -v f="${name}.tar.gz" '$2 == f || $2 == "*" f { print $1 }' "${tmp}/SHA256SUMS")
+    got=$(sha256 "${tmp}/${name}.tar.gz" | awk '{ print $1 }')
+    if [[ -z ${want} || ${want} != "${got}" ]]; then
+        echo "bobview: checksum mismatch for ${name}.tar.gz, not installing" >&2
+        exit 1
     fi
     tar --no-same-owner -C "${tmp}" -xzf "${tmp}/${name}.tar.gz"
     src=${tmp}/${name}
