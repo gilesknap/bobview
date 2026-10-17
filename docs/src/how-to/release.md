@@ -10,10 +10,11 @@ git push origin v1.2.3
 ```
 
 CI checks that the tag matches the version in `Cargo.toml` and fails the
-build if not. It creates the GitHub Release itself and builds on native
-runners for each platform (`ubuntu-24.04`, `ubuntu-24.04-arm` and macOS),
-attaching a `bobview-<arch>-<os>.tar.gz` for each, such as
-`bobview-x86_64-linux.tar.gz` and `bobview-aarch64-linux.tar.gz`.
+build if not. It creates the GitHub Release itself and builds on a runner
+for each platform (`ubuntu-24.04`, `ubuntu-24.04-arm` and `macos-15`, which
+also cross-builds the x86_64 Mac build), attaching a
+`bobview-<arch>-<os>.tar.gz` for each, such as `bobview-x86_64-linux.tar.gz`
+and `bobview-aarch64-macos.tar.gz`.
 
 The Linux builds use `cargo zigbuild` to link against glibc 2.28, so they
 run on RHEL 8+, Ubuntu 20.04+ and Debian 10+. Each tarball carries
@@ -26,10 +27,10 @@ docs' top bar then lists beside `main`.
 
 ## Publish to crates.io
 
-The workspace publishes five crates: `bobview`, `bobview-server`, and the
-libraries they use, `bobview-bob`, `bobview-pv` and `bobview-testioc` (the
-names `bob` and `pv` were taken; the code still calls them `bob`, `pv` and
-`testioc`). Check them first with
+The workspace publishes five crates: `bobview`, `bobview-server`, the
+libraries they use, `bobview-bob` and `bobview-pv`, and `bobview-testioc`,
+which `pv`'s tests use (the names `bob` and `pv` were taken; the code still
+calls them `bob`, `pv` and `testioc`). Check them first with
 
 ```bash
 cargo publish --workspace --dry-run

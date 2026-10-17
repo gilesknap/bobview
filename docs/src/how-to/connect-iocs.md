@@ -27,7 +27,9 @@ The example-services `ca-gateway` listens on port 9064 of its host.
 
 ## Choose the protocol
 
-PV names prefixed `pva://` use PV Access; all others use Channel Access.
+PV names prefixed `pva://` use PV Access; those with no prefix, or `ca://`,
+use Channel Access. The other prefixes are in
+[Macros, rules and PV types](../reference/macros-rules-pvs.md#pv-types).
 
 ## Check a PV without the viewer
 
