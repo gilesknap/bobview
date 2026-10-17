@@ -57,6 +57,9 @@ pub struct ViewCx<'a> {
 /// How long a PV write notice stays in the status line.
 const NOTICE_SECONDS: f64 = 8.0;
 
+/// How long the status line says what a copy put on the clipboard.
+const COPIED_SECONDS: f64 = 3.0;
+
 /// A display shown in a window, with its history and zoom.
 pub struct View {
     pvs: PvManager,
@@ -80,6 +83,8 @@ pub struct View {
     /// The latest write notice seen (see [`PvManager::notice`]) and the
     /// time, in egui seconds, it was first shown, to hide it after a while.
     notice_seen: (u64, f64),
+    /// The PV names last copied from this window, and when (egui seconds).
+    pub(crate) copied: Option<(String, f64)>,
     /// Command actions still being worked out, so a double click runs one.
     pub launching: Vec<LaunchKey>,
     /// Bumped on every `show`, so a launch started on another display is dropped.
@@ -126,6 +131,7 @@ impl View {
             loading: None,
             launching: Vec::new(),
             notice_seen: (0, 0.0),
+            copied: None,
             shown: 0,
             window_title: String::new(),
         }
@@ -449,11 +455,34 @@ impl View {
         Some(text)
     }
 
+    /// Say on the status line, for [`COPIED_SECONDS`] from `now`, that
+    /// `text` was copied.
+    pub fn copied(&mut self, text: String, now: f64) {
+        self.copied = Some((text, now));
+    }
+
+    /// What was copied, while that is recent.
+    fn copied_text(&mut self, ui: &egui::Ui) -> Option<String> {
+        let (text, at) = self.copied.as_ref()?;
+        let left = COPIED_SECONDS - (ui.input(|i| i.time) - at);
+        if left <= 0.0 {
+            self.copied = None;
+            return None;
+        }
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs_f64(left));
+        Some(format!("Copied {text}"))
+    }
+
     fn status(&mut self, ui: &mut egui::Ui) {
         let notice = self.notice(ui);
+        let copied = self.copied_text(ui);
         ui.horizontal(|ui| {
             if let Some(text) = notice {
                 ui.colored_label(Color32::from_rgb(0xb0, 0x30, 0x00), text);
+            }
+            if let Some(text) = copied {
+                ui.colored_label(Color32::from_rgb(0x00, 0x60, 0x20), text);
             }
             if let Some(e) = &self.error {
                 ui.colored_label(Color32::RED, e);

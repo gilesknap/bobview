@@ -15,6 +15,7 @@ use crate::chrome::{self, Chrome, UiScale};
 use crate::icons::{self, Icon};
 use crate::layout::{self, Geometry, Layout, TrendLayout, WindowLayout, Zoom};
 use crate::pvmenu;
+use crate::selection;
 use crate::style;
 use crate::tree::{self, Navigator};
 use crate::trend::Trend;
@@ -108,6 +109,8 @@ pub struct BobApp {
         std::sync::mpsc::Receiver<Launched>,
     ),
     chrome: Chrome,
+    /// Where a copied PV name also goes, for a middle-click to paste.
+    primary: Box<dyn selection::Primary>,
 }
 
 /// Repaints one window when a PV it shows changes, at most ~10 times a
@@ -433,6 +436,7 @@ impl BobApp {
             next_trend: 0,
             launched: std::sync::mpsc::channel(),
             chrome: Chrome::new(ui_scale),
+            primary: selection::system(),
         };
         if let Some(loc) = start {
             app.main.show(loc);
@@ -1828,6 +1832,18 @@ impl BobApp {
                 macros,
                 target,
             } => self.follow(ctx, origin, Location { source, macros }, &target),
+            Request::Copy(text) => {
+                log::info!("copy {text}");
+                ctx.copy_text(text.clone());
+                if let Err(e) = self.primary.set(&text) {
+                    log::debug!("no primary selection: {e}");
+                }
+                let now = ctx.input(|i| i.time);
+                if let Some(view) = self.view_mut(window) {
+                    view.copied(text, now);
+                }
+                ctx.request_repaint();
+            }
             Request::Details(details) => {
                 self.details = Some((window, details));
                 ctx.request_repaint();
@@ -3047,6 +3063,84 @@ mod tests {
             // Displays load, and the navigator reads them, on threads.
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    /// Records what a copy puts on the primary selection.
+    struct FakePrimary(std::sync::Arc<parking_lot::Mutex<Vec<String>>>);
+
+    impl crate::selection::Primary for FakePrimary {
+        fn set(&mut self, text: &str) -> Result<(), String> {
+            self.0.lock().push(text.to_string());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_middle_click_copies_the_pv_name_to_both_selections() {
+        use super::{BobApp, Location};
+        use crate::chrome::UiScale;
+        use eframe::egui::{self, Event, Modifiers, OutputCommand, PointerButton, Pos2};
+        let dir = std::env::temp_dir().join(format!("bobview-copy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("copy.bob");
+        // One big widget, so a click in the middle of the window hits it.
+        std::fs::write(
+            &file,
+            "<display><macros><P>copy_t</P></macros><widget type=\"textupdate\">\
+             <width>600</width><height>300</height>\
+             <pv_name>loc://$(P)&lt;VDouble&gt;(1)</pv_name></widget></display>",
+        )
+        .unwrap();
+        let display = Location {
+            source: bob::Source::File(file),
+            macros: bob::Macros::default(),
+        };
+        let ctx = egui::Context::default();
+        let mut app = BobApp::new(&ctx, Some(display), Some(1.0), UiScale::Fixed(1.0));
+        let primary = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        app.primary = Box::new(FakePrimary(primary.clone()));
+        let mut size = crate::chrome::DEFAULT_WINDOW;
+        run(&ctx, &mut app, &mut size, 5);
+
+        let pos = Pos2::new(300.0, 200.0);
+        let mut copied = Vec::new();
+        for button in [PointerButton::Primary, PointerButton::Middle] {
+            let press = |pressed| Event::PointerButton {
+                pos,
+                button,
+                pressed,
+                modifiers: Modifiers::NONE,
+            };
+            for events in [
+                vec![Event::PointerMoved(pos)],
+                vec![press(true)],
+                vec![press(false)],
+            ] {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, size)),
+                    events,
+                    ..Default::default()
+                };
+                let out = ctx.run_ui(input, |ui| app.draw(ui));
+                copied.extend(
+                    out.platform_output
+                        .commands
+                        .into_iter()
+                        .filter_map(|c| match c {
+                            OutputCommand::CopyText(t) => Some(t),
+                            _ => None,
+                        }),
+                );
+            }
+            // A plain click copies nothing.
+            if button == PointerButton::Primary {
+                assert!(copied.is_empty() && primary.lock().is_empty());
+            }
+        }
+        assert_eq!(copied, ["copy_t"]);
+        assert_eq!(*primary.lock(), ["copy_t"]);
+        assert!(app.main.copied.is_some());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

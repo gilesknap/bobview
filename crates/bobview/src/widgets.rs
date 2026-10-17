@@ -23,6 +23,9 @@ pub enum Request {
     Webpage(String),
     /// Show the details of a widget's PV, from its context menu.
     Details(crate::pvmenu::Details),
+    /// Copy PV names to the clipboard and the primary selection, from a
+    /// middle-click or the context menu, and say so on the status line.
+    Copy(String),
     /// Open a trend window of these PVs.
     Trend(Vec<String>),
     /// Add these PVs to the open trend window with this id.
@@ -300,10 +303,11 @@ fn draw_node(ui: &mut Ui, node: &mut Node, cx: &mut Cx, id: Id) {
 
     // Hover shows the tooltip: the widget's own, or the PV name and value.
     // Right-click (long-press on a touch screen) opens a menu to copy them or
-    // show the PV's details.
+    // show the PV's details, and a middle-click copies the PV name.
     if !cx.clip.contains_rect(rect) {
         return;
     }
+    flash_copied(ui, &painter, rect, id);
     if !node.pv_name.is_empty() {
         let resp = response.unwrap_or_else(|| ui.interact(rect, id.with("hover"), Sense::click()));
         let resp = if disabled {
@@ -316,18 +320,72 @@ fn draw_node(ui: &mut Ui, node: &mut Node, cx: &mut Cx, id: Id) {
         egui::Popup::context_menu(&resp)
             .id(id.with("context-menu"))
             .show(|ui| crate::pvmenu::menu(ui, node, state.as_ref(), cx.trends, cx.requests));
+        middle_click_copy(ui, &resp, node, cx, id);
         let text = tooltip(node, state.as_ref());
         if !text.is_empty() {
             resp.on_hover_text(text);
         }
-    } else if node.w.get("tooltip").is_some() && !is_container(&node.w.kind) {
-        let text = tooltip(node, None);
+    } else {
+        // A plot has no PV of its own, but a middle-click copies its traces'.
+        let text = match node.w.get("tooltip") {
+            Some(_) if !is_container(&node.w.kind) => tooltip(node, None),
+            _ => String::new(),
+        };
+        let traces = !node.traces.is_empty();
+        if text.is_empty() && !traces {
+            return;
+        }
+        let sense = if traces {
+            Sense::click()
+        } else {
+            Sense::hover()
+        };
+        let resp = response.unwrap_or_else(|| ui.interact(rect, id.with("hover"), sense));
+        middle_click_copy(ui, &resp, node, cx, id);
         if !text.is_empty() {
-            let resp =
-                response.unwrap_or_else(|| ui.interact(rect, id.with("hover"), Sense::hover()));
             resp.on_hover_text(text);
         }
     }
+}
+
+/// How long a widget is highlighted after a middle-click copies its PV.
+const FLASH_SECONDS: f64 = 0.4;
+
+/// Copy the widget's PV name (see [`crate::pvmenu::copy_text`]) when it is
+/// middle-clicked, and note the time, to highlight it for a moment.
+fn middle_click_copy(ui: &Ui, resp: &Response, node: &Node, cx: &mut Cx, id: Id) {
+    if !resp.middle_clicked() {
+        return;
+    }
+    if let Some(text) = crate::pvmenu::copy_text(node) {
+        let now = ui.input(|i| i.time);
+        ui.ctx().data_mut(|d| d.insert_temp(id.with("copied"), now));
+        cx.requests.push(Request::Copy(text));
+    }
+}
+
+/// Highlight a widget whose PV a middle-click has just copied, fading out
+/// over [`FLASH_SECONDS`].
+fn flash_copied(ui: &Ui, painter: &egui::Painter, rect: Rect, id: Id) {
+    let key = id.with("copied");
+    let Some(at) = ui.ctx().data(|d| d.get_temp::<f64>(key)) else {
+        return;
+    };
+    let left = FLASH_SECONDS - (ui.input(|i| i.time) - at);
+    if left <= 0.0 {
+        ui.ctx().data_mut(|d| d.remove::<f64>(key));
+        return;
+    }
+    let fade = (left / FLASH_SECONDS) as f32;
+    let c = ui.visuals().selection.bg_fill;
+    painter.rect_filled(rect, CornerRadius::ZERO, c.gamma_multiply(0.5 * fade));
+    painter.rect_stroke(
+        rect,
+        CornerRadius::ZERO,
+        Stroke::new(2.0, c.gamma_multiply(fade)),
+        StrokeKind::Inside,
+    );
+    ui.ctx().request_repaint();
 }
 
 /// The widget's `border_width` and `border_color`, drawn around it.

@@ -30,7 +30,36 @@ instead of fitting the window.
 - **Right-click** (long-press on a touch screen) to copy the PV name, its
   value or a `caget`/`pvget` command, open the PV details, **Trend** it,
   **Trend with rule PVs**, or add it to an open trend.
+- **Middle-click** to copy its PV name, as in EDM and MEDM: a middle-click
+  in a terminal then pastes it, and one in
+  [archiveview](https://github.com/gilesknap/archiveview) plots it. The
+  widget flashes and the status line says "Copied *name*". See
+  [Copying a PV name](#copying-a-pv-name).
 - On a touch screen, pinch to zoom.
+
+## Copying a PV name
+
+A middle-click on a widget, or **Copy PV name** in its right-click menu,
+puts the PV name on both the clipboard (for Ctrl+V) and the primary
+selection (for a middle-click, on Linux). The name is the one other tools
+take:
+
+- macros expanded, and a Channel Access name bare (`BL01T-EA-DET-01:COUNT`,
+  not `ca://BL01T-EA-DET-01:COUNT`);
+- a PV Access name keeps its `pva://`;
+- a `loc://` or `sim://` PV loses its prefix, type and initial value
+  (`x`, not `loc://x<VDouble>(1.5)`); a formula is copied whole.
+
+A widget copies its own PV only, not the PVs its rules read. An XY plot or
+strip chart, which has no PV of its own, copies its traces' PVs, separated
+by spaces.
+
+On X11 bobview holds the primary selection itself, so it is lost when
+bobview exits, as with any X application; this works over `ssh -X` too. On
+Wayland bobview uses the compositor's data-control protocol where it has
+one, and XWayland's primary selection otherwise. Windows, macOS and the
+browser have no primary selection, so there the name goes to the clipboard
+only (in the browser, if it allows the page to write to the clipboard).
 
 ## Display windows
 
@@ -83,5 +112,6 @@ displays the home display links to, the displays those link to, and so on.
 
 ## Status line
 
-Shows write errors and refusals, and counts "N widgets with scripts ignored"
-and "N unsupported widgets" for a display that has them.
+Shows write errors and refusals, what a copy has just put on the clipboard,
+and counts "N widgets with scripts ignored" and "N unsupported widgets" for
+a display that has them.

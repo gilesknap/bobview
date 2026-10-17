@@ -42,6 +42,7 @@ mod polygon;
 mod pvmenu;
 mod rules;
 mod screen;
+mod selection;
 #[cfg(not(target_arch = "wasm32"))]
 mod snapshot;
 mod style;
