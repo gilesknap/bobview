@@ -1,0 +1,1678 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>bobview</title>
+        <meta name="robots" content="noindex">
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="A lean viewer for Phoebus Display Builder .bob screens">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="highlight.css">
+        <link rel="stylesheet" href="tomorrow-night.css">
+        <link rel="stylesheet" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="theme/grid.css">
+        <link rel="stylesheet" href="theme/sidebar.css">
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('light')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item expanded affix "><a href="index.html">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">Tutorials</li><li class="chapter-item expanded "><a href="tutorials/quickstart.html"><strong aria-hidden="true">1.</strong> Quick start</a></li><li class="chapter-item expanded "><a href="tutorials/browser.html"><strong aria-hidden="true">2.</strong> Serve displays to a browser</a></li><li class="chapter-item expanded "><a href="tutorials/crates-io.html"><strong aria-hidden="true">3.</strong> Install from crates.io</a></li><li class="chapter-item expanded affix "><li class="part-title">How-to guides</li><li class="chapter-item expanded "><a href="how-to/install.html"><strong aria-hidden="true">4.</strong> Install bobview</a></li><li class="chapter-item expanded "><a href="how-to/connect-iocs.html"><strong aria-hidden="true">5.</strong> Connect to real IOCs</a></li><li class="chapter-item expanded "><a href="how-to/http-displays.html"><strong aria-hidden="true">6.</strong> Open displays over http(s)</a></li><li class="chapter-item expanded "><a href="how-to/software-rendering.html"><strong aria-hidden="true">7.</strong> Choose bobview or bobview-ssh</a></li><li class="chapter-item expanded "><a href="how-to/opi-projects.html"><strong aria-hidden="true">8.</strong> Open BOY screens from an Eclipse project or DLS module</a></li><li class="chapter-item expanded "><a href="how-to/layouts.html"><strong aria-hidden="true">9.</strong> Save and restore a layout</a></li><li class="chapter-item expanded "><a href="how-to/trends.html"><strong aria-hidden="true">10.</strong> Trend PVs</a></li><li class="chapter-item expanded "><a href="how-to/deploy-server.html"><strong aria-hidden="true">11.</strong> Deploy bobview-server for others</a></li><li class="chapter-item expanded "><a href="how-to/snapshots.html"><strong aria-hidden="true">12.</strong> Take snapshots</a></li><li class="chapter-item expanded "><a href="how-to/build.html"><strong aria-hidden="true">13.</strong> Build from source</a></li><li class="chapter-item expanded "><a href="how-to/release.html"><strong aria-hidden="true">14.</strong> Make a release</a></li><li class="chapter-item expanded affix "><li class="part-title">Explanations</li><li class="chapter-item expanded "><a href="explanations/scope.html"><strong aria-hidden="true">15.</strong> Scope and fidelity to Phoebus</a></li><li class="chapter-item expanded "><a href="explanations/architecture.html"><strong aria-hidden="true">16.</strong> Architecture</a></li><li class="chapter-item expanded "><a href="explanations/repaints.html"><strong aria-hidden="true">17.</strong> Threads, windows and repaints</a></li><li class="chapter-item expanded "><a href="explanations/windows.html"><strong aria-hidden="true">18.</strong> Pinned windows and the viewer</a></li><li class="chapter-item expanded "><a href="explanations/boy.html"><strong aria-hidden="true">19.</strong> How BOY screens are translated</a></li><li class="chapter-item expanded "><a href="explanations/writes.html"><strong aria-hidden="true">20.</strong> Writes and safety</a></li><li class="chapter-item expanded affix "><li class="part-title">Reference</li><li class="chapter-item expanded "><a href="reference/cli.html"><strong aria-hidden="true">21.</strong> Command line</a></li><li class="chapter-item expanded "><a href="reference/environment.html"><strong aria-hidden="true">22.</strong> Environment variables</a></li><li class="chapter-item expanded "><a href="reference/widgets.html"><strong aria-hidden="true">23.</strong> Widgets</a></li><li class="chapter-item expanded "><a href="reference/boy-widgets.html"><strong aria-hidden="true">24.</strong> BOY widgets</a></li><li class="chapter-item expanded "><a href="reference/macros-rules-pvs.html"><strong aria-hidden="true">25.</strong> Macros, rules and PV types</a></li><li class="chapter-item expanded "><a href="reference/controls.html"><strong aria-hidden="true">26.</strong> The window and its controls</a></li><li class="chapter-item expanded "><a href="reference/browser.html"><strong aria-hidden="true">27.</strong> Browser page parameters</a></li><li class="chapter-item expanded "><a href="reference/testioc.html"><strong aria-hidden="true">28.</strong> bobview-testioc</a></li><li class="chapter-item expanded "><a href="reference/api.html"><strong aria-hidden="true">29.</strong> Rust API</a></li><li class="chapter-item expanded "><a href="reference/licences.html"><strong aria-hidden="true">30.</strong> Licences</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">bobview</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/gilesknap/bobview" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="bobview"><a class="header" href="#bobview">bobview</a></h1>
+<p>A lean viewer for <a href="https://control-system-studio.readthedocs.io/en/latest/app/display/editor/doc/index.html">Phoebus Display Builder</a>
+<code>.bob</code> screens, written in Rust with <a href="https://github.com/emilk/egui">egui</a>.
+It also opens the older CS-Studio BOY <code>.opi</code> screens.
+It shows live EPICS Channel Access and PV Access values, including areaDetector
+images, and is small enough to run on a phone, in the Android 16 Linux
+Terminal (Debian 13, aarch64). The same app runs in a browser, served by
+<code>bobview-server</code>.</p>
+<p>Scripts (Jython/JavaScript), display editing, alarm and archiver services are
+out of scope; see <a href="explanations/scope.html">Scope and fidelity to Phoebus</a>.</p>
+<div class="compass">
+  <div class="axis axis-top-left">Learning: acquiring skills</div>
+  <div class="axis axis-top-right">Working: applying skills</div>
+  <div class="axis axis-left-top">Practical: doing</div>
+  <div class="axis axis-left-bottom">Theoretical: knowing</div>
+  <a class="grid-card tutorials" href="tutorials/quickstart.html">
+    <span class="card-title">📚 Tutorials</span>
+    <span class="orientation">learning-oriented</span>
+    <p>New to bobview? Install it, start the simulated beamline and open
+    your first live display.</p>
+  </a>
+  <a class="grid-card how-to" href="how-to/install.html">
+    <span class="card-title">🧭 How-to guides</span>
+    <span class="orientation">goal-oriented</span>
+    <p>Practical steps: connect to real IOCs, run over ssh, open BOY
+    screens, save layouts, deploy the web server.</p>
+  </a>
+  <a class="grid-card explanations" href="explanations/scope.html">
+    <span class="card-title">💡 Explanations</span>
+    <span class="orientation">understanding-oriented</span>
+    <p>Background and design: what bobview aims to do, how it is built,
+    how its windows and writes behave.</p>
+  </a>
+  <a class="grid-card reference" href="reference/cli.html">
+    <span class="card-title">📖 Reference</span>
+    <span class="orientation">information-oriented</span>
+    <p>Command-line options, supported widgets, macros and rules, browser
+    parameters and the Rust API.</p>
+  </a>
+</div>
+<p>The <a href="reference/api.html">Rust API docs</a> for the workspace's crates are
+published alongside this book.</p>
+<p>The docs follow the <a href="https://diataxis.fr">Diátaxis</a> framework: four kinds of
+page for four needs, learning, doing, understanding and looking things up.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="quick-start"><a class="header" href="#quick-start">Quick start</a></h1>
+<p>This tutorial installs bobview, starts a simulated beamline on your own
+machine and walks you around its displays. It takes about ten minutes and
+needs no EPICS installation and no IOCs: <code>bobview-testioc</code> plays the part of
+the <a href="https://github.com/epics-containers/example-services">epics-containers example-services</a>
+BL01T beamline.</p>
+<p>You need an x86_64 or aarch64 Linux machine (an Android phone's Linux
+Terminal works), or a Mac. To build it with Cargo instead, see
+<a href="tutorials/crates-io.html">Install from crates.io</a>.</p>
+<h2 id="1-install"><a class="header" href="#1-install">1. Install</a></h2>
+<p>On Debian or Ubuntu, first install the graphics libraries:</p>
+<pre><code class="language-bash">sudo apt install libxkbcommon0 libwayland-client0 libegl1 libgl1-mesa-dri
+</code></pre>
+<p>(on RHEL and Fedora see <a href="tutorials/../how-to/install.html">Install bobview</a>; macOS needs
+nothing). Then install bobview into <code>~/.local</code>:</p>
+<pre><code class="language-bash">curl -sSfL https://raw.githubusercontent.com/gilesknap/bobview/main/install.sh | bash
+</code></pre>
+<p>Check that it is on your <code>PATH</code>:</p>
+<pre><code class="language-bash">bobview --version
+</code></pre>
+<p>If the command is not found, add <code>export PATH=$HOME/.local/bin:$PATH</code> to your
+shell's start-up file and open a new terminal.</p>
+<h2 id="2-start-the-simulated-beamline"><a class="header" href="#2-start-the-simulated-beamline">2. Start the simulated beamline</a></h2>
+<pre><code class="language-bash">bobview-testioc &amp;
+</code></pre>
+<p>This serves, over Channel Access and PV Access, a calculator IOC
+(<code>bl01t:A</code>, <code>bl01t:B</code>, <code>bl01t:SUM</code>), two motors and a simulated area
+detector that streams an image.</p>
+<h2 id="3-open-the-displays"><a class="header" href="#3-open-the-displays">3. Open the displays</a></h2>
+<p>Tell the Channel Access client to look for PVs on this machine, and start
+the viewer:</p>
+<pre><code class="language-bash">EPICS_CA_ADDR_LIST=127.0.0.1 bobview
+</code></pre>
+<p>With no display named, bobview opens <code>index.bob</code> from the test screens it
+installed. You should see live values within a second or two.</p>
+<h2 id="4-look-around"><a class="header" href="#4-look-around">4. Look around</a></h2>
+<ul>
+<li><strong>Hover</strong> over a widget: a tooltip shows its PV and value.</li>
+<li><strong>Right-click</strong> a widget (long-press on a touch screen): copy the PV name
+or value, open the PV's details, or <strong>Trend</strong> it. A trend window plots the
+PV against time; leave it open.</li>
+<li><strong>Click a button</strong> that opens another display. Use <strong>Back</strong> and
+<strong>Forward</strong> in the toolbar to move between them, and <strong>Home</strong> to return
+to <code>index.bob</code>.</li>
+<li>Click the <strong>zoom</strong> in the toolbar to see the display at 100%, then <strong>Fit</strong>
+to fit it to the window again. On a touch screen, pinch to zoom.</li>
+<li>Open the <strong>navigator</strong> from the toolbar to see a tree of every display
+reachable from the home display.</li>
+</ul>
+<h2 id="5-look-at-the-camera"><a class="header" href="#5-look-at-the-camera">5. Look at the camera</a></h2>
+<p>From the home display, open the camera display. The image comes over PV
+Access from <code>BL01T-DI-CAM-01:PVA:OUTPUT</code>: drifting fringes with three spots
+moving across them. Use the image toolbar to zoom, pan and place a crosshair
+that reads out the pixel under it.</p>
+<h2 id="6-change-a-value"><a class="header" href="#6-change-a-value">6. Change a value</a></h2>
+<p>From the home display, open the <code>ea-test</code> display. Type a new number into
+the text entry for <code>bl01t:A</code> and press Enter, or drag its slider.
+<code>bl01t:SUM</code> follows, as the calculator record adds <code>A</code> and <code>B</code>.</p>
+<h2 id="7-finish"><a class="header" href="#7-finish">7. Finish</a></h2>
+<p>Close the window to quit bobview, then stop the IOC:</p>
+<pre><code class="language-bash">kill %1
+</code></pre>
+<h2 id="next-steps"><a class="header" href="#next-steps">Next steps</a></h2>
+<ul>
+<li>Point bobview at your own IOCs: <a href="tutorials/../how-to/connect-iocs.html">Connect to real IOCs</a>.</li>
+<li>Open your own screens: <code>bobview path/to/screen.bob -m P=BL01T,R=:DET:</code>.</li>
+<li>Show the same displays in a web browser: <a href="tutorials/browser.html">Serve displays to a browser</a>.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="serve-displays-to-a-browser"><a class="header" href="#serve-displays-to-a-browser">Serve displays to a browser</a></h1>
+<p>bobview also builds for the browser (WebAssembly, drawn with WebGL).
+<code>bobview-server</code> serves the web build, your <code>.bob</code> files and a
+<a href="https://github.com/ornl-epics/pvws">PV Web Socket</a> (PVWS) from one port. In
+this tutorial you serve the simulated beamline to a browser on your own
+machine.</p>
+<p>Do the <a href="tutorials/quickstart.html">Quick start</a> first, so that bobview and
+<code>bobview-testioc</code> are installed.</p>
+<h2 id="1-start-the-ioc-and-the-server"><a class="header" href="#1-start-the-ioc-and-the-server">1. Start the IOC and the server</a></h2>
+<pre><code class="language-bash">bobview-testioc &amp;
+EPICS_CA_ADDR_LIST=127.0.0.1 bobview-server --opi ~/.local/share/bobview/displays &amp;
+</code></pre>
+<p>The server reaches PVs with bobview's own Channel Access and PV Access
+client, so it needs the same <code>EPICS_*</code> variables as the viewer. It listens
+on <code>127.0.0.1:8080</code>, so only this machine can reach it.</p>
+<h2 id="2-open-the-page"><a class="header" href="#2-open-the-page">2. Open the page</a></h2>
+<p>Browse to
+<a href="http://localhost:8080/?display=index.bob">http://localhost:8080/?display=index.bob</a>.</p>
+<p>The same displays appear as in the desktop viewer, drawn in the page. Click
+through them as before. In a browser displays have no windows of their own:
+every link navigates in place.</p>
+<h2 id="3-try-page-parameters"><a class="header" href="#3-try-page-parameters">3. Try page parameters</a></h2>
+<p>Add macros and a fixed zoom to the address:</p>
+<pre><code class="language-text">http://localhost:8080/?display=demo.bob&amp;macros=P=BL01T&amp;zoom=1.5
+</code></pre>
+<p>All the parameters are listed in <a href="tutorials/../reference/browser.html">Browser page parameters</a>.</p>
+<h2 id="4-allow-writes"><a class="header" href="#4-allow-writes">4. Allow writes</a></h2>
+<p>Writes are off unless the server allows them, since they go out as the
+server's user. Stop the server and start it again with <code>--write</code>:</p>
+<pre><code class="language-bash">kill %2
+EPICS_CA_ADDR_LIST=127.0.0.1 bobview-server --opi ~/.local/share/bobview/displays --write
+</code></pre>
+<p>It prints a random write token to the terminal. Open the page with it:</p>
+<pre><code class="language-text">http://localhost:8080/?display=index.bob&amp;token=TOKEN
+</code></pre>
+<p>The page removes the token from its address once it has read it, so a
+reload needs the token again.</p>
+<h2 id="next-steps-1"><a class="header" href="#next-steps-1">Next steps</a></h2>
+<p>To let other machines use the server, read
+<a href="tutorials/../how-to/deploy-server.html">Deploy bobview-server for others</a> before
+binding it to a public address.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="install-from-cratesio"><a class="header" href="#install-from-cratesio">Install from crates.io</a></h1>
+<p>This tutorial builds bobview from <a href="https://crates.io/crates/bobview">crates.io</a>
+with Cargo, instead of downloading a release, and opens the test displays
+against the simulated beamline. Use it on a machine the release builds don't
+cover, or to build with your own Rust toolchain. It takes about fifteen
+minutes, most of it compiling.</p>
+<h2 id="1-install-rust"><a class="header" href="#1-install-rust">1. Install Rust</a></h2>
+<p>Install Rust with <a href="https://rustup.rs">rustup</a> if you don't have it:</p>
+<pre><code class="language-bash">curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+</code></pre>
+<p>and open a new terminal, so that <code>~/.cargo/bin</code> is on your <code>PATH</code>. The build
+also needs a C compiler: <code>sudo apt install build-essential</code> on Debian and
+Ubuntu, <code>sudo dnf install gcc</code> on RHEL and Fedora, or <code>xcode-select --install</code>
+on macOS.</p>
+<h2 id="2-install-the-graphics-libraries"><a class="header" href="#2-install-the-graphics-libraries">2. Install the graphics libraries</a></h2>
+<p>bobview needs these at run time, as the release does. On Debian or Ubuntu:</p>
+<pre><code class="language-bash">sudo apt install libxkbcommon0 libwayland-client0 libegl1 libgl1-mesa-dri
+</code></pre>
+<p>On RHEL, Rocky, Alma and Fedora:</p>
+<pre><code class="language-bash">sudo dnf install libxkbcommon libwayland-client libglvnd-egl mesa-dri-drivers
+</code></pre>
+<p>macOS needs nothing.</p>
+<h2 id="3-install-bobview-and-the-test-ioc"><a class="header" href="#3-install-bobview-and-the-test-ioc">3. Install bobview and the test IOC</a></h2>
+<pre><code class="language-bash">cargo install bobview bobview-testioc
+</code></pre>
+<p>This builds and installs into <code>~/.cargo/bin</code>:</p>
+<div class="table-wrapper"><table><thead><tr><th>command</th><th>what</th></tr></thead><tbody>
+<tr><td><code>bobview</code></td><td>the viewer</td></tr>
+<tr><td><code>bobview-probe</code></td><td>prints live PV values from the command line</td></tr>
+<tr><td><code>bobview-testioc</code></td><td>a pure-Rust IOC serving the example-services BL01T PVs</td></tr>
+</tbody></table>
+</div>
+<p>Check it works:</p>
+<pre><code class="language-bash">bobview --version
+</code></pre>
+<h2 id="4-start-the-simulated-beamline"><a class="header" href="#4-start-the-simulated-beamline">4. Start the simulated beamline</a></h2>
+<pre><code class="language-bash">bobview-testioc &amp;
+</code></pre>
+<h2 id="5-open-the-test-displays"><a class="header" href="#5-open-the-test-displays">5. Open the test displays</a></h2>
+<p>Cargo installs only the programs, not the test displays that a release
+installs. bobview opens displays over https, so open them from GitHub:</p>
+<pre><code class="language-bash">EPICS_CA_ADDR_LIST=127.0.0.1 bobview https://raw.githubusercontent.com/gilesknap/bobview/main/tests/displays/index.bob
+</code></pre>
+<p>Their links to other displays and images are fetched from the same place.
+You should see live values within a second or two. From here, carry on from
+<a href="tutorials/quickstart.html#4-look-around">step 4 of the Quick start</a>.</p>
+<h2 id="upgrade-or-remove"><a class="header" href="#upgrade-or-remove">Upgrade or remove</a></h2>
+<p>Run <code>cargo install bobview bobview-testioc</code> again to upgrade to the latest
+version, and <code>cargo uninstall bobview bobview-testioc</code> to remove them.</p>
+<h2 id="what-cargo-does-not-install"><a class="header" href="#what-cargo-does-not-install">What Cargo does not install</a></h2>
+<ul>
+<li><code>bobview-ssh</code>, the wrapper for <code>ssh -X</code> (see
+<a href="tutorials/../how-to/software-rendering.html">Choose bobview or bobview-ssh</a>). It only
+sets three environment variables, so you can set them yourself or copy
+<a href="https://github.com/gilesknap/bobview/blob/main/scripts/bobview-ssh">the script</a>
+next to <code>bobview</code>.</li>
+<li>The browser build. <code>cargo install bobview-server</code> installs the server,
+but it needs the web build from a release or from
+<a href="tutorials/../how-to/build.html#build-the-browser-version">Build the browser version</a>,
+given with <code>--web DIR</code>. The <a href="tutorials/browser.html">browser tutorial</a> uses the release.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="install-bobview"><a class="header" href="#install-bobview">Install bobview</a></h1>
+<p>bobview runs on x86_64 and aarch64 Linux (including the Android 16 Linux
+Terminal, Debian 13) and on macOS 11 or later (Apple silicon or Intel).
+<code>install.sh</code> picks the release build to match the machine. To build it from
+crates.io with Cargo instead, see <a href="how-to/../tutorials/crates-io.html">Install from crates.io</a>.</p>
+<h2 id="install-the-prerequisites"><a class="header" href="#install-the-prerequisites">Install the prerequisites</a></h2>
+<p>On Debian and Ubuntu:</p>
+<pre><code class="language-bash">sudo apt install libxkbcommon0 libwayland-client0 libegl1 libgl1-mesa-dri
+</code></pre>
+<p>On RHEL, Rocky, Alma and Fedora:</p>
+<pre><code class="language-bash">sudo dnf install libxkbcommon libwayland-client libglvnd-egl mesa-dri-drivers
+</code></pre>
+<p>None are needed on macOS.</p>
+<h2 id="install-the-release"><a class="header" href="#install-the-release">Install the release</a></h2>
+<pre><code class="language-bash">curl -sSfL https://raw.githubusercontent.com/gilesknap/bobview/main/install.sh | bash
+</code></pre>
+<p>This installs into <code>~/.local</code>:</p>
+<div class="table-wrapper"><table><thead><tr><th>file</th><th>what</th></tr></thead><tbody>
+<tr><td><code>bin/bobview</code></td><td>the viewer</td></tr>
+<tr><td><code>bin/bobview-ssh</code></td><td>runs the viewer with software OpenGL, for <code>ssh -X</code> and machines whose GPU can't be used; see <a href="how-to/software-rendering.html">Choose bobview or bobview-ssh</a></td></tr>
+<tr><td><code>bin/bobview-testioc</code></td><td>a pure-Rust IOC serving the example-services BL01T PVs</td></tr>
+<tr><td><code>bin/bobview-probe</code></td><td>prints live PV values from the command line</td></tr>
+<tr><td><code>bin/bobview-server</code></td><td>serves bobview to browsers, see <a href="how-to/deploy-server.html">Deploy bobview-server</a></td></tr>
+<tr><td><code>share/bobview/displays/</code></td><td>test screens; <code>index.bob</code> opens by default</td></tr>
+<tr><td><code>share/bobview/web/</code></td><td>the browser build that <code>bobview-server</code> serves</td></tr>
+</tbody></table>
+</div>
+<p>The Linux binaries are linked against glibc 2.28, so they run on RHEL 8+,
+Ubuntu 20.04+ and Debian 10+.</p>
+<h2 id="put-it-on-your-path"><a class="header" href="#put-it-on-your-path">Put it on your PATH</a></h2>
+<p>On macOS <code>~/.local/bin</code> is not on <code>PATH</code> by default; add this to <code>~/.zshrc</code>:</p>
+<pre><code class="language-bash">export PATH=$HOME/.local/bin:$PATH
+</code></pre>
+<h2 id="upgrade-or-remove-1"><a class="header" href="#upgrade-or-remove-1">Upgrade or remove</a></h2>
+<p>Run the install command again to upgrade; it replaces the binaries and the
+<code>displays</code> and <code>web</code> folders. To remove bobview, delete the <code>bin/bobview*</code>
+files and <code>share/bobview</code> from <code>~/.local</code>.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="connect-to-real-iocs"><a class="header" href="#connect-to-real-iocs">Connect to real IOCs</a></h1>
+<p>bobview uses the standard EPICS client variables (see
+<a href="how-to/../reference/environment.html">Environment variables</a>).</p>
+<h2 id="search-by-udp"><a class="header" href="#search-by-udp">Search by UDP</a></h2>
+<p>Name the hosts (or broadcast addresses) to search:</p>
+<pre><code class="language-bash">EPICS_CA_ADDR_LIST="ioc1.example.com 10.0.0.255" bobview screen.bob
+EPICS_PVA_ADDR_LIST=10.0.0.255 bobview screen.bob
+</code></pre>
+<h2 id="go-through-a-gateway-over-tcp"><a class="header" href="#go-through-a-gateway-over-tcp">Go through a gateway over TCP</a></h2>
+<p>When UDP search can't reach the IOCs, for example from a phone's Linux
+Terminal VM behind NAT, name a gateway reached over TCP. This works through
+NAT since the phone opens the connection:</p>
+<pre><code class="language-bash">EPICS_CA_NAME_SERVERS=gateway.example.com:9064 bobview screen.bob
+EPICS_PVA_NAME_SERVERS=gateway.example.com:5075 bobview screen.bob
+</code></pre>
+<p>The example-services <code>ca-gateway</code> listens on port 9064 of its host.</p>
+<h2 id="choose-the-protocol"><a class="header" href="#choose-the-protocol">Choose the protocol</a></h2>
+<p>PV names prefixed <code>pva://</code> use PV Access; all others use Channel Access.</p>
+<h2 id="check-a-pv-without-the-viewer"><a class="header" href="#check-a-pv-without-the-viewer">Check a PV without the viewer</a></h2>
+<p><code>bobview-probe</code> prints live values from the command line, and can write:</p>
+<pre><code class="language-bash">bobview-probe bl01t:SUM pva://bl01t:A
+bobview-probe --seconds 10 --put bl01t:A=3.5 bl01t:SUM
+</code></pre>
+<h2 id="watch-only-never-write"><a class="header" href="#watch-only-never-write">Watch only, never write</a></h2>
+<p>Start the viewer with <code>--read-only</code> to refuse every write (see
+<a href="how-to/../explanations/writes.html">Writes and safety</a>):</p>
+<pre><code class="language-bash">bobview --read-only screen.bob
+</code></pre>
+<p>For more output while diagnosing a connection, set <code>BOBVIEW_LOG=debug</code>.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="open-displays-over-https"><a class="header" href="#open-displays-over-https">Open displays over http(s)</a></h1>
+<p>A display can be a file or an <code>http://</code> / <code>https://</code> URL, on the command line
+or typed into <strong>Open…</strong>:</p>
+<pre><code class="language-bash">bobview http://host:8080/opi/demo.bob
+</code></pre>
+<p>Files that a display names (buttons, embedded displays, navigation tabs) are
+found relative to it, so a directory of screens served by any web server
+works as it does from disk. For example, to serve a folder of screens:</p>
+<pre><code class="language-bash">cd /path/to/screens &amp;&amp; python3 -m http.server 8000
+bobview http://localhost:8000/index.bob
+</code></pre>
+<p>Fetched screens are kept in memory for <strong>Back</strong> and <strong>Forward</strong>; <strong>Reload</strong>
+fetches them again.</p>
+<p>A display loaded over http(s) writes PVs as a local file does, but no
+command is ever run for it. See <a href="how-to/../explanations/writes.html">Writes and safety</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="choose-bobview-or-bobview-ssh"><a class="header" href="#choose-bobview-or-bobview-ssh">Choose bobview or bobview-ssh</a></h1>
+<p>bobview draws with OpenGL. Two commands start it:</p>
+<div class="table-wrapper"><table><thead><tr><th>command</th><th>draws with</th><th>use it</th></tr></thead><tbody>
+<tr><td><code>bobview</code></td><td>the machine's own OpenGL: the GPU, or whatever driver the desktop provides</td><td>normally: on a local desktop, a laptop, a Mac, the phone</td></tr>
+<tr><td><code>bobview-ssh</code></td><td>Mesa in software, on the CPU of the machine bobview runs on</td><td>when the OpenGL path can't work, such as over <code>ssh -X</code></td></tr>
+</tbody></table>
+</div>
+<p>Both take the same arguments. Start with <code>bobview</code>, and switch to
+<code>bobview-ssh</code> if it fails to start or draws nothing.</p>
+<h2 id="when-to-use-bobview-ssh"><a class="header" href="#when-to-use-bobview-ssh">When to use bobview-ssh</a></h2>
+<ul>
+<li><strong>Over <code>ssh -X</code> or <code>-Y</code>.</strong> This is what it was named for. Forwarded OpenGL
+reaches your local X server as indirect GLX, which current X servers
+refuse, so <code>bobview</code> exits with <code>glutin error: [2] BadValue</code>.</li>
+<li><strong>Where a GPU driver is installed but can't be used</strong>, for example a
+remote desktop, VNC or Xvfb session on a machine with an NVIDIA driver:
+glvnd picks NVIDIA's GL, which then has no GPU display to draw on.</li>
+<li><strong>Where the GPU driver is broken</strong> or misbehaves, as a workaround while
+you sort it out.</li>
+</ul>
+<p>There is no need for it on macOS, on Wayland or X11 desktops with working
+graphics, in the Android Linux Terminal, or for <code>--snapshot</code>, unless one of
+the cases above applies.</p>
+<h2 id="what-it-does"><a class="header" href="#what-it-does">What it does</a></h2>
+<p><code>bobview-ssh</code> is a small script that runs <code>bobview</code> with:</p>
+<ul>
+<li><code>LIBGL_ALWAYS_SOFTWARE=1</code>, so Mesa renders on the CPU (llvmpipe);</li>
+<li><code>__GLX_VENDOR_LIBRARY_NAME=mesa</code>, and <code>__EGL_VENDOR_LIBRARY_FILENAMES</code>
+pointing at Mesa's EGL vendor file, so libglvnd picks Mesa rather than a
+GPU vendor's library such as NVIDIA's.</li>
+</ul>
+<p>Over X forwarding the finished window then travels to your X server as
+plain images, which every X server accepts.</p>
+<p>Software rendering costs CPU on the machine running bobview, but bobview's
+displays are simple to draw, so it is usually quick enough. Over <code>ssh -X</code>
+each redraw sends the whole window over the network, so bobview redraws a
+window only for its own input and when a PV it shows changes, at most 10
+times a second (see <a href="how-to/../explanations/windows.html#redrawing">Pinned windows and the viewer</a>).</p>
+<h2 id="requirement"><a class="header" href="#requirement">Requirement</a></h2>
+<p>Mesa must be installed where bobview runs: <code>mesa-dri-drivers</code> on RHEL,
+<code>libgl1-mesa-dri</code> on Debian and Ubuntu (both are in the
+<a href="how-to/install.html">install prerequisites</a>).</p>
+<h2 id="example"><a class="header" href="#example">Example</a></h2>
+<pre><code class="language-bash">ssh -X control-host
+bobview-ssh /path/to/screen.bob -m P=BL01T
+</code></pre>
+<p>Layouts restore window positions over X forwarding; see
+<a href="how-to/layouts.html">Save and restore a layout</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="open-boy-screens-from-an-eclipse-project-or-dls-module"><a class="header" href="#open-boy-screens-from-an-eclipse-project-or-dls-module">Open BOY screens from an Eclipse project or DLS module</a></h1>
+<p>Any <code>.opi</code> file opens like a <code>.bob</code>:</p>
+<pre><code class="language-bash">bobview screen.opi
+</code></pre>
+<p>BOY screens often name each other through the CS-Studio workspace, though:
+an Eclipse project whose <code>.project</code> links folder names (<code>mks937a</code>, <code>dlsPLC</code> …)
+to the directories that hold each module's screens, so <code>../mks937a/gauge.opi</code>
+means the <code>mks937a</code> link. This page shows how to open such screens so that
+their links work. <a href="how-to/../explanations/boy.html">How BOY screens are translated</a>
+explains the rules behind it.</p>
+<h2 id="through-an-eclipse-project"><a class="header" href="#through-an-eclipse-project">Through an Eclipse project</a></h2>
+<p>Open the screen through its project path:</p>
+<pre><code class="language-bash">bobview /workspaces/VacOPIS/vacuum_4-100/vacuum/diamondVacuumOverview.opi
+</code></pre>
+<p>for a project in <code>/workspaces/VacOPIS/vacuum_4-100</code>. bobview follows the
+project's links (the linked folders need not exist on disk; <strong>Open…</strong> lists
+them).</p>
+<p>Or give the screen's real path and name the project with <code>--project</code>:</p>
+<pre><code class="language-bash">bobview -p /workspaces/VacOPIS/vacuum_4-100 /dls_sw/…/vacuumApp/opi/opi/diamondVacuumOverview.opi
+</code></pre>
+<h2 id="a-dls-module"><a class="header" href="#a-dls-module">A DLS module</a></h2>
+<p>DLS modules need neither. There is no <code>.project</code> on disk, but the generated
+launcher <code>runcss.sh</code> beside a module's screens (<code>vacuumApp/opi/opi</code>) lists
+the links it gives CS-Studio. bobview reads that list (it does not run the
+script), so just open the screen by its real path:</p>
+<pre><code class="language-bash">bobview /dls_sw/…/vacuum/4-100/vacuumApp/opi/opi/diamondVacuumOverview.opi
+</code></pre>
+<p>This works for a BOY screen reached by its real path from anywhere (the file
+chooser, a layout, an absolute path in another screen), with the launcher in
+its folder or up to two above.</p>
+<p>To open another module's BOY screen through this module's links, give <code>-p</code>
+the module's screens folder (or its <code>runcss.sh</code>).</p>
+<h2 id="a-screen-that-needs-launcher-macros"><a class="header" href="#a-screen-that-needs-launcher-macros">A screen that needs launcher macros</a></h2>
+<p>DLS screens are often opened by a launcher script, such as
+<code>./srCellVacuum 04</code>, that supplies macros. For an <code>.opi</code> given on the command
+line in an Eclipse project (through its project path or with <code>--project</code>),
+bobview tries the launcher scripts in its directory to find them: the one
+named <code>&lt;screen&gt;.sh</code> first, with no arguments and with each number in the
+file name, bare and with an <code>r</code>. So:</p>
+<div class="table-wrapper"><table><thead><tr><th>screen</th><th>macros from</th></tr></thead><tbody>
+<tr><td><code>linacVacuum.opi</code></td><td><code>linacVacuum.sh</code> (<code>dom=LI</code>)</td></tr>
+<tr><td><code>srCell05Vacuum.opi</code></td><td><code>srCellVacuum 05</code></td></tr>
+<tr><td><code>SR05C_rack.opi</code></td><td><code>srCellVacuum 05r</code></td></tr>
+</tbody></table>
+</div>
+<p>Macros given with <code>-m</code> override these. Screens with no number in their name
+(<code>srInjCellVacuum.opi</code> is cell 01) need <code>-m</code> with the macros their
+launcher would give, or opening from the overview.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="save-and-restore-a-layout"><a class="header" href="#save-and-restore-a-layout">Save and restore a layout</a></h1>
+<p>A layout records the open windows so that a control-room arrangement can be
+put back with one command. <a href="how-to/../explanations/windows.html">Pinned windows and the viewer</a>
+explains how windows are opened in the first place.</p>
+<h2 id="save"><a class="header" href="#save">Save</a></h2>
+<p>Arrange the windows, then use the main toolbar's <strong>☰</strong> menu:</p>
+<ul>
+<li><strong>Save layout as…</strong> names a new layout (asking before replacing one).</li>
+<li><strong>Save layout</strong> saves to the layout last loaded or saved.</li>
+<li><strong>Save as default</strong> makes it the layout bobview starts with.</li>
+<li><strong>Save default on exit</strong> (off unless ticked) saves the default each time
+you quit.</li>
+<li><strong>Delete layout</strong> removes one.</li>
+</ul>
+<h2 id="restore"><a class="header" href="#restore">Restore</a></h2>
+<p>Pick a layout from the toolbar's layout list; this closes the display and
+trend windows open now. From the command line:</p>
+<pre><code class="language-bash">bobview                     # restores the default layout if there is one
+bobview DISPLAY             # opens DISPLAY; the default layout is not restored
+bobview --layout rf-shift   # restores layouts/rf-shift.json
+bobview --no-layout         # ignores the default layout
+</code></pre>
+<p><code>--snapshot</code> ignores layouts.</p>
+<h2 id="what-a-layout-holds"><a class="header" href="#what-a-layout-holds">What a layout holds</a></h2>
+<p>For each window: its display, Eclipse project and effective macros, its
+position and size, whether it is pinned, and whether a display window shows
+its toolbar; for the main window also its zoom and whether it shows the
+navigator. For each trend window: its PVs, time span, log scale, position
+and size. A layout from before windows were pinned pins them all if it was
+saved in multi-window mode, and none if not.</p>
+<p>Layouts are JSON files in <code>$XDG_CONFIG_HOME/bobview/layouts</code> (by default
+<code>~/.config/bobview/layouts</code>), so they can be copied between machines or
+kept under version control.</p>
+<h2 id="positions-on-wayland-and-with-changed-monitors"><a class="header" href="#positions-on-wayland-and-with-changed-monitors">Positions on Wayland and with changed monitors</a></h2>
+<p>A saved position that is on none of the monitors now (a laptop that was
+docked) is dropped and the window manager places the window.</p>
+<p><strong>Wayland</strong> does not let an application read or set its windows' positions,
+so on a Wayland desktop a layout restores the windows and their sizes but the
+compositor places them, and bobview logs this once. To keep positions, run
+bobview under XWayland:</p>
+<pre><code class="language-bash">WAYLAND_DISPLAY= bobview
+</code></pre>
+<p>X11 desktops, including <code>bobview-ssh</code> over X forwarding, restore positions.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="trend-pvs"><a class="header" href="#trend-pvs">Trend PVs</a></h1>
+<p>A trend window plots one or more PVs against time.</p>
+<h2 id="open-a-trend"><a class="header" href="#open-a-trend">Open a trend</a></h2>
+<ul>
+<li>Right-click a widget (long-press on a touch screen) and pick <strong>Trend</strong> for
+its PV, or <strong>Trend with rule PVs</strong> for its PV and the PVs its rules read.</li>
+<li>In a BOY screen, a button that would open a Data Browser or StripTool
+opens a trend of its PVs instead (see <a href="how-to/../explanations/boy.html">How BOY screens are translated</a>).</li>
+</ul>
+<p>Several trends may be open at once, each in its own window over the display,
+and they stay open as you move between displays. Layouts save them.</p>
+<h2 id="use-a-trend"><a class="header" href="#use-a-trend">Use a trend</a></h2>
+<ul>
+<li>Pick the time span from the window's menu: 1 minute to 1 day (10 minutes
+by default). The value axis fits the data.</li>
+<li>Switch <strong>Log scale</strong> on for a value axis on a log scale.</li>
+<li>The legend below the plot gives each PV's colour, name and current value,
+or Disconnected. <strong>✖</strong> removes a PV, and <strong>Add PV</strong> adds one.</li>
+</ul>
+<h2 id="limits"><a class="header" href="#limits">Limits</a></h2>
+<p>A trend is live only: each PV gets a sample on every update from when the
+window opened (up to 100 000 samples, and a day, per PV), with no archived
+history. Each value holds until the next, and a gap marks where a PV was
+disconnected.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="deploy-bobview-server-for-others"><a class="header" href="#deploy-bobview-server-for-others">Deploy bobview-server for others</a></h1>
+<p><a href="how-to/../tutorials/browser.html">Serve displays to a browser</a> runs <code>bobview-server</code>
+for this machine only. This guide makes it reachable from others, safely.
+All of its options are in <a href="how-to/../reference/cli.html#bobview-server">Command line</a>.</p>
+<h2 id="run-it-where-pvs-are-reachable"><a class="header" href="#run-it-where-pvs-are-reachable">Run it where PVs are reachable</a></h2>
+<p>The server reaches PVs through bobview's own CA/PVA client, so run it
+anywhere <code>caget</code> works, with the usual <code>EPICS_*</code> variables:</p>
+<pre><code class="language-bash">bobview-server --opi /path/to/displays --bind 0.0.0.0
+</code></pre>
+<p>The release tarball includes the web build, which the server finds in
+<code>share/bobview/web</code>. Files in <code>--opi</code> take precedence over files of the same
+name in the web build (which has the test displays).</p>
+<h2 id="choose-who-can-reach-it"><a class="header" href="#choose-who-can-reach-it">Choose who can reach it</a></h2>
+<p>By default it listens on <code>--bind 127.0.0.1 --port 8080</code>. Use <code>--bind 0.0.0.0</code>
+(every interface) or a specific address to serve others, ideally behind a
+firewall or an authenticating reverse proxy, since reading PVs needs no
+login.</p>
+<p>Browsers let any page open a websocket, so the server accepts only pages
+from itself (by <code>Origin</code>), plus any you name:</p>
+<pre><code class="language-bash">bobview-server --opi DIR --bind 0.0.0.0 --allow-origin https://ops.example.com
+</code></pre>
+<p>Those pages must also call the server by an IP address, <code>localhost</code>, this
+machine's name (as the kernel has it, without its domain, or in a domain of
+<code>/etc/resolv.conf</code>), the host of an <code>--allow-origin</code>, or a name given with
+<code>--host NAME</code> (repeatable), so that a page cannot reach it through a DNS
+name of its own.</p>
+<h2 id="behind-a-reverse-proxy"><a class="header" href="#behind-a-reverse-proxy">Behind a reverse proxy</a></h2>
+<ul>
+<li>Give the public name the proxy passes on as <code>Host</code> with <code>--host NAME</code>.</li>
+<li>Every client has the proxy's address, so raise <code>--max-per-ip</code> (default 10)
+and expect the logs to show the proxy.</li>
+</ul>
+<h2 id="allow-writes"><a class="header" href="#allow-writes">Allow writes</a></h2>
+<p>Writes are off unless the server has <code>--write</code>, since they go out as the
+server's user. Each write must then carry a token. Set it in the environment
+rather than with <code>--write-token</code>, since arguments show in <code>ps</code>:</p>
+<pre><code class="language-bash">BOBVIEW_WRITE_TOKEN=s3cret bobview-server --opi DIR --write
+</code></pre>
+<p>With neither, the server makes a random token and prints it to stderr at
+startup; an empty <code>BOBVIEW_WRITE_TOKEN</code> counts as unset. Users open the page
+with <code>&amp;token=TOKEN</code>. See <a href="how-to/../explanations/writes.html">Writes and safety</a> for
+how the token is protected.</p>
+<h2 id="limits-it-enforces"><a class="header" href="#limits-it-enforces">Limits it enforces</a></h2>
+<ul>
+<li>At most 100 clients and 50,000 subscribed PVs.</li>
+<li>At most 10 clients from one address (or one IPv6 /64), <code>--max-per-ip N</code>.</li>
+<li>A client subscribing to more than 1,000 new PVs a second, after its first
+10,000, is slowed down.</li>
+<li>A client that stops answering websocket pings, or takes over 10 s to take
+one message, is dropped.</li>
+<li>PV names over 256 characters, or with spaces or non-ASCII characters, are
+refused.</li>
+<li>Each client gets the PVs that changed at most every <code>--throttle-ms</code>
+(100 ms), each with its latest state.</li>
+</ul>
+<p>It serves no <code>loc://</code> or <code>sim://</code> PVs: the page makes those itself. Images
+from PVA are not sent over PVWS yet.</p>
+<h2 id="files-it-will-not-serve"><a class="header" href="#files-it-will-not-serve">Files it will not serve</a></h2>
+<p>Dot-files such as <code>.git</code> are never served, nor files reached through a
+symbolic link that leads out of <code>--opi</code> or <code>--web</code> (unless
+<code>--follow-symlinks</code>). Other sites cannot frame the pages (<code>X-Frame-Options</code>,
+<code>frame-ancestors 'self'</code>).</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="take-snapshots"><a class="header" href="#take-snapshots">Take snapshots</a></h1>
+<p><code>--snapshot</code> renders a display to a PNG without opening a window, then
+exits. It is useful for documentation, regression checks and CI.</p>
+<pre><code class="language-bash">bobview --snapshot out.png screen.bob
+</code></pre>
+<h2 id="size-and-scale"><a class="header" href="#size-and-scale">Size and scale</a></h2>
+<pre><code class="language-bash">bobview --snapshot out.png --size 1920x1080 screen.bob
+bobview --snapshot out.png --size auto screen.bob       # as a window manager would size it
+bobview --snapshot phone.png --scale-factor 2.75 screen.bob  # as on a high-DPI phone
+</code></pre>
+<p><code>--size</code> defaults to <code>1280x800</code>. <code>auto</code> starts at the window's default size
+and resizes it as a window manager would, on a monitor of 1920x1080 points.</p>
+<h2 id="wait-for-pvs"><a class="header" href="#wait-for-pvs">Wait for PVs</a></h2>
+<p>PVs get 2 seconds to connect by default; give more with <code>--wait</code>:</p>
+<pre><code class="language-bash">bobview --snapshot out.png --wait 5 screen.bob
+</code></pre>
+<h2 id="click-first"><a class="header" href="#click-first">Click first</a></h2>
+<p><code>--click X,Y</code> and <code>--right-click X,Y</code> (repeatable, in the order given)
+interact with the display before the snapshot, which is taken <code>--settle</code>
+seconds (default 1) after the last click. Positions are in pixels.</p>
+<pre><code class="language-bash">bobview --snapshot menu.png --right-click 200,150 --settle 0.5 screen.bob
+</code></pre>
+<h2 id="snapshot-every-test-display"><a class="header" href="#snapshot-every-test-display">Snapshot every test display</a></h2>
+<p>CI does this against <code>bobview-testioc</code>:</p>
+<pre><code class="language-bash">bobview-testioc &amp;
+export EPICS_CA_ADDR_LIST=127.0.0.1 EPICS_CA_AUTO_ADDR_LIST=NO
+for f in tests/displays/*.bob; do
+  bobview --snapshot "snapshots/$(basename "$f" .bob).png" --size 1280x800 --wait 5 "$f"
+done
+kill %1
+</code></pre>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="build-from-source"><a class="header" href="#build-from-source">Build from source</a></h1>
+<p>You need a stable Rust toolchain (<a href="https://rustup.rs">rustup</a>).</p>
+<pre><code class="language-bash">git clone https://github.com/gilesknap/bobview
+cd bobview
+cargo build --release
+cargo test --workspace
+</code></pre>
+<p>The binaries are in <code>target/release</code>.</p>
+<h2 id="cross-build-for-the-phone"><a class="header" href="#cross-build-for-the-phone">Cross-build for the phone</a></h2>
+<p>From x86_64, with <a href="https://ziglang.org">zig</a> and
+<a href="https://github.com/rust-cross/cargo-zigbuild">cargo-zigbuild</a> installed:</p>
+<pre><code class="language-bash">cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.36
+</code></pre>
+<h2 id="build-the-browser-version"><a class="header" href="#build-the-browser-version">Build the browser version</a></h2>
+<pre><code class="language-bash">./scripts/build-web.sh
+</code></pre>
+<p>writes <code>dist/web</code>. It needs the <code>wasm32-unknown-unknown</code> target and the
+<code>wasm-bindgen</code> CLI matching the version in <code>Cargo.lock</code>. In a checkout,
+<code>bobview-server</code> finds <code>dist/web</code> itself; <code>--web DIR</code> picks another.</p>
+<h2 id="build-these-docs"><a class="header" href="#build-these-docs">Build these docs</a></h2>
+<p>The docs are an <a href="https://rust-lang.github.io/mdBook/">mdBook</a>, with
+diagrams drawn by <a href="https://github.com/badboy/mdbook-mermaid">mdbook-mermaid</a>.
+Install the versions CI uses (newer mdbook-mermaid needs a newer mdBook):</p>
+<pre><code class="language-bash">cargo install mdbook@0.4.40 mdbook-mermaid@0.15.0
+scripts/build-docs.sh serve --open
+</code></pre>
+<p>This builds the Rust API docs into the book under <code>api/</code>, then serves it;
+<code>mdbook serve</code> rebuilds and reloads the page as you edit. Run it again to
+pick up changes to the API docs. <code>scripts/build-docs.sh</code> alone builds the
+book into <code>docs/book</code>.</p>
+<h2 id="checks-ci-runs"><a class="header" href="#checks-ci-runs">Checks CI runs</a></h2>
+<pre><code class="language-bash">cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy -p bobview-pv -p bobview --target wasm32-unknown-unknown -- -D warnings
+cargo test --workspace
+</code></pre>
+<h2 id="how-the-docs-are-published"><a class="header" href="#how-the-docs-are-published">How the docs are published</a></h2>
+<p>The <code>Docs</code> workflow builds the book and the API docs on every pull request.
+On a push to <code>main</code> or a <code>v*</code> tag it publishes them to the <code>gh-pages</code> branch
+in a folder named after the branch or tag, writes <code>switcher.json</code> (the list
+of versions for the menu in the top bar) and leaves the other versions in
+place. The site's root redirects to <code>main/</code>.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="make-a-release"><a class="header" href="#make-a-release">Make a release</a></h1>
+<p>Set the version in the workspace's <code>Cargo.toml</code>, in both places: the
+workspace version and the <code>=</code> versions of <code>bob</code> and <code>pv</code> under
+<code>[workspace.dependencies]</code>. Merge that to <code>main</code>, then push a matching tag:</p>
+<pre><code class="language-bash">git tag v1.2.3
+git push origin v1.2.3
+</code></pre>
+<p>CI checks that the tag matches the version in <code>Cargo.toml</code> and fails the
+build if not. It creates the GitHub Release itself and builds on native
+runners for each platform (<code>ubuntu-24.04</code>, <code>ubuntu-24.04-arm</code> and macOS),
+attaching a <code>bobview-&lt;arch&gt;-&lt;os&gt;.tar.gz</code> for each, such as
+<code>bobview-x86_64-linux.tar.gz</code> and <code>bobview-aarch64-linux.tar.gz</code>.</p>
+<p>The Linux builds use <code>cargo zigbuild</code> to link against glibc 2.28, so they
+run on RHEL 8+, Ubuntu 20.04+ and Debian 10+. Each tarball carries
+<code>THIRD_PARTY_LICENSES.txt</code>, generated by <code>scripts/third-party-licenses.py</code>.
+<code>install.sh</code> downloads the latest release for the machine it runs on.</p>
+<p>The tag also publishes a copy of these docs at
+<code>https://gilesknap.github.io/bobview/&lt;tag&gt;/</code>, which the version menu in the
+docs' top bar then lists beside <code>main</code>.</p>
+<h2 id="publish-to-cratesio"><a class="header" href="#publish-to-cratesio">Publish to crates.io</a></h2>
+<p>The workspace publishes five crates: <code>bobview</code>, <code>bobview-server</code>, and the
+libraries they use, <code>bobview-bob</code>, <code>bobview-pv</code> and <code>bobview-testioc</code> (the
+names <code>bob</code> and <code>pv</code> were taken; the code still calls them <code>bob</code>, <code>pv</code> and
+<code>testioc</code>). Check them first with</p>
+<pre><code class="language-bash">cargo publish --workspace --dry-run
+</code></pre>
+<p>which packages each crate and builds it as crates.io will.</p>
+<p>The first time, publish by hand: log in to crates.io with GitHub, create an
+API token with the publish scope, then</p>
+<pre><code class="language-bash">cargo login
+cargo publish --workspace
+</code></pre>
+<p>Cargo publishes them in dependency order. After that, CI can publish each
+release itself with trusted publishing, which needs no stored token:</p>
+<ol>
+<li>On crates.io, in each crate's <strong>Settings → Trusted Publishing</strong>, add the
+repository <code>gilesknap/bobview</code> and the workflow <code>ci.yml</code>.</li>
+<li>In the repository's <strong>Settings → Secrets and variables → Actions →
+Variables</strong>, set <code>PUBLISH_CRATES</code> to <code>true</code>.</li>
+</ol>
+<p>The <code>publish</code> job then runs after the GitHub Release is made for each tag.
+A version can be published to crates.io only once, so fix a bad release
+with a new version.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="scope-and-fidelity-to-phoebus"><a class="header" href="#scope-and-fidelity-to-phoebus">Scope and fidelity to Phoebus</a></h1>
+<h2 id="what-bobview-is-for"><a class="header" href="#what-bobview-is-for">What bobview is for</a></h2>
+<p>bobview is a <em>viewer</em>. It opens Phoebus Display Builder <code>.bob</code> screens and
+CS-Studio BOY <code>.opi</code> screens and shows live EPICS values on them, from a
+single small binary that starts quickly and runs on modest hardware: down to
+a phone, in the Android 16 Linux Terminal (Debian 13, aarch64). The same code
+builds for the browser.</p>
+<h2 id="what-is-out-of-scope"><a class="header" href="#what-is-out-of-scope">What is out of scope</a></h2>
+<ul>
+<li><strong>Scripts</strong> (Jython and JavaScript) are not run. The status line shows
+"N widgets with scripts ignored", counting widgets, not scripts. A few
+scripts that are common in DLS and techui-builder screens are recognised by
+name and done natively instead; see <a href="explanations/boy.html">How BOY screens are translated</a>
+and <a href="explanations/../reference/widgets.html">Widgets</a>.</li>
+<li><strong>Display editing.</strong> Use Phoebus to edit screens.</li>
+<li><strong>Alarm and archiver services.</strong> Trends are live only, with no archived
+history.</li>
+</ul>
+<p>Widgets bobview can't draw are shown as a grey placeholder labelled with the
+widget type and PV name, and the status line counts "N unsupported widgets".
+What is and isn't supported is listed in <a href="explanations/../reference/widgets.html">Widgets</a>.</p>
+<h2 id="how-close-it-is-to-phoebus"><a class="header" href="#how-close-it-is-to-phoebus">How close it is to Phoebus</a></h2>
+<p>Fidelity is approximate. Sizes, fonts (scaled by 0.95) and layout were tuned
+by eye, and output has not been compared with Phoebus's own pixel for pixel.</p>
+<p>Where behaviour matters more than looks, bobview follows Phoebus closely:
+number formats, how typed text is parsed into a value (units dropped, <code>0x</code>
+and <code>0b</code> numbers, enum labels), macro expansion, and the precedence of
+operators in rules (as Phoebus's Jython for a <code>.bob</code>, as BOY's JavaScript
+for an <code>.opi</code>). Where it departs from Phoebus it says so in the reference,
+for example rules taking the integer part of a double for bitwise operators
+where Jython would fail.</p>
+<h2 id="protocol-maturity"><a class="header" href="#protocol-maturity">Protocol maturity</a></h2>
+<p>Channel Access and PV Access come from the third-party
+<a href="https://github.com/epics-rs/epics-rs">epics-rs</a> crates, which are young; see
+<a href="explanations/architecture.html">Architecture</a>. So far bobview has mainly been exercised
+against the in-repo <code>bobview-testioc</code>, not a real softIOC, PVXS or
+ca-gateway. The <code>interop</code> CI job and <code>crates/pv/tests/interop.rs</code> are there
+to change that.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="architecture"><a class="header" href="#architecture">Architecture</a></h1>
+<p>bobview is a Cargo workspace of five crates. Three are published under
+longer names, as <code>bob</code> and <code>pv</code> were taken on crates.io, but keep their short
+names in code: <code>bob</code> is <code>bobview-bob</code>, <code>pv</code> is <code>bobview-pv</code> and <code>testioc</code> is
+<code>bobview-testioc</code>.</p>
+<pre class="mermaid">graph LR
+    bobview[&quot;bobview&lt;br/&gt;viewer and bobview-probe&quot;]
+    server[&quot;bobview-server&quot;]
+    bob[&quot;bob&lt;br/&gt;display model&quot;]
+    pv[&quot;pv&lt;br/&gt;PV access&quot;]
+    testioc[&quot;testioc&lt;br/&gt;test IOC&quot;]
+    egui[&quot;egui / eframe&quot;]
+    epics[&quot;epics-rs&lt;br/&gt;epics-ca-rs, epics-pva-rs&quot;]
+    pvws[&quot;PVWS&quot;]
+
+    bobview --&gt; bob
+    bobview --&gt; pv
+    bobview --&gt; egui
+    server --&gt; pv
+    pv -- desktop --&gt; epics
+    pv -- browser --&gt; pvws
+    server -. serves .-&gt; pvws
+    testioc --&gt; epics
+
+    classDef wasm stroke-width:3px,stroke-dasharray:6 3
+    class bobview,bob,pv wasm
+</pre>
+<div class="table-wrapper"><table><thead><tr><th>crate</th><th>what</th></tr></thead><tbody>
+<tr><td><code>bob</code></td><td>the display model: reads <code>.bob</code> files and translates <code>.opi</code> ones into the same form, expands macros, resolves Eclipse project links and DLS launchers</td></tr>
+<tr><td><code>pv</code></td><td>PV connections behind one interface: Channel Access, PV Access, PVWS for the browser, <code>loc://</code>, <code>sim://</code> and formula PVs</td></tr>
+<tr><td><code>bobview</code></td><td>the viewer: an <a href="https://github.com/emilk/egui">egui</a> app that draws displays, plus <code>bobview-probe</code></td></tr>
+<tr><td><code>bobview-server</code></td><td>serves the web build, <code>.bob</code> files and a PV Web Socket from one port</td></tr>
+<tr><td><code>testioc</code></td><td><code>bobview-testioc</code>, a pure-Rust IOC serving the example-services BL01T PVs</td></tr>
+</tbody></table>
+</div>
+<p>The crates with a dashed outline also build for <code>wasm32-unknown-unknown</code>.
+Which source file does what is listed in the
+<a href="explanations/../reference/api.html#source-map">source map</a>.</p>
+<h2 id="from-file-to-screen"><a class="header" href="#from-file-to-screen">From file to screen</a></h2>
+<pre class="mermaid">graph LR
+    fetch[&quot;fetch&lt;br/&gt;file or http(s)&quot;] --&gt; parse[&quot;bob&lt;br/&gt;parse; .opi translated;&lt;br/&gt;project links&quot;]
+    parse --&gt; build[&quot;screen::Builder&lt;br/&gt;macros, rules&quot;]
+    build --&gt; nodes[&quot;nodes&lt;br/&gt;with PV handles&quot;]
+    nodes --&gt; draw[&quot;widgets draw&lt;br/&gt;each pass&quot;]
+    draw -- Requests --&gt; app[&quot;the app&lt;br/&gt;open, trend, close …&quot;]
+</pre>
+<ol>
+<li><code>bobview</code> reads a display from a file or over http(s), off the UI
+thread, and <code>bob</code> parses it into a tree of widgets with their
+properties. An <code>.opi</code> is translated as it is read, so everything after
+this sees only the <code>.bob</code> form. Files a display names are found through
+its Eclipse project's linked folders.</li>
+<li>The screen builder expands macros down the tree, compiles each widget's
+rules and asks <code>pv</code> for its PVs, giving a tree of nodes that each hold
+their PV handles. Embedded displays are built on threads of their own.</li>
+<li>Each pass, the widgets read their PVs' latest values and draw. A rule is
+evaluated again only when one of its PVs has changed. What a click
+asks for (open a display, show a trend, close the window) goes back to
+the app as a <code>Request</code>.</li>
+</ol>
+<p>A window is drawn again only when something it shows changes; see
+<a href="explanations/repaints.html">Threads, windows and repaints</a>.</p>
+<p>Rules are expressions over a widget's PVs, evaluated in <code>bobview</code>, that set
+one of its properties. Formula PVs (<code>=expr</code>, <code>eq://expr</code>) are PVs made by
+<code>pv</code> from other PVs; see <a href="explanations/../reference/macros-rules-pvs.html">Macros, rules and PV types</a>.</p>
+<h2 id="protocols"><a class="header" href="#protocols">Protocols</a></h2>
+<p><code>pv</code>'s <code>ca.rs</code> and <code>pva.rs</code> are thin adapters over the
+<a href="https://github.com/epics-rs/epics-rs">epics-rs</a> <code>epics-ca-rs</code> and
+<code>epics-pva-rs</code> crates, which do the protocol work. These are young, so
+protocol correctness rests largely on them; the <code>interop</code> CI job tests
+against other EPICS implementations.</p>
+<h2 id="in-the-browser"><a class="header" href="#in-the-browser">In the browser</a></h2>
+<p><code>bob</code>, <code>pv</code> and <code>bobview</code> build for the browser, drawn with WebGL. A browser
+can't speak CA or PVA, so there PVs come over a
+<a href="https://github.com/ornl-epics/pvws">PV Web Socket</a> (PVWS), as in Daedalus.
+<code>bobview-server</code> provides one at <code>/pvws/pv</code>, reaching PVs through the same
+<code>pv</code> crate as the desktop viewer; any other PVWS server works too. <code>loc://</code>
+and <code>sim://</code> PVs are made in the page itself. There is one window, and
+displays are fetched without blocking the page.</p>
+<h2 id="the-test-ioc"><a class="header" href="#the-test-ioc">The test IOC</a></h2>
+<p><code>bobview-testioc</code> serves enough of the
+<a href="https://github.com/epics-containers/example-services">epics-containers example-services</a>
+BL01T beamline for its screens, over CA and PVA, with no C dependencies. It
+runs natively on an aarch64 phone, where the real amd64 IOC containers would
+need qemu, and CI uses it to snapshot every test display. See
+<a href="explanations/../reference/testioc.html">bobview-testioc</a>.</p>
+<h2 id="design-choices"><a class="header" href="#design-choices">Design choices</a></h2>
+<ul>
+<li><strong>egui, immediate mode.</strong> Each pass draws the display from its nodes
+and the PVs' latest values, with no retained widget tree to keep in step.
+It gives one code base for the desktop, the browser and headless
+snapshots, from a small binary.</li>
+<li><strong>Thin adapters of our own over epics-rs</strong>, rather than bindings to the C
+libraries: no C toolchain, easy cross-builds, and one <code>pv</code> interface for
+every PV type.</li>
+<li><strong>Images are decimated</strong> to at most 2048 pixels a side before they are
+uploaded as a texture.</li>
+<li><strong>Fidelity is tuned by eye</strong> against Phoebus, not pixel for pixel; see
+<a href="explanations/scope.html">Scope and fidelity to Phoebus</a>.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="threads-windows-and-repaints"><a class="header" href="#threads-windows-and-repaints">Threads, windows and repaints</a></h1>
+<p>egui draws a window only when asked to. This page explains who asks, and
+the locking that lets several windows share one app. It is for
+contributors; the user's view is in
+<a href="explanations/windows.html#redrawing">Pinned windows and the viewer</a>.</p>
+<h2 id="pv-updates"><a class="header" href="#pv-updates">PV updates</a></h2>
+<p>A <code>PvManager</code> owns a tokio runtime (two worker threads, <code>bobview-pv</code>) with
+one task per CA or PVA PV, talking to the epics-rs client. Each monitor
+event updates the PV's shared state under its lock and bumps its version
+(<code>Shared::update</code> in <code>crates/pv/src/lib.rs</code>). The UI thread never waits on
+the network: each pass, widgets copy out the latest state.</p>
+<p>Each window subscribes its PVs through its own handle,
+<code>PvManager::tagged(notifier)</code>, so each PV knows which windows show it. An
+update calls the notifiers of those windows only. A window's notifier
+(<code>Repaint</code> in <code>app.rs</code>) asks egui for one repaint of that window, 100 ms
+later, and asks no more until the window's next pass begins; so a window
+is redrawn for its PVs at most about 10 times a second, however fast they
+change. When a window shows another display, its handle is retagged, so the
+old display's PVs stop repainting it. A notice (a refused or failed write)
+calls every window's notifier, so each shows it.</p>
+<pre class="mermaid">sequenceDiagram
+    participant T as PV task (tokio)
+    participant S as PV shared state
+    participant R as child's Repaint
+    participant E as egui / eframe (UI thread)
+    participant A as BobApp (locked)
+    T-&gt;&gt;S: monitor event: update state, version += 1
+    S-&gt;&gt;R: call the tag's notifier
+    R-&gt;&gt;E: request_repaint_after_for(100 ms, child)&lt;br/&gt;only if not asked since its last pass
+    E-&gt;&gt;A: the child's deferred viewport callback:&lt;br/&gt;lock, display_pass
+    A-&gt;&gt;R: begin: may ask again
+    A-&gt;&gt;S: widgets read the latest state, and draw
+</pre>
+<h2 id="windows"><a class="header" href="#windows">Windows</a></h2>
+<p>The main window is eframe's root viewport. Each display and trend window is
+a deferred viewport (<code>show_viewport_deferred</code>) with a pass of its own, so it
+is redrawn for its own input and PVs, not when another window is. The app,
+<code>BobApp</code>, sits behind one <code>Arc&lt;Mutex&lt;_&gt;&gt;</code> (<code>app::App</code>): each window's pass
+locks it. eframe runs the passes one after another on the UI thread, so they
+never wait for each other.</p>
+<p>Three rules keep this working:</p>
+<ol>
+<li><strong>Never hold the lock while calling <code>show_viewport_deferred</code>.</strong> Where
+windows are embedded, egui runs the callback at once, inside the
+caller's pass, and the callback takes the lock. The main window's pass
+returns the windows to keep open, and <code>App::draw</code> registers them after
+letting go.</li>
+<li><strong>Windows open from the main window's pass.</strong> A link in a child window
+adds the new window to the app, and the main window registers it on its
+next pass. So a pass that changes the windows open or their titles
+repaints the main window.</li>
+<li><strong>A change to another window repaints it.</strong> Each pass compares a small
+<code>Shape</code> (windows, what each shows, trend titles, where the PV details
+dialog is) before and after, and repaints the windows whose part
+changed.</li>
+</ol>
+<p><strong>Embedded mode</strong> has one native window: the browser, snapshots and unit
+tests (a plain <code>egui::Context</code> embeds). There, display and trend windows are
+<code>egui::Window</code>s drawn in the main window's pass, and every repaint is of the
+main window.</p>
+<h2 id="other-repaint-sources"><a class="header" href="#other-repaint-sources">Other repaint sources</a></h2>
+<p>Work on other threads asks for a repaint by viewport id, because a bare
+<code>request_repaint</code> there reaches whichever window egui is drawing:</p>
+<ul>
+<li>the image-loader threads (<code>symbol.rs</code>), which read the SVG and PNG files
+of symbol and picture widgets, repaint each window waiting for an image;</li>
+<li>the navigator's and command launchers' threads repaint the main window.</li>
+</ul>
+<p>A window also polls while it waits: a display being fetched or built, an
+embedded display building on its thread, or a fetch in the browser asks
+for a repaint every 50 ms until it arrives. Trends scroll by asking for the
+next repaint when the plot has moved a pixel.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="pinned-windows-and-the-viewer"><a class="header" href="#pinned-windows-and-the-viewer">Pinned windows and the viewer</a></h1>
+<p>For a control room, several displays can be open side by side, each in a
+window of its own, and the arrangement saved as a
+<a href="explanations/../how-to/layouts.html">layout</a>. The question is where a link opens its
+display: in place, or in another window? bobview answers it with one idea:
+each window is <strong>pinned</strong> or not.</p>
+<h2 id="the-rule"><a class="header" href="#the-rule">The rule</a></h2>
+<p>A link (an action or menu button, a symbol click …) opens its display by
+these rules, whatever target the screen gives it:</p>
+<div class="table-wrapper"><table><thead><tr><th>Click</th><th>Display already open somewhere</th><th>Not open</th></tr></thead><tbody>
+<tr><td>in a pinned window</td><td>raise that window</td><td>open in the viewer, or a new window if every window is pinned</td></tr>
+<tr><td>in an unpinned window</td><td>raise that window</td><td>open in place</td></tr>
+<tr><td><strong>shift</strong>+click</td><td>raise that window</td><td>open in a new window</td></tr>
+<tr><td><strong>ctrl</strong>+click</td><td>open in place</td><td>open in place</td></tr>
+</tbody></table>
+</div>
+<p>The <strong>viewer</strong> is the unpinned window used last (focused, opened or
+unpinned), so clicking a window once makes it where the next link goes.
+"Already open" means the same display with the same macros, in another
+window.</p>
+<h2 id="why-it-works-this-way"><a class="header" href="#why-it-works-this-way">Why it works this way</a></h2>
+<p>The main window starts pinned, so it stays where it is while the displays
+it links to come and go in one other window: an overview on one side and a
+detail on the other. Pin that one too to keep it, and the next link opens a
+new viewer. Unpinned, the main window navigates in place, as a single
+window does. Holding shift opens every display in a window of its own, as
+the old multi-window mode did.</p>
+<p>A display opened in place or in the viewer keeps that window's history for
+Back and Forward. A link to the display its own window shows reloads it in
+place, as a Refresh button wants, without adding to Back. BOY Exit buttons
+close the display window they are in (in the main window they go back).</p>
+<p>In a browser, and on a touch or small screen, displays have no windows of
+their own: every link navigates in place, and the pin and layout controls
+are not shown.</p>
+<h2 id="where-new-windows-go"><a class="header" href="#where-new-windows-go">Where new windows go</a></h2>
+<p>A display window opens sized to its display at 100%, within the monitor,
+beside the window pinned last, so a row of small windows grows beside a big
+one: on the first of its right, below it, its left and above it where there
+is room on the monitor clear of the pinned windows. Failing that it goes
+beside the window whose link opened it, then beside the other pinned
+windows, or where it covers them least. The viewer is sized and placed so
+again for each display a pinned window's link opens in it.</p>
+<p>Wayland doesn't let applications place their windows, so there the
+compositor does.</p>
+<h2 id="redrawing"><a class="header" href="#redrawing">Redrawing</a></h2>
+<p>Each window is redrawn on its own: for its own input, and when a PV its
+display shows changes (at most 10 times a second), not when another window
+is. That matters most over <code>ssh -X</code>, where each redraw sends the whole
+window over the network.</p>
+<p>The controls of each window are listed in
+<a href="explanations/../reference/controls.html">The window and its controls</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="how-boy-screens-are-translated"><a class="header" href="#how-boy-screens-are-translated">How BOY screens are translated</a></h1>
+<h2 id="one-renderer-for-both-formats"><a class="header" href="#one-renderer-for-both-formats">One renderer for both formats</a></h2>
+<p>An <code>.opi</code> file (CS-Studio BOY) is translated as it is read into the <code>.bob</code>
+form, the way Phoebus's own legacy import converts it, so it is drawn by the
+same widgets as a <code>.bob</code>. It is accepted everywhere a <code>.bob</code> is: on the
+command line, in <strong>Open…</strong> (which lists <code>.opi</code> files too), in actions and
+linking containers, and over http(s). As in Phoebus, a <code>.bob</code> next to a named
+<code>.opi</code> file is opened in its place.</p>
+<p>How each BOY widget is drawn is listed in <a href="explanations/../reference/boy-widgets.html">BOY widgets</a>.</p>
+<h2 id="colours-fonts-and-rules"><a class="header" href="#colours-fonts-and-rules">Colours, fonts and rules</a></h2>
+<p>Colours keep the RGB the file gives; a colour with only a name is looked up
+in the EDM <code>colors.list</code> DLS converted its screens with, then in the Phoebus
+palette. Fonts in pixels keep their size, fonts in points are divided by
+1.01, and the Phoebus named fonts (<code>Default</code>, <code>Header 1</code> …) use the Phoebus
+sizes. Rules keep BOY's severity numbers (<code>pvSev0</code> becomes <code>pvLegacySev0</code>)
+and <code>widget.getValue()</code> reads the widget's own PV.</p>
+<h2 id="size-and-clipping"><a class="header" href="#size-and-clipping">Size and clipping</a></h2>
+<p>An <code>.opi</code> keeps its declared width and height, and widgets outside them are
+clipped, as in BOY. EDM conversions often leave stray widgets far off the
+display, which Phoebus (and bobview, for a <code>.bob</code>) would grow the display to
+show. This size is also what Fit, <code>--size auto</code> and an embedding container
+that sizes itself to its content use.</p>
+<h2 id="scripts-that-are-done-natively"><a class="header" href="#scripts-that-are-done-natively">Scripts that are done natively</a></h2>
+<p>Scripts and JavaScript or Python actions are not run, with these
+exceptions, recognised and done by bobview itself:</p>
+<ul>
+<li>The EDM <strong>Exit</strong> button's script (<code>ScriptUtil.closeAssociatedOPI</code>) goes
+back to the previous display, or closes the window.</li>
+<li>A script that opens a <strong>Data Browser</strong> on some PVs
+(<code>ScriptUtil.executeEclipseCommand</code> of
+<code>org.csstudio.trends.databrowser2.newWindow</code> with <code>['pvnames', 'A,B']</code>, as
+the DLS vacuum "Graph" buttons do) opens a <a href="explanations/../how-to/trends.html">trend</a> of
+them.</li>
+<li>The DLS vacuum widget script <code>get_pv_name.py</code>, recognised by its file
+name. Its second PV, a vacuum space's link field such as
+<code>SR03S-VA-SPACE-01:IONPSTA.INPA</code>, names a group
+(<code>SR03S-VA-GIONP-01:STA NPP NMS</code> names <code>SR03S-VA-GIONP-01</code>). Each time it
+names a different one, a label shows the group's name, and any other
+widget reads the group's <code>:STA</code> and takes its name, so its tooltip,
+right-click menu and the <code>$(name)</code> its click passes as <code>device</code> follow. An
+EDM symbol of a gauge, ion pump or valve strip shows the frame for that
+status (0 when disconnected).</li>
+</ul>
+<p>A click on a shape, symbol or LED with a BOY click hook runs its actions. A
+disconnected EDM symbol shows its first frame inside the disconnected
+border, without Phoebus' overlay.</p>
+<h2 id="eclipse-projects-and-dls-launchers"><a class="header" href="#eclipse-projects-and-dls-launchers">Eclipse projects and DLS launchers</a></h2>
+<p>BOY screens name each other through the CS-Studio workspace: an Eclipse
+project whose <code>.project</code> links folder names to the directories that hold
+each module's screens. bobview resolves these links itself.</p>
+<p>DLS modules have no <code>.project</code> on disk, but the generated launcher
+<code>runcss.sh</code> beside a module's screens lists the links it gives CS-Studio
+(<code>links="${SCRIPT_DIR}=${project}/${module},…"</code>). bobview reads that list
+(it does not run the script, which needs <code>configure-ioc</code>), taking <code>version</code>
+from the module's <code>configure/VERSION</code> (else <code>dev</code>). So
+<code>…/vacuum/4-100/vacuumApp/opi/opi/diamondVacuumOverview.opi</code> opens as
+<code>…/vacuumApp/opi/opi/runcss.sh/vacuum_4-100/vacuum/diamondVacuumOverview.opi</code>:
+the CS-Studio path <code>/vacuum_4-100/vacuum/diamondVacuumOverview.opi</code> below the
+launcher, and links to other modules work.</p>
+<p>This is for BOY screens only: a <code>.bob</code> (even one Phoebus-style in place of an
+<code>.opi</code>, or one picked in a launcher project's folder) goes by its real path.
+A <code>.project</code> nearer the screen than the launcher, or beside it, wins when it
+links the screen (an empty one, as many DLS modules have, does not).</p>
+<p>The steps to open such screens are in
+<a href="explanations/../how-to/opi-projects.html">Open BOY screens from an Eclipse project or DLS module</a>.</p>
+<h2 id="launcher-commands"><a class="header" href="#launcher-commands">Launcher commands</a></h2>
+<p>DLS screens open others with command actions that run a launcher script,
+such as <code>./srCellVacuum 04</code>, which ends by running <code>runcss.sh DISPLAY -m MACROS</code> to start CS-Studio. For a local display, bobview runs a copy of such
+a script beside a stand-in <code>runcss.sh</code> that only records its arguments, and
+opens that display with those macros.</p>
+<p>A command that starts StripTool (<code>strip.py</code>, <code>strip.sh</code> or
+<code>buildStripToolconfig.sh</code> and the PV names, as in the DLS vacuum, gauge and
+RGA screens) opens a trend of those PVs instead; a last word without a <code>:</code>,
+such as <code>log_mbar</code>, is ignored. Other commands are not run.</p>
+<p>Running scripts is limited for safety; see
+<a href="explanations/writes.html#commands">Writes and safety</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="writes-and-safety"><a class="header" href="#writes-and-safety">Writes and safety</a></h1>
+<p>A viewer that can write to a control system needs to be predictable about
+when it does. This page explains the rules.</p>
+<p>Every write takes one route. A control or a <code>write_pv</code> action calls
+<code>Pv::write</code> (or <code>Pv::write_long_string</code>, for text a string-format widget
+writes to a char array). Read-only mode refuses it there, unless it is to a
+<code>loc://</code> PV. Otherwise it goes to the PV's writer: the queue of its backend
+task for CA and PVA, which converts the text to the PV's type and sends it;
+the value itself for <code>loc://</code>; or the PV Web Socket in a browser. On the
+desktop a refused or failed write becomes a message in the status line; the
+browser is <a href="explanations/writes.html#in-the-browser">below</a>.</p>
+<h2 id="read-only-mode"><a class="header" href="#read-only-mode">Read-only mode</a></h2>
+<p><code>--read-only</code> refuses every write to a PV: controls are disabled and a write
+action says in the status line why it did nothing. <code>loc://</code> PVs are exempt,
+as they live inside bobview and can't reach a control system.</p>
+<h2 id="access-rights"><a class="header" href="#access-rights">Access rights</a></h2>
+<p>Channel Access reports whether a PV is writable, and controls follow it. PV
+Access does not report access rights, so such a PV is assumed writable (the
+PV details say "unknown"), and a put the server refuses is shown as a write
+error in the status line and the PV details.</p>
+<h2 id="writes-are-never-applied-late"><a class="header" href="#writes-are-never-applied-late">Writes are never applied late</a></h2>
+<p>A write to a CA or PVA PV that was connected and has dropped is refused at
+once, rather than queued and applied when it comes back, possibly much
+later; the status line says so. So is a write while 16 earlier writes to the
+same PV still wait.</p>
+<p>A write to a PV that has yet to connect (as a <code>write_pv</code> action to a PV not
+on the display makes) waits for it, up to 5 s over CA, without holding up
+the PV's other events. The writes behind it wait in that queue (so while it
+waits, a 17th is refused), and fail with it if it gives up.</p>
+<h2 id="displays-from-the-web"><a class="header" href="#displays-from-the-web">Displays from the web</a></h2>
+<p>A <code>write_pv</code> action and the toggle script write at once, as in Phoebus,
+whether the display came from a local file or an <code>http://</code> or <code>https://</code>
+URL. To open displays without letting them write, use <code>--read-only</code>, which
+refuses every write.</p>
+<h2 id="commands"><a class="header" href="#commands">Commands</a></h2>
+<p>No command is ever run for a display fetched over http(s), nor in a
+<code>command_directory</code> on the web. Only a launcher script that resolves (after
+macros, <code>..</code> and project links) to a local file beside or under the
+display, or in a linked folder of its Eclipse project, is run. Anything
+else, such as an absolute path elsewhere or a <code>../..</code> escape, is refused and
+logged, as is a script that any user may change (world-writable, or in a
+world-writable folder). Each script run is logged.</p>
+<h2 id="in-the-browser-1"><a class="header" href="#in-the-browser-1">In the browser</a></h2>
+<p><code>bobview-server</code> writes as its own user, so it allows writes only with
+<code>--write</code>, and each write must carry a token. A page with a token loads
+displays only from its own server, and sends the token only to a PVWS on
+its own server, so a link naming someone else's display or <code>&amp;pvws=</code> cannot
+write with it. The page removes the token from its address after reading
+it.</p>
+<p>Writes to a PV that was connected and has dropped fail at once, and at most
+16 may wait for one PV, as on the desktop. One to a PV that has yet to
+connect fails after 5 s, which the page sees only as the PV's write error,
+not as a message.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="command-line"><a class="header" href="#command-line">Command line</a></h1>
+<h2 id="bobview-1"><a class="header" href="#bobview-1">bobview</a></h2>
+<pre><code class="language-text">bobview [OPTIONS] [DISPLAY]
+</code></pre>
+<p><code>DISPLAY</code> is a <code>.bob</code> or <code>.opi</code> file, or an <code>http://</code> or <code>https://</code> URL.
+With no display, bobview restores the default window layout when one has
+been saved, else opens <code>index.bob</code> from the bundled displays
+(<code>~/.local/share/bobview/displays</code>) when present, else a file chooser.</p>
+<div class="table-wrapper"><table><thead><tr><th>option</th><th>meaning</th></tr></thead><tbody>
+<tr><td><code>-m</code>, <code>--macros P=X,R=Y</code></td><td>macros for the display</td></tr>
+<tr><td><code>-p</code>, <code>--project DIR</code></td><td>open the display through the linked folders of the Eclipse project in <code>DIR</code> (its <code>.project</code>, or for a BOY <code>.opi</code> screen the links of a DLS <code>runcss.sh</code> in <code>DIR</code>); see <a href="reference/../how-to/opi-projects.html">Open BOY screens</a></td></tr>
+<tr><td><code>-z</code>, <code>--zoom FACTOR</code></td><td>fixed zoom, 0.2 to 5, instead of fitting the window</td></tr>
+<tr><td><code>-f</code>, <code>--fullscreen</code></td><td>start full screen</td></tr>
+<tr><td><code>--read-only</code></td><td>refuse every write to a PV except <code>loc://</code> ones; see <a href="reference/../explanations/writes.html">Writes and safety</a></td></tr>
+<tr><td><code>--layout NAME</code></td><td>restore the saved layout <code>NAME</code></td></tr>
+<tr><td><code>--no-layout</code></td><td>don't restore the default layout</td></tr>
+<tr><td><code>--ui-scale F</code> or <code>auto</code></td><td>size of the toolbar and menus relative to the desktop's scale, 1 being the desktop's own (default auto: smaller on a small high-DPI screen)</td></tr>
+<tr><td><code>--snapshot OUT.png</code></td><td>render to a PNG without a window and exit; see <a href="reference/../how-to/snapshots.html">Take snapshots</a></td></tr>
+<tr><td><code>--size WxH</code> or <code>auto</code></td><td>snapshot size in pixels (default <code>1280x800</code>); <code>auto</code> sizes it as a window manager would, on a 1920x1080 monitor</td></tr>
+<tr><td><code>--scale-factor F</code></td><td>snapshot as on a screen with this desktop scale, e.g. 2.75 for a phone (default 1)</td></tr>
+<tr><td><code>--wait SECONDS</code></td><td>time for PVs to connect before a snapshot (default 2)</td></tr>
+<tr><td><code>--click X,Y</code></td><td>click here before the snapshot (repeatable)</td></tr>
+<tr><td><code>--right-click X,Y</code></td><td>right-click here before the snapshot (repeatable)</td></tr>
+<tr><td><code>--settle SECONDS</code></td><td>time after the last click before the snapshot (default 1)</td></tr>
+<tr><td><code>-h</code>, <code>--help</code></td><td>show help</td></tr>
+<tr><td><code>-V</code>, <code>--version</code></td><td>show the version</td></tr>
+</tbody></table>
+</div>
+<h2 id="bobview-ssh"><a class="header" href="#bobview-ssh">bobview-ssh</a></h2>
+<pre><code class="language-text">bobview-ssh [OPTIONS] [DISPLAY]
+</code></pre>
+<p>Runs <code>bobview</code> with the same arguments, rendering with Mesa in software. See
+<a href="reference/../how-to/software-rendering.html">Choose bobview or bobview-ssh</a>.</p>
+<h2 id="bobview-probe"><a class="header" href="#bobview-probe">bobview-probe</a></h2>
+<pre><code class="language-text">bobview-probe [--seconds N] [--put NAME=VALUE]... NAME...
+</code></pre>
+<p>Prints live values of PVs through bobview's PV layer, for <code>N</code> seconds
+(default 5). <code>--put</code> writes a value first (repeatable). PV names take the
+same prefixes as in a display (<code>pva://</code>, <code>loc://</code> …).</p>
+<h2 id="bobview-server"><a class="header" href="#bobview-server">bobview-server</a></h2>
+<pre><code class="language-text">bobview-server [OPTIONS]
+</code></pre>
+<p>Serves the bobview web build, <code>.bob</code> files and a PV Web Socket on one port.
+Open <code>http://HOST:PORT/?display=FILE.bob</code> in a browser (default
+<code>index.bob</code>). See <a href="reference/../how-to/deploy-server.html">Deploy bobview-server for others</a>.</p>
+<div class="table-wrapper"><table><thead><tr><th>option</th><th>meaning</th></tr></thead><tbody>
+<tr><td><code>-p</code>, <code>--port PORT</code></td><td>port to listen on (default 8080)</td></tr>
+<tr><td><code>--bind ADDR</code></td><td>address to listen on (default <code>127.0.0.1</code>, this machine only; <code>0.0.0.0</code> is every interface)</td></tr>
+<tr><td><code>--web DIR</code></td><td>the web build from <code>scripts/build-web.sh</code> (default <code>../share/bobview/web</code> next to this binary, else <code>dist/web</code>)</td></tr>
+<tr><td><code>--opi DIR</code></td><td>serve <code>.bob</code> files from here; they take precedence over files of the same name in the web build</td></tr>
+<tr><td><code>--follow-symlinks</code></td><td>serve files through symbolic links that lead out of <code>--opi</code> or <code>--web</code> (refused by default)</td></tr>
+<tr><td><code>--write</code></td><td>let browsers write to PVs (off by default, as in PVWS); every write must carry the write token</td></tr>
+<tr><td><code>--write-token TOKEN</code></td><td>the token <code>--write</code> wants (default: <code>$BOBVIEW_WRITE_TOKEN</code> if set and not empty, else a random one printed at startup); prefer the variable, as arguments show in <code>ps</code></td></tr>
+<tr><td><code>--allow-origin ORIGIN</code></td><td>also let pages from <code>ORIGIN</code> connect, e.g. <code>https://host.example.com</code> (repeatable)</td></tr>
+<tr><td><code>--host NAME</code></td><td>let browsers call this server <code>NAME</code>, as well as an IP address, <code>localhost</code>, this machine's name and the hosts of <code>--allow-origin</code> (repeatable)</td></tr>
+<tr><td><code>--max-per-ip N</code></td><td>most clients at once from one address (default 10)</td></tr>
+<tr><td><code>--throttle-ms MS</code></td><td>least time between two batches of updates to one client (default 100)</td></tr>
+<tr><td><code>-h</code>, <code>--help</code></td><td>show help</td></tr>
+<tr><td><code>-V</code>, <code>--version</code></td><td>show the version</td></tr>
+</tbody></table>
+</div>
+<h2 id="bobview-testioc"><a class="header" href="#bobview-testioc">bobview-testioc</a></h2>
+<pre><code class="language-text">bobview-testioc [--only ea|motor|cam]...
+</code></pre>
+<p>Serves the simulated BL01T PVs; by default all three parts. See
+<a href="reference/testioc.html">bobview-testioc</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="environment-variables"><a class="header" href="#environment-variables">Environment variables</a></h1>
+<h2 id="epics"><a class="header" href="#epics">EPICS</a></h2>
+<p>bobview, <code>bobview-probe</code> and <code>bobview-server</code> read the standard EPICS client
+variables:</p>
+<div class="table-wrapper"><table><thead><tr><th>variable</th><th>meaning</th></tr></thead><tbody>
+<tr><td><code>EPICS_CA_ADDR_LIST</code></td><td>hosts or broadcast addresses to search for CA PVs</td></tr>
+<tr><td><code>EPICS_CA_AUTO_ADDR_LIST</code></td><td><code>NO</code> to search only <code>EPICS_CA_ADDR_LIST</code></td></tr>
+<tr><td><code>EPICS_CA_NAME_SERVERS</code></td><td><code>host:port</code> of CA name servers (gateways) reached over TCP</td></tr>
+<tr><td><code>EPICS_PVA_ADDR_LIST</code></td><td>hosts or broadcast addresses to search for PVA PVs</td></tr>
+<tr><td><code>EPICS_PVA_AUTO_ADDR_LIST</code></td><td><code>NO</code> to search only <code>EPICS_PVA_ADDR_LIST</code></td></tr>
+<tr><td><code>EPICS_PVA_NAME_SERVERS</code></td><td><code>host:port</code> of PVA servers reached over TCP</td></tr>
+</tbody></table>
+</div>
+<p><code>bobview-testioc</code> reads the server variables: <code>EPICS_CA_SERVER_PORT</code>,
+<code>EPICS_CAS_*</code>, <code>EPICS_PVAS_SERVER_PORT</code> / <code>EPICS_PVA_SERVER_PORT</code> (TCP,
+default 5075) and <code>EPICS_PVAS_BROADCAST_PORT</code> (UDP search, default 5076).</p>
+<h2 id="bobview-2"><a class="header" href="#bobview-2">bobview</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>variable</th><th>meaning</th></tr></thead><tbody>
+<tr><td><code>BOBVIEW_LOG</code></td><td>log level, e.g. <code>debug</code> for more output</td></tr>
+<tr><td><code>BOBVIEW_UI_SCALE</code></td><td>as <code>--ui-scale</code></td></tr>
+<tr><td><code>XDG_CONFIG_HOME</code></td><td>layouts are in <code>$XDG_CONFIG_HOME/bobview/layouts</code> (default <code>~/.config/bobview/layouts</code>)</td></tr>
+<tr><td><code>WAYLAND_DISPLAY</code></td><td>set it empty to run under XWayland, so layouts keep window positions</td></tr>
+</tbody></table>
+</div>
+<p>Displays opened from files also fall back to environment variables for
+macros they don't define; see <a href="reference/macros-rules-pvs.html">Macros, rules and PV types</a>.</p>
+<h2 id="bobview-server-1"><a class="header" href="#bobview-server-1">bobview-server</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>variable</th><th>meaning</th></tr></thead><tbody>
+<tr><td><code>BOBVIEW_WRITE_TOKEN</code></td><td>the write token for <code>--write</code>; an empty value counts as unset</td></tr>
+</tbody></table>
+</div>
+<h2 id="tests"><a class="header" href="#tests">Tests</a></h2>
+<p>The interop tests in <code>crates/pv/tests/interop.rs</code> are skipped unless these
+name PVs to read:</p>
+<div class="table-wrapper"><table><thead><tr><th>variable</th><th>meaning</th></tr></thead><tbody>
+<tr><td><code>BOBVIEW_INTEROP_CA_PV</code></td><td>a PV served by the IOC over Channel Access</td></tr>
+<tr><td><code>BOBVIEW_INTEROP_PVA_PV</code></td><td>a PV served by the IOC over PV Access (PVXS)</td></tr>
+<tr><td><code>BOBVIEW_INTEROP_GW_PV</code></td><td>a PV reached through ca-gateway (CA)</td></tr>
+<tr><td><code>BOBVIEW_INTEROP_WRITE_PV</code></td><td>optional writable numeric PV; set to 7 and read back</td></tr>
+<tr><td><code>BOBVIEW_INTEROP_REQUIRE</code></td><td><code>1</code> to fail instead of skipping when a variable is missing</td></tr>
+</tbody></table>
+</div><div style="break-before: page; page-break-before: always;"></div><h1 id="widgets"><a class="header" href="#widgets">Widgets</a></h1>
+<p>The Phoebus Display Builder widgets bobview draws, and how far it goes with
+each. BOY <code>.opi</code> widgets are translated to these; see
+<a href="reference/boy-widgets.html">BOY widgets</a>.</p>
+<div class="table-wrapper"><table><thead><tr><th>widgets</th><th>notes</th></tr></thead><tbody>
+<tr><td>label, textupdate, textentry</td><td>formats: default, decimal, exponential, engineering, hex, compact, string, sexagesimal (also HMS and DMS), binary, significant; units, precision; typed text is parsed as Phoebus does (units dropped, <code>0x</code>/<code>0b</code> numbers, enum labels)</td></tr>
+<tr><td>led, multi_state_led, byte_monitor</td><td></td></tr>
+<tr><td>action_button, bool_button, choice, radio, combo, checkbox</td><td>open display and write PV actions</td></tr>
+<tr><td>scaledslider, scrollbar, spinner</td><td></td></tr>
+<tr><td>linearmeter</td><td>scale, warning regions from the levels (the PV's alarm limits with <code>limits_from_pv</code>), limit markers, needle; horizontal or vertical</td></tr>
+<tr><td>meter</td><td>a dial: scale (linear or <code>log_scale</code>), warning regions from the levels (the PV's alarm limits with <code>limits_from_pv</code>), needle</td></tr>
+<tr><td>progressbar, tank, thermometer</td><td>one shared bar renderer (tank and thermometer are vertical bars with their own default fill colours)</td></tr>
+<tr><td>xyplot</td><td>line, step and bar traces with markers against index or an x PV; several y axes, autoscale, log scale, grid, legend</td></tr>
+<tr><td>stripchart</td><td>its traces' PVs over the last <code>time_range</code>, sampled from when the display opened, on the first y axis (autoscale or fixed, log scale, grid), legend</td></tr>
+<tr><td>rectangle, ellipse, arc, polyline, polygon</td><td>dashed and dotted <code>line_style</code> for rectangles and polylines</td></tr>
+<tr><td>group, tabs, embedded, navtabs</td><td>macros pass down; embedded resize modes 0–2 and 4 (crop)</td></tr>
+<tr><td>image</td><td>PVA NTNDArray (uncompressed, mono or RGB1) or a CA array shaped by <code>data_width</code>/<code>data_height</code>; Phoebus colour maps, autoscale or fixed range, <code>unsigned</code>, colour bar with a scale; toolbar to zoom, pan and place a crosshair that reads out the pixel value; decimated when a side is over 2048 pixels, to keep drawing fast</td></tr>
+<tr><td>symbol, picture</td><td>SVG or PNG files, local or fetched next to the display; the PV value picks the symbol (<code>initial_index</code>, <code>array_index</code>, <code>fallback_symbol</code>; an empty one draws nothing), rotation, <code>preserve_ratio</code>/<code>stretch_image</code>, opacity, overlay for a disconnected PV; <code>run_actions_on_mouse_click</code> runs the symbol's actions when clicked; images inside an SVG are drawn only when embedded (<code>data:</code> URLs); a strip of frames <code>sub_image_width</code> wide (DLS EDM symbols) shows frame <code>image_index</code></td></tr>
+</tbody></table>
+</div>
+<h2 id="common-to-all-widgets"><a class="header" href="#common-to-all-widgets">Common to all widgets</a></h2>
+<p><code>border_width</code>/<code>border_color</code> borders, alarm borders, dashed borders for
+disconnected PVs, and label and text update <code>rotation_step</code>. Macros and
+rules are described in <a href="reference/macros-rules-pvs.html">Macros, rules and PV types</a>.</p>
+<h2 id="unsupported"><a class="header" href="#unsupported">Unsupported</a></h2>
+<p>Unsupported widgets, such as table, webbrowser, array, fileselector and
+byte-array, are drawn as a grey placeholder labelled with the widget type
+and PV name, and counted in the status line.</p>
+<h2 id="not-yet"><a class="header" href="#not-yet">Not yet</a></h2>
+<ul>
+<li>PV Access field paths (<code>pva://name/field</code>), and <code>sys://</code> and other PV
+types (shown as not supported)</li>
+<li>compressed (codec) images, image axes, ROIs and cursor PVs</li>
+<li>the XY plot <code>markers</code>, error bars and toolbar</li>
+<li>the strip chart's toolbar and second y axes</li>
+<li>GIF and JPEG images (symbols and pictures show their fallback or a
+placeholder), and text inside SVG images</li>
+<li>scripts: an <code>execute</code> action logs that it is not supported, except the
+"toggle the widget's PV" script that techui-builder puts in synoptic
+symbols, which bobview recognises and runs itself</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="boy-widgets"><a class="header" href="#boy-widgets">BOY widgets</a></h1>
+<p>How each CS-Studio BOY widget in an <code>.opi</code> is drawn. Background on the
+translation is in <a href="reference/../explanations/boy.html">How BOY screens are translated</a>.</p>
+<div class="table-wrapper"><table><thead><tr><th>BOY widget</th><th>drawn as</th></tr></thead><tbody>
+<tr><td>Rectangle, RoundedRectangle, Ellipse, arc, polyline, polygon</td><td>the shapes (BOY borders become outlines, points made relative, <code>alpha</code>)</td></tr>
+<tr><td>Label, TextUpdate, TextInput</td><td>label, textupdate, textentry (<code>format_type</code>, <code>precision_from_pv</code>, borders inside the bounds, <code>rotation_angle</code>); a text update or input with text and no PV is a label</td></tr>
+<tr><td>groupingContainer, linkingContainer</td><td>group (style from <code>border_style</code>), embedded (<code>opi_file</code>, <code>resize_behaviour</code>; a title bar or group box border becomes a group around it)</td></tr>
+<tr><td>ActionButton, MenuButton, BoolButton, choiceButton</td><td>action_button (the <code>push_action_index</code> action first), combo or action button with a menu, bool_button (an EDM message button with no PV writes its push action), choice</td></tr>
+<tr><td>LED, bytemonitor, progressbar, meter, scaledslider</td><td>led or multi_state_led, byte_monitor, progressbar with its value label, meter, scaledslider</td></tr>
+<tr><td>edm.symbolwidget, MultistateMonitorWidget, ImageBoolIndicator, Image</td><td>symbol (an image strip, or a numbered set of images, nothing for a state without one), picture</td></tr>
+<tr><td>detailpanel (DLS)</td><td>a group with each row's name and content</td></tr>
+<tr><td>xyGraph, tab (TabbedContainer)</td><td>xyplot (numbered axes and traces, rules on a trace's properties), tabs (one grouping container per tab)</td></tr>
+<tr><td>edm.menumux</td><td>combo on its first target PV (writes the item's label)</td></tr>
+<tr><td>others</td><td>placeholders</td></tr>
+</tbody></table>
+</div><div style="break-before: page; page-break-before: always;"></div><h1 id="macros-rules-and-pv-types"><a class="header" href="#macros-rules-and-pv-types">Macros, rules and PV types</a></h1>
+<h2 id="macros"><a class="header" href="#macros">Macros</a></h2>
+<ul>
+<li><code>$(X)</code> and <code>${X}</code>, with defaults.</li>
+<li>Widget properties such as <code>$(pv_name)</code>, and <code>$(actions)</code> in a tooltip.</li>
+<li>Macros pass down through groups, tabs and embedded displays.</li>
+<li>In displays opened from files, a macro that isn't defined falls back to
+the environment variable of the same name (in widget properties and the
+display name).</li>
+<li>The display name, with macros expanded (or the file name if it has none),
+is the window title.</li>
+</ul>
+<p>Give macros on the command line with <code>-m P=X,R=Y</code>, or in a browser with
+<code>&amp;macros=P=X,R=Y</code>.</p>
+<h2 id="rules"><a class="header" href="#rules">Rules</a></h2>
+<p>Rules are expressions over <code>pv0</code>, <code>pvStr0</code>, <code>pvSev0</code>, <code>pvLegacySev0</code> … that
+set any property, or one item of a list such as <code>symbols[0]</code>, including the
+position, size and PV. Output expression rules are supported, and macros in
+rules are expanded.</p>
+<ul>
+<li>Operators: arithmetic, bitwise (including shifts) and logical.</li>
+<li>Operators bind as in Phoebus's Jython for a <code>.bob</code>, or BOY's JavaScript
+for an <code>.opi</code>.</li>
+<li>A lone <code>=</code> is <code>==</code> in a <code>.bob</code>, as Phoebus makes it.</li>
+<li>Unlike Jython, bitwise operators take the integer part of a double such
+as <code>pv0</code>, where Jython fails the rule.</li>
+<li>In an <code>.opi</code>, <code>pvSev0</code> becomes <code>pvLegacySev0</code> (BOY's severity numbers) and
+<code>widget.getValue()</code> reads the widget's own PV.</li>
+</ul>
+<h2 id="pv-types"><a class="header" href="#pv-types">PV types</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>PV name</th><th>what</th></tr></thead><tbody>
+<tr><td><code>name</code></td><td>Channel Access</td></tr>
+<tr><td><code>ca://name</code></td><td>Channel Access</td></tr>
+<tr><td><code>pva://name</code></td><td>PV Access</td></tr>
+<tr><td><code>loc://name</code></td><td>a local PV inside bobview, never written to the control system</td></tr>
+<tr><td><code>sim://…</code></td><td>a simulated PV, such as <code>sim://sine(0, 100, 0.1)</code></td></tr>
+<tr><td><code>=expression</code>, <code>eq://expression</code></td><td>a formula PV</td></tr>
+</tbody></table>
+</div>
+<p>Not yet supported: <code>sys://</code> and other PV types (shown as not supported), and
+PV Access field paths (<code>pva://name/field</code>). In a browser, CA and PVA PVs
+come over PVWS, and <code>loc://</code> and <code>sim://</code> PVs are made in the page.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="the-window-and-its-controls"><a class="header" href="#the-window-and-its-controls">The window and its controls</a></h1>
+<h2 id="main-toolbar"><a class="header" href="#main-toolbar">Main toolbar</a></h2>
+<p>From the left: <strong>Back</strong>, <strong>Forward</strong>, <strong>Home</strong> and <strong>Reload</strong>; zoom out,
+the zoom, zoom in and <strong>Fit</strong>; the <strong>navigator</strong> and <strong>Open…</strong>; the
+display's name; and on the right the window's <strong>pin</strong>, the <strong>layout list</strong>
+and <strong>☰</strong>, a menu of the rest (Auto-size and the layout actions).</p>
+<ul>
+<li>Clicking the zoom shows the display at 100% and sizes the window to it
+(and the navigator, when shown).</li>
+<li>A narrow window keeps Back, Home, the zoom and Fit, and moves the rest
+into ☰.</li>
+<li>On a small high-DPI screen the toolbar and menus are scaled down so they
+take a small share of it; <code>--ui-scale F</code> (or <code>BOBVIEW_UI_SCALE=F</code>) fixes
+their size.</li>
+</ul>
+<h2 id="window-size"><a class="header" href="#window-size">Window size</a></h2>
+<p>The window opens at the size of the first display (when the screen has
+room). With <strong>Auto-size</strong> (in ☰, on by default) it is resized to each
+display you open, unless it is maximised or full screen; turn it off to keep
+the window's size and scale each display to fit. <code>-z ZOOM</code> fixes the zoom
+instead of fitting the window.</p>
+<h2 id="on-a-widget"><a class="header" href="#on-a-widget">On a widget</a></h2>
+<ul>
+<li><strong>Hover</strong> to see its PV and value.</li>
+<li><strong>Right-click</strong> (long-press on a touch screen) to copy the PV name or
+value, open the PV details, <strong>Trend</strong> it, or <strong>Trend with rule PVs</strong>.</li>
+<li>On a touch screen, pinch to zoom.</li>
+</ul>
+<h2 id="display-windows"><a class="header" href="#display-windows">Display windows</a></h2>
+<p>A display window (one opened beside the main window; see
+<a href="reference/../explanations/windows.html">Pinned windows and the viewer</a>) has the native
+title bar only: its toolbar (Back, Forward, Reload, zoom and Home) is hidden
+until you show it. While the pointer is over the window, small buttons
+appear in the top-right corner of the display: Back (while the toolbar is
+hidden), the window's pin, and a chevron that shows or hides the toolbar.
+The right-click menu on the display's background has <strong>Show toolbar</strong> and
+<strong>Close</strong>. Pinned windows have 📌 before their title.</p>
+<h2 id="keys"><a class="header" href="#keys">Keys</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>key</th><th>action</th></tr></thead><tbody>
+<tr><td>Ctrl+R</td><td>reload</td></tr>
+<tr><td>Alt+← / Alt+→</td><td>back / forward</td></tr>
+<tr><td>Ctrl+W</td><td>close the window (the main window quits bobview and closes its windows)</td></tr>
+<tr><td>Ctrl+T</td><td>show or hide a display window's toolbar</td></tr>
+<tr><td>shift+click on a link</td><td>open in a new window</td></tr>
+<tr><td>ctrl+click on a link</td><td>open in place</td></tr>
+</tbody></table>
+</div>
+<h2 id="navigator"><a class="header" href="#navigator">Navigator</a></h2>
+<p>The navigator button shows, beside the main window's display, a tree of the
+displays the home display links to, the displays those link to, and so on.</p>
+<ul>
+<li>A display's links are its widgets' Open display actions, including those
+in groups, tabs and embedded displays, each display and macros once,
+named by its button's text (or, in a menu, the action's description).</li>
+<li>A link with no text of its own, or the same text as another link on its
+display (a row of identical device symbols), is named by the display it
+opens once that has been read: by the words of its title that macros fill
+in, such as <code>LB-VA-IONP-04</code> from <code>Ion Pump Controller - $(device)</code>, else
+by its whole title. The tooltip gives the title, file and macros.</li>
+<li>Clicking a node opens its display as a link in the main window would, so
+with the main window pinned it goes to the viewer; shift and ctrl work as
+for a link. Displays open in a window are in <strong>bold</strong>.</li>
+<li>Displays are read from their files, without connecting their PVs, as
+their nodes are shown, so the tree is read one level ahead of what is
+open. A display that links back to one above it is marked ↻ and not opened
+again; one that can't be read is marked ⚠. A command action's display (a
+DLS launcher script) is found by running its script, so only when its node
+is opened or clicked.</li>
+<li>The filter box lists the displays read so far whose name or file matches;
+⟳ reads them all again.</li>
+<li>Showing or hiding the navigator widens or narrows the window by its width
+(unless maximised or full screen), so the display keeps its size and zoom.</li>
+</ul>
+<h2 id="status-line"><a class="header" href="#status-line">Status line</a></h2>
+<p>Shows write errors and refusals, and counts "N widgets with scripts ignored"
+and "N unsupported widgets" for a display that has them.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="browser-page-parameters"><a class="header" href="#browser-page-parameters">Browser page parameters</a></h1>
+<p>The web build's page takes these query parameters:</p>
+<pre><code class="language-text">http://HOST:PORT/?display=FILE.bob&amp;macros=P=X,R=Y&amp;zoom=1.5
+</code></pre>
+<div class="table-wrapper"><table><thead><tr><th>parameter</th><th>meaning</th></tr></thead><tbody>
+<tr><td><code>display</code></td><td>the display to open, a path relative to the page or a URL (default <code>index.bob</code>); a URL on another server must allow cross-origin requests, and is refused when the page has a write token</td></tr>
+<tr><td><code>macros</code></td><td>macros, <code>P=X,R=Y</code></td></tr>
+<tr><td><code>zoom</code></td><td>a fixed zoom factor instead of fitting the page</td></tr>
+<tr><td><code>pvws</code></td><td>another PVWS server: <code>host[:port]</code> (meaning <code>wss://host[:port]/pvws/pv</code>, or <code>ws://</code> when the page is plain <code>http:</code> and the port isn't 443), or a full <code>ws://</code> or <code>wss://</code> URL; default <code>/pvws/pv</code> on the page's own server</td></tr>
+<tr><td><code>token</code></td><td>the write token of a <code>bobview-server</code> started with <code>--write</code>; removed from the address once read</td></tr>
+</tbody></table>
+</div>
+<h2 id="without-bobview-server"><a class="header" href="#without-bobview-server">Without bobview-server</a></h2>
+<p>The web build (<code>dist/web</code> from <code>scripts/build-web.sh</code>, or
+<code>share/bobview/web</code> in a release) is a static site: serve it from any web
+server and point <code>pvws</code> at any PVWS server. The display's server must allow
+the page's origin (CORS) unless it is the same server.</p>
+<h2 id="differences-from-the-desktop"><a class="header" href="#differences-from-the-desktop">Differences from the desktop</a></h2>
+<ul>
+<li>Displays have no windows of their own: every link navigates in place, and
+the pin and layout controls are not shown.</li>
+<li>Images from PVA are not sent over PVWS yet.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="bobview-testioc-1"><a class="header" href="#bobview-testioc-1">bobview-testioc</a></h1>
+<p>A pure-Rust EPICS IOC that serves, over Channel Access and PV Access, a
+subset of the PVs of the
+<a href="https://github.com/epics-containers/example-services">epics-containers example-services</a>
+BL01T beamline, enough for its <code>opi/demo.bob</code> screen. It has no C
+dependencies, so it runs natively on an aarch64 phone where the real amd64
+IOC containers would need qemu. Built on the
+<a href="https://github.com/epics-rs/epics-rs">epics-rs</a> crates; uses about 15 MB RSS
+while streaming images.</p>
+<pre><code class="language-text">bobview-testioc [--only ea|motor|cam]...    # default: all three
+</code></pre>
+<p>It needs no shell and keeps running with stdin closed. <code>--only</code> applies to
+both protocols. Its environment variables are in
+<a href="reference/environment.html">Environment variables</a>.</p>
+<h2 id="pvs"><a class="header" href="#pvs">PVs</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>part</th><th>PVs</th><th>how</th></tr></thead><tbody>
+<tr><td><code>ea</code></td><td><code>bl01t:A</code>, <code>bl01t:B</code>, <code>bl01t:SUM</code></td><td>bl01t-ea-test-01's <code>ioc.db</code> verbatim, A=2.54, B=2.61</td></tr>
+<tr><td><code>motor</code></td><td><code>BL01T-MO-SIMC-01:M1</code>, <code>:M2</code></td><td>real motor record (motor-rs) on a simulated axis</td></tr>
+<tr><td><code>cam</code></td><td><code>BL01T-DI-CAM-01:DET:</code>, <code>:ARR:</code>, <code>:PVA:</code></td><td>soft records plus a small driver loop</td></tr>
+</tbody></table>
+</div>
+<p>The camera is not a real simDetector: it serves the ADBase / NDPluginBase
+records the demo screen uses (Acquire, AcquireTime, AcquirePeriod,
+ArrayCounter, ImageMode, NumImages, DetectorState_RBV, FilePath, ...) and
+counts frames at the acquire period, honouring Single / Multiple /
+Continuous. As in its <code>ioc.yaml</code> it starts acquiring continuously at
+AcquireTime 0.1.</p>
+<h2 id="pv-access"><a class="header" href="#pv-access">PV Access</a></h2>
+<p>Every record is also served over PVA the way QSRV does it: NTScalar for
+analog and long records (with display, control and alarm metadata), NTEnum
+for bi / bo / mbbi / mbbo, NTScalarArray for waveforms; gets, puts and
+monitors all work.</p>
+<p><code>BL01T-DI-CAM-01:PVA:OUTPUT</code> is an NTNDArray like NDPluginPVA's output. The
+image is simulated: 1024x1024 Int8 (<code>byteValue</code>, pixels 0..255 stored as i8
+bit patterns, as an Int8 simDetector produces), uncompressed, with drifting
+diagonal fringes, three gaussian spots on Lissajous paths and some noise. A
+frame is posted for every frame counted (10 Hz by default) while
+<code>DET:ArrayCallbacks</code> and <code>PVA:EnableCallbacks</code> are both on; <code>uniqueId</code> is
+the frame counter. To look at a frame without a viewer:</p>
+<pre><code class="language-bash">cargo run -p bobview-testioc --example frame_png -- /tmp/frame 1 50
+</code></pre>
+<h2 id="build-for-the-phone"><a class="header" href="#build-for-the-phone">Build for the phone</a></h2>
+<p>From x86_64:</p>
+<pre><code class="language-bash">cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.36 -p bobview-testioc
+</code></pre>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="rust-api"><a class="header" href="#rust-api">Rust API</a></h1>
+<p>The workspace's crates are documented with rustdoc, built into this book
+under <code>api/</code>.</p>
+<p>Libraries:</p>
+<ul>
+<li><a href="reference/../api/bob/index.html"><code>bob</code></a>: the display model, <code>.bob</code> and <code>.opi</code>
+reading, macros and project links</li>
+<li><a href="reference/../api/pv/index.html"><code>pv</code></a>: PV connections over CA, PVA, PVWS and local
+sources</li>
+<li><a href="reference/../api/testioc/index.html"><code>testioc</code></a>: the test IOC</li>
+</ul>
+<p>Programs, documented with their private items, since that is all they have:</p>
+<ul>
+<li><a href="reference/../api/bobview/index.html"><code>bobview</code></a>: the viewer, its egui app and
+widgets</li>
+<li><a href="reference/../api/bobview_server/index.html"><code>bobview_server</code></a>: the web server and
+its PV Web Socket</li>
+<li><a href="reference/../api/bobview_probe/index.html"><code>bobview_probe</code></a> and
+<a href="reference/../api/bobview_testioc/index.html"><code>bobview_testioc</code></a>: the command-line
+front ends of <code>bobview-probe</code> and <code>bobview-testioc</code></li>
+</ul>
+<p>The crates are on crates.io (see <a href="reference/../tutorials/crates-io.html">Install from crates.io</a>),
+but their API is not stable; it is documented for contributors.</p>
+<p>In a local build the links work when the book is built with
+<code>scripts/build-docs.sh</code> (see <a href="reference/../how-to/build.html#build-these-docs">Build from source</a>),
+not with a plain <code>mdbook serve</code>.</p>
+<h2 id="source-map"><a class="header" href="#source-map">Source map</a></h2>
+<p>The main source files, for finding your way in. See
+<a href="reference/../explanations/architecture.html">Architecture</a> for how they fit together.</p>
+<div class="table-wrapper"><table><thead><tr><th>file</th><th>what</th></tr></thead><tbody>
+<tr><td><strong><code>crates/bob/src/</code></strong></td><td></td></tr>
+<tr><td><code>lib.rs</code></td><td><code>Display</code> and <code>Widget</code>: a display kept close to its XML, parsed from a file or text</td></tr>
+<tr><td><code>opi.rs</code></td><td>translates a BOY <code>.opi</code>, element by element, into the <code>.bob</code> form</td></tr>
+<tr><td><code>macros.rs</code></td><td><code>$(X)</code> and <code>${X}</code> expansion</td></tr>
+<tr><td><code>source.rs</code></td><td>where a display comes from (file or URL), and finding the files it names</td></tr>
+<tr><td><code>project.rs</code></td><td>Eclipse project linked folders and DLS launcher paths</td></tr>
+<tr><td><code>group_link.rs</code>, <code>menu_mux.rs</code>, <code>opi_file_script.rs</code>, <code>trend.rs</code></td><td>BOY scripts and launchers recognised and done natively</td></tr>
+<tr><td><strong><code>crates/pv/src/</code></strong></td><td></td></tr>
+<tr><td><code>lib.rs</code></td><td><code>PvManager</code>, <code>Pv</code> and <code>PvState</code>: subscriptions, writes and the per-window repaint tags</td></tr>
+<tr><td><code>ca.rs</code>, <code>pva.rs</code></td><td>Channel Access and PV Access backends over epics-rs</td></tr>
+<tr><td><code>pvws.rs</code>, <code>pvws_msg.rs</code></td><td>the browser backend over a PV Web Socket</td></tr>
+<tr><td><code>local.rs</code>, <code>sim.rs</code>, <code>formula.rs</code></td><td><code>loc://</code>, <code>sim://</code> and formula PVs</td></tr>
+<tr><td><code>name.rs</code>, <code>value.rs</code></td><td>PV names and their prefixes; values and their conversions</td></tr>
+<tr><td><strong><code>crates/bobview/src/</code></strong></td><td></td></tr>
+<tr><td><code>main.rs</code></td><td>the command line, and starting the native or browser app</td></tr>
+<tr><td><code>app.rs</code></td><td><code>BobApp</code>: the windows, layouts, requests and repaints (see <a href="reference/../explanations/repaints.html">Threads, windows and repaints</a>)</td></tr>
+<tr><td><code>view.rs</code></td><td>one window's display, its loading and its Back and Forward</td></tr>
+<tr><td><code>fetch.rs</code></td><td>reading displays from files or over http(s), and caching them</td></tr>
+<tr><td><code>screen.rs</code></td><td>the screen builder: widgets with positions, macros, PVs and rules</td></tr>
+<tr><td><code>rules.rs</code></td><td>the rule expression language</td></tr>
+<tr><td><code>widgets.rs</code></td><td>painting and interaction for each widget type, and <code>Request</code></td></tr>
+<tr><td><code>image.rs</code>, <code>symbol.rs</code>, <code>svg.rs</code></td><td>the image widget; symbol and picture widgets, loaded on worker threads; safe SVG parsing</td></tr>
+<tr><td><code>plot.rs</code>, <code>meter.rs</code>, <code>trend.rs</code>, <code>axis.rs</code></td><td>XY plots, meters, trends and their shared scales</td></tr>
+<tr><td><code>format.rs</code></td><td>values as text and back, as Phoebus formats them</td></tr>
+<tr><td><code>tree.rs</code></td><td>the navigator</td></tr>
+<tr><td><code>pvmenu.rs</code></td><td>the PV context menu and details window</td></tr>
+<tr><td><code>layout.rs</code></td><td>saved window layouts</td></tr>
+<tr><td><code>launch.rs</code></td><td>running DLS launcher scripts for <code>.opi</code> command actions</td></tr>
+<tr><td><code>snapshot.rs</code></td><td>headless rendering to PNG</td></tr>
+<tr><td><strong><code>crates/bobview-server/src/</code></strong></td><td></td></tr>
+<tr><td><code>main.rs</code>, <code>files.rs</code>, <code>pvws.rs</code></td><td>the server, its file serving, and its PVWS onto <code>pv</code></td></tr>
+</tbody></table>
+</div><div style="break-before: page; page-break-before: always;"></div><h1 id="licences"><a class="header" href="#licences">Licences</a></h1>
+<p>bobview is Apache-2.0.</p>
+<p>The release binaries include third-party crates, among them the
+<a href="https://github.com/epics-rs/epics-rs">epics-rs</a> CA and PVA libraries
+(EPICS-style open licence), and embed the Liberation Sans fonts and a symbol
+subset of Noto Sans Math (both SIL Open Font Licence) and egui's default
+fonts. Their notices are in <code>THIRD_PARTY_LICENSES.txt</code> in each release
+tarball, generated by <code>scripts/third-party-licenses.py</code>.</p>
+<p><code>tests/displays/demo.bob</code> and the test IOC's <code>ea.db</code> come from
+epics-containers example-services (Apache-2.0).</p>
+<p>These docs draw their diagrams with <a href="https://mermaid.js.org">Mermaid</a>
+(MIT), in <code>docs/theme/mermaid.min.js</code>.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="theme/switcher.js"></script>
+        <script src="theme/mermaid.min.js"></script>
+        <script src="theme/mermaid-init.js"></script>
+
+        <script>
+        window.addEventListener('load', function() {
+            window.setTimeout(window.print, 100);
+        });
+        </script>
+
+    </div>
+    </body>
+</html>
