@@ -216,10 +216,11 @@ the module's screens folder (or its <code>runcss.sh</code>).</p>
 <h2 id="a-screen-that-needs-launcher-macros"><a class="header" href="#a-screen-that-needs-launcher-macros">A screen that needs launcher macros</a></h2>
 <p>DLS screens are often opened by a launcher script, such as
 <code>./srCellVacuum 04</code>, that supplies macros. For an <code>.opi</code> given on the command
-line in an Eclipse project (through its project path or with <code>--project</code>),
-bobview tries the launcher scripts in its directory to find them: the one
-named <code>&lt;screen&gt;.sh</code> first, with no arguments and with each number in the
-file name, bare and with an <code>r</code>. So:</p>
+line in an Eclipse project (through its project path, with <code>--project</code>, or
+by its real path beside a DLS <code>runcss.sh</code>), bobview tries the launcher
+scripts in its directory to find them: the one named <code>&lt;screen&gt;.sh</code> first,
+with no arguments and with each number in the file name, bare and with an
+<code>r</code>. So:</p>
 <div class="table-wrapper"><table><thead><tr><th>screen</th><th>macros from</th></tr></thead><tbody>
 <tr><td><code>linacVacuum.opi</code></td><td><code>linacVacuum.sh</code> (<code>dom=LI</code>)</td></tr>
 <tr><td><code>srCell05Vacuum.opi</code></td><td><code>srCellVacuum 05</code></td></tr>

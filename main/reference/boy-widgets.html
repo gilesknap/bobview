@@ -186,13 +186,14 @@
 translation is in <a href="../explanations/boy.html">How BOY screens are translated</a>.</p>
 <div class="table-wrapper"><table><thead><tr><th>BOY widget</th><th>drawn as</th></tr></thead><tbody>
 <tr><td>Rectangle, RoundedRectangle, Ellipse, arc, polyline, polygon</td><td>the shapes (BOY borders become outlines, points made relative, <code>alpha</code>)</td></tr>
-<tr><td>Label, TextUpdate, TextInput</td><td>label, textupdate, textentry (<code>format_type</code>, <code>precision_from_pv</code>, borders inside the bounds, <code>rotation_angle</code>); a text update or input with text and no PV is a label</td></tr>
+<tr><td>Label, TextUpdate, TextInput, NativeText</td><td>label, textupdate, textentry (<code>format_type</code>, <code>precision_from_pv</code>, borders inside the bounds, <code>rotation_angle</code>); a text update or input with text and no PV is a label</td></tr>
 <tr><td>groupingContainer, linkingContainer</td><td>group (style from <code>border_style</code>), embedded (<code>opi_file</code>, <code>resize_behaviour</code>; a title bar or group box border becomes a group around it)</td></tr>
-<tr><td>ActionButton, MenuButton, BoolButton, choiceButton</td><td>action_button (the <code>push_action_index</code> action first), combo or action button with a menu, bool_button (an EDM message button with no PV writes its push action), choice</td></tr>
-<tr><td>LED, bytemonitor, progressbar, meter, scaledslider</td><td>led or multi_state_led, byte_monitor, progressbar with its value label, meter, scaledslider</td></tr>
-<tr><td>edm.symbolwidget, MultistateMonitorWidget, ImageBoolIndicator, Image</td><td>symbol (an image strip, or a numbered set of images, nothing for a state without one), picture</td></tr>
+<tr><td>ActionButton, NativeButton, MenuButton, BoolButton, ImageBoolButton, BoolSwitch</td><td>action_button (the <code>push_action_index</code> action first; an EDM message button, a BoolButton with no PV, becomes one that writes its push action), combo or action button with a menu, bool_button, slide_button</td></tr>
+<tr><td>choiceButton, radioBox, checkbox, combo, spinner, scrollbar</td><td>choice, radio, checkbox, combo, spinner, scrollbar</td></tr>
+<tr><td>LED, bytemonitor, progressbar, tank, thermometer, meter, gauge, scaledslider, knob</td><td>led or multi_state_led, byte_monitor, progressbar with its value label, tank, thermometer, meter, scaledslider</td></tr>
+<tr><td>edm.symbolwidget, MultistateMonitorWidget, BoolMonitorWidget, ImageBoolIndicator, Image</td><td>symbol (an image strip, or a numbered set of images, nothing for a state without one), picture</td></tr>
 <tr><td>detailpanel (DLS)</td><td>a group with each row's name and content</td></tr>
-<tr><td>xyGraph, tab (TabbedContainer)</td><td>xyplot (numbered axes and traces, rules on a trace's properties), tabs (one grouping container per tab)</td></tr>
+<tr><td>xyGraph, intensityGraph, tab (TabbedContainer)</td><td>xyplot (numbered axes and traces, rules on a trace's properties), image, tabs (one grouping container per tab)</td></tr>
 <tr><td>edm.menumux</td><td>combo on its first target PV (writes the item's label)</td></tr>
 <tr><td>others</td><td>placeholders</td></tr>
 </tbody></table>

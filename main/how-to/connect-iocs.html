@@ -198,7 +198,9 @@ EPICS_PVA_NAME_SERVERS=gateway.example.com:5075 bobview screen.bob
 </code></pre>
 <p>The example-services <code>ca-gateway</code> listens on port 9064 of its host.</p>
 <h2 id="choose-the-protocol"><a class="header" href="#choose-the-protocol">Choose the protocol</a></h2>
-<p>PV names prefixed <code>pva://</code> use PV Access; all others use Channel Access.</p>
+<p>PV names prefixed <code>pva://</code> use PV Access; those with no prefix, or <code>ca://</code>,
+use Channel Access. The other prefixes are in
+<a href="../reference/macros-rules-pvs.html#pv-types">Macros, rules and PV types</a>.</p>
 <h2 id="check-a-pv-without-the-viewer"><a class="header" href="#check-a-pv-without-the-viewer">Check a PV without the viewer</a></h2>
 <p><code>bobview-probe</code> prints live values from the command line, and can write:</p>
 <pre><code class="language-bash">bobview-probe bl01t:SUM pva://bl01t:A

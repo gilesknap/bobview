@@ -215,10 +215,13 @@ where Jython would fail.</p>
 <h2 id="protocol-maturity"><a class="header" href="#protocol-maturity">Protocol maturity</a></h2>
 <p>Channel Access and PV Access come from the third-party
 <a href="https://github.com/epics-rs/epics-rs">epics-rs</a> crates, which are young; see
-<a href="architecture.html">Architecture</a>. So far bobview has mainly been exercised
-against the in-repo <code>bobview-testioc</code>, not a real softIOC, PVXS or
-ca-gateway. The <code>interop</code> CI job and <code>crates/pv/tests/interop.rs</code> are there
-to change that.</p>
+<a href="architecture.html">Architecture</a>. bobview has been used against real
+Diamond Light Source systems: the screens of beamlines p47 and b01-1, and
+the accelerator's diagnostics and vacuum display hierarchies. In CI, the
+<code>interop</code> job (<code>crates/pv/tests/interop.rs</code>) reads a PV over CA and over PVA
+from a PVXS <code>softIocPVX</code>, writes one over CA and reads it back, and reads one
+over CA through a ca-gateway; everything else is tested against the in-repo
+<code>bobview-testioc</code>.</p>
 
                     </main>
 
