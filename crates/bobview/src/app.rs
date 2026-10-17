@@ -2505,19 +2505,20 @@ mod tests {
             ),
         )
         .unwrap();
-        let names = |dir: &std::path::Path| -> Vec<(String, bool)> {
+        // Compared as paths, which take `/` as a separator on Windows too.
+        let names = |dir: &std::path::Path| -> Vec<(std::path::PathBuf, bool)> {
             super::list_dir(dir)
                 .into_iter()
-                .map(|(p, d)| (p.strip_prefix(&tmp).unwrap().display().to_string(), d))
+                .map(|(p, d)| (p.strip_prefix(&tmp).unwrap().to_path_buf(), d))
                 .collect()
         };
-        assert_eq!(names(&proj), [("proj/m".to_string(), true)]);
+        assert_eq!(names(&proj), [("proj/m".into(), true)]);
         assert_eq!(
             names(&proj.join("m")),
             [
-                ("proj/m/sub".to_string(), true),
-                ("proj/m/a.opi".to_string(), false),
-                ("proj/m/b.bob".to_string(), false)
+                ("proj/m/sub".into(), true),
+                ("proj/m/a.opi".into(), false),
+                ("proj/m/b.bob".into(), false)
             ]
         );
         std::fs::remove_dir_all(&tmp).unwrap();

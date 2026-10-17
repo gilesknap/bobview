@@ -855,8 +855,9 @@ mod tests {
         )
         .unwrap();
 
+        // Normalised, so `X/d.bob` is spelled as resolving a link spells it.
         let at = |file: &str, pairs: &[(&str, &str)]| Location {
-            source: Source::File(dir.join(file)),
+            source: Source::File(bob::project::normalize(&dir.join(file))),
             macros: Macros::from_pairs(pairs.iter().copied()),
         };
         let found = links(&at("top.bob", &[])).unwrap();

@@ -123,7 +123,7 @@ jobs:
         run: cargo build --release --workspace --target ${TARGET}
       - name: Test on Windows
         if: matrix.platform == 'windows'
-        run: cargo test --release --workspace --target ${TARGET}
+        run: cargo test --release --workspace --no-fail-fast --target ${TARGET}
       - name: Sign the macOS binaries ad hoc
         # arm64 macOS will not run unsigned code, and stripping can leave the
         # linker's signature invalid; ad hoc signing needs no certificate
