@@ -24,7 +24,7 @@ default 5075) and `EPICS_PVAS_BROADCAST_PORT` (UDP search, default 5076).
 | --- | --- |
 | `BOBVIEW_LOG` | log level, e.g. `debug` for more output |
 | `BOBVIEW_UI_SCALE` | as `--ui-scale` |
-| `XDG_CONFIG_HOME` | layouts are in `$XDG_CONFIG_HOME/bobview/layouts` (default `~/.config/bobview/layouts`) |
+| `XDG_CONFIG_HOME` | layouts are in `$XDG_CONFIG_HOME/bobview/layouts` (default `~/.config/bobview/layouts`; on Windows `%APPDATA%\bobview\layouts`) |
 | `WAYLAND_DISPLAY` | set it empty to run under XWayland, so layouts keep window positions |
 
 Displays opened from files also fall back to environment variables for

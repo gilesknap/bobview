@@ -286,12 +286,14 @@ impl Layout {
     }
 }
 
-/// `$XDG_CONFIG_HOME/bobview`, by default `~/.config/bobview`.
+/// `$XDG_CONFIG_HOME/bobview`, by default `~/.config/bobview` (on Windows
+/// `%APPDATA%\bobview` when neither variable is set).
 pub fn config_dir() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|d| !d.is_empty())
+    let var = |name| std::env::var_os(name).filter(|d| !d.is_empty());
+    let base = var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .or_else(|| var("APPDATA").filter(|_| cfg!(windows)).map(PathBuf::from))?;
     Some(base.join("bobview"))
 }
 

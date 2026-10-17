@@ -21,7 +21,7 @@ impl Source {
         if is_http(text) {
             Source::Url(encode(text))
         } else if let Some(path) = text.strip_prefix("file://") {
-            Source::File(PathBuf::from(path))
+            Source::File(PathBuf::from(file_url_path(path)))
         } else {
             Source::File(PathBuf::from(text))
         }
@@ -43,7 +43,7 @@ impl Source {
         match self {
             Source::Url(base) => Source::Url(join_url(base, file)),
             Source::File(path) => {
-                let file = file.strip_prefix("file://").unwrap_or(file);
+                let file = file.strip_prefix("file://").map_or(file, file_url_path);
                 let rel = std::path::Path::new(file);
                 match path.parent() {
                     Some(dir) if rel.is_relative() => Source::File(normalize(&dir.join(rel))),
@@ -66,6 +66,19 @@ impl fmt::Display for Source {
 impl From<PathBuf> for Source {
     fn from(p: PathBuf) -> Self {
         Source::File(p)
+    }
+}
+
+/// The path of a `file:` URL's path part: as it is, but on Windows
+/// without the `/` before a drive (`/C:/opi/a.bob`).
+pub(crate) fn file_url_path(path: &str) -> &str {
+    let drive = |p: &str| {
+        let b = p.as_bytes();
+        b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
+    };
+    match path.strip_prefix('/') {
+        Some(rest) if cfg!(windows) && drive(rest) => rest,
+        _ => path,
     }
 }
 
@@ -175,7 +188,30 @@ mod tests {
             Source::File("/tmp/a.bob".into())
         );
         assert_eq!(Source::parse("a/b.bob"), Source::File("a/b.bob".into()));
+        assert_eq!(
+            Source::parse(r"C:\opi\a.bob"),
+            Source::File(r"C:\opi\a.bob".into())
+        );
         assert_eq!(Source::parse("httpd.bob"), Source::File("httpd.bob".into()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_paths() {
+        assert_eq!(
+            Source::parse("file:///C:/opi/a.bob"),
+            Source::File(r"C:\opi\a.bob".into())
+        );
+        let f = Source::File(r"C:\opi\demo.bob".into());
+        assert_eq!(
+            f.resolve("sub/b.bob"),
+            Source::File(r"C:\opi\sub\b.bob".into())
+        );
+        assert_eq!(f.resolve("../x/b.bob"), Source::File(r"C:\x\b.bob".into()));
+        assert_eq!(
+            f.resolve("file:///D:/abs/b.bob"),
+            Source::File(r"D:\abs\b.bob".into())
+        );
     }
 
     #[test]

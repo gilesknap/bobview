@@ -571,7 +571,7 @@ fn location_path(location: &str, dir: &Path) -> Option<PathBuf> {
             Some(rest) => &rest[rest.find('/')?..],
             None => uri,
         };
-        PathBuf::from(percent_decode(path))
+        PathBuf::from(percent_decode(crate::source::file_url_path(path)))
     } else if let Some(path) = project_relative(location) {
         path
     } else {
@@ -910,6 +910,7 @@ $CSS_RUN_SCRIPT -o "${launch_opi}" -s -l "$links" "$@"
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlinked_screens_map_by_name_or_by_target() {
         let (root, opi, _) = module("runcss-links", Some("1-2"));

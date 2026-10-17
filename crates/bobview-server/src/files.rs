@@ -48,6 +48,8 @@ impl Roots {
                 "" | "." => {}
                 ".." => return Found::Missing,
                 s if s.contains('\\') || s.contains('\0') => return Found::Missing,
+                // A drive (`C:`) or a file's stream (`a.bob:s`) on Windows.
+                s if cfg!(windows) && s.contains(':') => return Found::Missing,
                 s => rel.push(s),
             }
         }
@@ -76,25 +78,14 @@ impl Roots {
             }
             // Without blocking, should a FIFO be swapped in meanwhile; the
             // check below refuses anything but a regular file.
-            let opened = {
-                use std::os::unix::fs::OpenOptionsExt;
-                std::fs::OpenOptions::new()
-                    .read(true)
-                    .custom_flags(libc::O_NONBLOCK)
-                    .open(&file)
-            };
-            let Ok(opened) = opened else {
+            let Ok(opened) = open_file(&file) else {
                 continue;
             };
             let checked = || -> Option<Metadata> {
-                use std::os::unix::fs::MetadataExt;
                 let real = std::fs::canonicalize(&file).ok()?;
                 let (now, then) = (std::fs::metadata(&real).ok()?, opened.metadata().ok()?);
                 // The real path is inside, and is the file that was opened.
-                (inside(&real)
-                    && then.is_file()
-                    && (now.dev(), now.ino()) == (then.dev(), then.ino()))
-                    .then_some(then)
+                (inside(&real) && then.is_file() && same_file(&now, &then)).then_some(then)
             };
             return match checked() {
                 Some(meta) => Found::File(opened, file, meta),
@@ -103,6 +94,36 @@ impl Roots {
         }
         Found::Missing
     }
+}
+
+/// Open `file` for reading, without blocking should it be a FIFO.
+#[cfg(unix)]
+fn open_file(file: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(file)
+}
+
+#[cfg(not(unix))]
+fn open_file(file: &Path) -> std::io::Result<File> {
+    File::open(file)
+}
+
+/// Whether `a` and `b` are of the same file.
+#[cfg(unix)]
+fn same_file(a: &Metadata, b: &Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    (a.dev(), a.ino()) == (b.dev(), b.ino())
+}
+
+/// Whether `a` and `b` are of the same file, as near as stable std can
+/// tell without a file index: the same size and times.
+#[cfg(not(unix))]
+fn same_file(a: &Metadata, b: &Metadata) -> bool {
+    let times = |m: &Metadata| (m.len(), m.modified().ok(), m.created().ok());
+    times(a) == times(b)
 }
 
 /// What a request path names.
@@ -156,14 +177,17 @@ struct Validators {
 
 impl Validators {
     fn of(meta: &Metadata) -> Self {
-        use std::os::unix::fs::MetadataExt;
         let modified = meta.modified().ok();
         let since = modified.and_then(|m| m.duration_since(UNIX_EPOCH).ok());
         let nanos = since.unwrap_or_default().as_nanos();
-        Self {
-            etag: format!("\"{:x}-{:x}-{nanos:x}\"", meta.ino(), meta.len()),
-            modified,
-        }
+        #[cfg(unix)]
+        let etag = {
+            use std::os::unix::fs::MetadataExt;
+            format!("\"{:x}-{:x}-{nanos:x}\"", meta.ino(), meta.len())
+        };
+        #[cfg(not(unix))]
+        let etag = format!("\"{:x}-{nanos:x}\"", meta.len());
+        Self { etag, modified }
     }
 
     fn last_modified(&self) -> Option<String> {
@@ -327,6 +351,7 @@ fn stream(mut file: File, first: u64, count: u64) -> std::io::Result<Body> {
 #[cfg(test)]
 mod tests {
     use super::{Found, Part, Roots, part};
+    #[cfg(unix)]
     use std::path::PathBuf;
 
     #[test]
@@ -347,6 +372,25 @@ mod tests {
         assert_eq!(part(Some("bytes=x-"), 10), Part::Whole);
     }
 
+    #[test]
+    fn drives_and_streams_are_missing() {
+        let base = std::env::temp_dir().join(format!("bobview-drives-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("a.bob"), "a").unwrap();
+        let roots = Roots::new(std::slice::from_ref(&base));
+        assert!(matches!(roots.open("/a.bob"), Found::File(..)));
+        for path in [
+            "/a.bob:s",
+            "/a.bob::$DATA",
+            "/C:/Windows/win.ini",
+            "/%5C%5Chost/x",
+        ] {
+            assert!(matches!(roots.open(path), Found::Missing), "{path}");
+        }
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[cfg(unix)]
     #[test]
     fn links_out_of_the_root_are_refused() {
         let base = std::env::temp_dir().join(format!("bobview-confine-{}", std::process::id()));

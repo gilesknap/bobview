@@ -39,8 +39,8 @@ and size. A layout from before windows were pinned pins them all if it was
 saved in multi-window mode, and none if not.
 
 Layouts are JSON files in `$XDG_CONFIG_HOME/bobview/layouts` (by default
-`~/.config/bobview/layouts`), so they can be copied between machines or
-kept under version control.
+`~/.config/bobview/layouts`, and on Windows `%APPDATA%\bobview\layouts`), so
+they can be copied between machines or kept under version control.
 
 ## Positions on Wayland and with changed monitors
 

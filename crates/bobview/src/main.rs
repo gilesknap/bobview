@@ -9,8 +9,28 @@ mod format;
 mod group_link;
 mod icons;
 mod image;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 mod launch;
+/// DLS launcher scripts are shell scripts: not run on Windows.
+#[cfg(not(any(unix, target_arch = "wasm32")))]
+mod launch {
+    use std::path::{Path, PathBuf};
+
+    use bob::{Macros, Source};
+
+    pub fn command_target(
+        _base: Option<&Source>,
+        _directory: Option<Source>,
+        command: &str,
+    ) -> Option<(PathBuf, Macros)> {
+        log::warn!("not running '{command}': launcher scripts are not run on this platform");
+        None
+    }
+
+    pub fn defaults(_file: &Path) -> Option<Macros> {
+        None
+    }
+}
 mod layout;
 mod meter;
 mod plot;

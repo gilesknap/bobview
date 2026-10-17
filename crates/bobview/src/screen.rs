@@ -564,7 +564,7 @@ pub(crate) fn title(display: &Display, macros: &Macros) -> String {
         Some(Source::Url(u)) => u.split(['?', '#']).next().unwrap_or("").to_string(),
         None => String::new(),
     };
-    let base = file.rsplit('/').next().unwrap_or("");
+    let base = file.rsplit(std::path::is_separator).next().unwrap_or("");
     base.rsplit_once('.')
         .map_or(base, |(stem, _)| stem)
         .to_string()

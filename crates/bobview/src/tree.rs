@@ -292,7 +292,7 @@ fn one_line(text: &str) -> String {
 /// A display's file name without its directory or extension.
 fn file_name(source: &Source) -> String {
     let text = source.to_string();
-    let base = text.rsplit('/').next().unwrap_or("");
+    let base = text.rsplit(std::path::is_separator).next().unwrap_or("");
     base.rsplit_once('.')
         .map_or(base, |(stem, _)| stem)
         .to_string()

@@ -67,4 +67,5 @@ with no arguments and with each number in the file name, bare and with an
 
 Macros given with `-m` override these. Screens with no number in their name
 (`srInjCellVacuum.opi` is cell 01) need `-m` with the macros their
-launcher would give, or opening from the overview.
+launcher would give, or opening from the overview. Launcher scripts are not
+run on Windows, so there every such screen needs `-m`.
