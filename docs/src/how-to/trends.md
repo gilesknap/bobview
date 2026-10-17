@@ -41,7 +41,8 @@ order:
 The pill in each trend's top bar shows the archiver and whether it can be
 reached (green), is being checked, or cannot be reached (red). Click it to
 switch to another archiver, or to none; the switch applies to every trend
-window, and is remembered.
+window, and is remembered for the next run unless `--archiver` or
+`BOBVIEW_ARCHIVER` names another.
 
 To try it without an appliance, run archiveview's mock archiver, which
 serves synthetic history for the test IOC's `bl01t:SUM` and a few

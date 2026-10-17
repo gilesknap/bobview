@@ -58,3 +58,15 @@ release itself with trusted publishing, which needs no stored token:
 The `publish` job then runs after the GitHub Release is made for each tag.
 A version can be published to crates.io only once, so fix a bad release
 with a new version.
+
+## archiveview
+
+Trend windows embed [archiveview](https://github.com/gilesknap/archiveview)
+from crates.io, and archiveview depends on the crates.io `bobview-pv`. The
+root `Cargo.toml` patches that to `crates/pv`, so both use one `PvManager`.
+That holds only while archiveview's `bobview-pv` requirement matches this
+workspace's version: if `pv` goes to a new major version, or its API that
+archiveview uses changes, release archiveview against it first. Then raise
+the `archiveview` version in the root `Cargo.toml`, run
+`cargo update -p archiveview -p archiveview-archiver`, and check
+`cargo tree -i bobview-pv` shows a single `bobview-pv` before tagging.
