@@ -354,7 +354,12 @@ const FLASH_SECONDS: f64 = 0.4;
 /// Copy the widget's PV name (see [`crate::pvmenu::copy_names`]) when it is
 /// middle-clicked, and note the time, to highlight it for a moment.
 fn middle_click_copy(ui: &Ui, resp: &Response, node: &Node, cx: &mut Cx, id: Id) {
-    if !resp.middle_clicked() {
+    // A control that takes no clicks (a read-only text entry) still copies.
+    let clicked = resp.middle_clicked()
+        || (!resp.sense.senses_click()
+            && resp.hovered()
+            && ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Middle)));
+    if !clicked {
         return;
     }
     if let Some(text) = crate::pvmenu::copy_names(node) {
@@ -364,8 +369,8 @@ fn middle_click_copy(ui: &Ui, resp: &Response, node: &Node, cx: &mut Cx, id: Id)
     }
 }
 
-/// Highlight a widget whose PV a middle-click has just copied, fading out
-/// over [`FLASH_SECONDS`].
+/// Highlight a widget whose PV a middle-click has just copied, for
+/// [`FLASH_SECONDS`].
 fn flash_copied(ui: &Ui, painter: &egui::Painter, rect: Rect, id: Id) {
     let key = id.with("copied");
     let Some(at) = ui.ctx().data(|d| d.get_temp::<f64>(key)) else {
@@ -376,16 +381,18 @@ fn flash_copied(ui: &Ui, painter: &egui::Painter, rect: Rect, id: Id) {
         ui.ctx().data_mut(|d| d.remove::<f64>(key));
         return;
     }
-    let fade = (left / FLASH_SECONDS) as f32;
+    // Fixed, not fading, so it costs one more frame rather than one every
+    // frame (which matters over `ssh -X`).
     let c = ui.visuals().selection.bg_fill;
-    painter.rect_filled(rect, CornerRadius::ZERO, c.gamma_multiply(0.5 * fade));
+    painter.rect_filled(rect, CornerRadius::ZERO, c.gamma_multiply(0.5));
     painter.rect_stroke(
         rect,
         CornerRadius::ZERO,
-        Stroke::new(2.0, c.gamma_multiply(fade)),
+        Stroke::new(2.0, c),
         StrokeKind::Inside,
     );
-    ui.ctx().request_repaint();
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_secs_f64(left));
 }
 
 /// The widget's `border_width` and `border_color`, drawn around it.
@@ -1191,6 +1198,15 @@ fn text_entry(
         .interactive(enabled)
         .min_size(rect.size());
     let resp = put_clipped(ui, id, rect, cx.clip, edit);
+    // A middle press (which copies the PV name) would focus the entry like
+    // any other, so that it stopped showing the PV's value: undo that.
+    let middle = ui.input(|i| {
+        i.pointer.button_down(egui::PointerButton::Middle)
+            || i.pointer.button_released(egui::PointerButton::Middle)
+    });
+    if middle && !editing && resp.has_focus() {
+        resp.surrender_focus();
+    }
     if resp.has_focus() {
         node.edit = Some(buf);
     } else if resp.lost_focus() {
@@ -1879,11 +1895,28 @@ fn spinner(
     let w = node.w.clone();
     let (min, max) = crate::meter::limits(&w, s);
     let (min, max) = (min.min(max), max.max(min));
-    let mut v = s.and_then(|s| s.value.as_f64()).unwrap_or(min);
+    // The value being dragged, until the drag ends and writes it.
+    let held = id.with("dragged");
+    let mut v = ui
+        .data(|d| d.get_temp::<f64>(held))
+        .or_else(|| s.and_then(|s| s.value.as_f64()))
+        .unwrap_or(min);
     let step = w.f64("increment").unwrap_or(1.0);
     let drag = egui::DragValue::new(&mut v).range(min..=max).speed(step);
     let resp = put_clipped(ui, id, rect, cx.clip.intersect(rect), drag);
-    if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+    // egui drags the value with any button: only the primary one writes, so
+    // a middle-click (which copies the PV name) or right-click never does.
+    let primary = egui::PointerButton::Primary;
+    if resp.dragged_by(primary) && resp.changed() {
+        ui.data_mut(|d| d.insert_temp(held, v));
+    }
+    if resp.drag_stopped() {
+        let dragged = ui.data_mut(|d| d.remove_temp::<f64>(held));
+        if let Some(v) = dragged.filter(|_| resp.drag_stopped_by(primary)) {
+            write(node, v.to_string());
+        }
+    } else if resp.changed() && !resp.dragged() {
+        // Typed in.
         write(node, v.to_string());
     }
     resp
@@ -2091,15 +2124,20 @@ fn slider(
         to: lay.to,
     };
 
-    // Follow the pointer while it is down on an enabled slider, and write
-    // where it was let go.
+    // Follow the pointer while the primary button is down on an enabled
+    // slider, and write where it was let go: the middle button copies the
+    // PV name and the right one opens its menu.
     let resp = ui.interact(rect.intersect(cx.clip), id, Sense::click_and_drag());
     let mut v = s
         .and_then(|s| s.value.as_f64())
         .filter(|v| v.is_finite())
         .unwrap_or(min);
     let enabled = live && !is_disabled(&w, s);
-    if enabled && let Some(p) = resp.interact_pointer_pos() {
+    let primary = ui.input(|i| i.pointer.primary_down() || i.pointer.primary_released());
+    if enabled
+        && primary
+        && let Some(p) = resp.interact_pointer_pos()
+    {
         let at = if horizontal { p.x } else { p.y };
         let t = if lay.to != lay.from {
             ((at - lay.from) / (lay.to - lay.from)).clamp(0.0, 1.0) as f64
@@ -2109,7 +2147,7 @@ fn slider(
         v = min + (max - min) * t;
         ui.data_mut(|d| d.insert_temp(id, v));
     }
-    if (resp.drag_stopped() || resp.clicked())
+    if (resp.drag_stopped_by(egui::PointerButton::Primary) || resp.clicked())
         && let Some(v) = ui.data_mut(|d| d.remove_temp::<f64>(id))
     {
         write(node, v.to_string());
@@ -3443,5 +3481,99 @@ pv.setValue(pv_value);
             out.textures_delta.clear();
         }
         assert_eq!(ids[0], ids[1]);
+    }
+
+    /// Draw the display `xml` at 1:1, once per list of events, and return
+    /// it and the requests its widgets made.
+    fn drive(xml: &str, passes: Vec<Vec<egui::Event>>) -> (Screen, Vec<Request>, egui::Context) {
+        let pvs = PvManager::new();
+        let display = bob::Display::parse(xml).unwrap();
+        let mut screen = Builder::new(&pvs).screen(display, &Macros::default(), None, 0);
+        let ctx = egui::Context::default();
+        let mut requests = Vec::new();
+        for events in std::iter::once(vec![]).chain(passes) {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 300.0))),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                let mut cx = Cx {
+                    view: View {
+                        origin: Pos2::ZERO,
+                        zoom: 1.0,
+                    },
+                    clip: Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 300.0)),
+                    pvs: &pvs,
+                    requests: &mut requests,
+                    depth: 0,
+                    touch: false,
+                    trends: &[],
+                    window: WindowKey::Main,
+                };
+                draw_screen(ui, &mut screen, &mut cx, Id::new("display"));
+            });
+            out.textures_delta.clear();
+        }
+        (screen, requests, ctx)
+    }
+
+    /// A press of `button` at `from`, moved to `to` and let go there.
+    fn gesture(button: egui::PointerButton, from: Pos2, to: Pos2) -> Vec<Vec<egui::Event>> {
+        let press = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let moved = egui::Event::PointerMoved;
+        vec![
+            vec![moved(from)],
+            vec![press(from, true)],
+            vec![moved(from.lerp(to, 0.5))],
+            vec![moved(to)],
+            vec![press(to, false)],
+        ]
+    }
+
+    fn value(screen: &Screen) -> f64 {
+        screen.nodes[0].state().unwrap().value.as_f64().unwrap()
+    }
+
+    #[test]
+    fn only_the_primary_button_drags_a_slider_or_spinner_to_write() {
+        use egui::PointerButton::{Middle, Primary, Secondary};
+        for (kind, pv) in [("scaledslider", "drag_slider"), ("spinner", "drag_spinner")] {
+            let xml = format!(
+                "<display><widget type='{kind}'><width>200</width><height>40</height>\
+                 <pv_name>loc://{pv}(50)</pv_name><minimum>0</minimum><maximum>100</maximum>\
+                 <limits_from_pv>false</limits_from_pv></widget></display>"
+            );
+            let (from, to) = (Pos2::new(100.0, 20.0), Pos2::new(160.0, 20.0));
+            for button in [Middle, Secondary] {
+                let (screen, ..) = drive(&xml, gesture(button, from, to));
+                assert_eq!(value(&screen), 50.0, "{kind} {button:?}");
+            }
+            let (screen, ..) = drive(&xml, gesture(Primary, from, to));
+            assert_ne!(value(&screen), 50.0, "{kind}");
+        }
+    }
+
+    #[test]
+    fn a_middle_click_copies_without_focusing_a_text_entry() {
+        let xml = "<display><widget type='textentry'><width>200</width><height>30</height>\
+                   <pv_name>loc://copy_entry(1)</pv_name></widget></display>";
+        let at = Pos2::new(50.0, 15.0);
+        let (screen, requests, ctx) = drive(xml, gesture(egui::PointerButton::Middle, at, at));
+        let copied: Vec<&String> = requests
+            .iter()
+            .filter_map(|r| match r {
+                Request::Copy(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(copied, ["loc://copy_entry"]);
+        assert!(ctx.memory(|m| m.focused().is_none()));
+        assert!(screen.nodes[0].edit.is_none());
     }
 }
