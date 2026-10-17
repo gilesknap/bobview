@@ -1111,7 +1111,9 @@ impl BobApp {
                 if windows && !compact {
                     icons::group(ui, false, |ui| {
                         egui::ComboBox::from_id_salt("layout")
-                            .selected_text(self.layout_name.as_deref().unwrap_or("Layout"))
+                            .selected_text(
+                                self.layout_name.as_deref().map_or("Layout", layout::label),
+                            )
                             .show_ui(ui, |ui| {
                                 action =
                                     layout_list(ui, self.layout_name.as_deref(), &mut self.layouts);
@@ -1520,7 +1522,7 @@ fn layout_menu(
 ) -> Option<LayoutAction> {
     let mut action = None;
     let save = match current {
-        Some(name) => format!("Save layout {name}"),
+        Some(name) => format!("Save layout {}", layout::label(name)),
         None => "Save layout".to_string(),
     };
     if ui

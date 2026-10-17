@@ -185,8 +185,9 @@ impl Thinned {
 
 /// The quickest a plot redraws for time moving on alone: a display redraws
 /// all of itself each frame, so a strip chart must not keep it at the
-/// 10 frames a second PV updates are held to.
-const MIN_SCROLL_REPAINT: f64 = 0.25;
+/// 10 frames a second PV updates are held to. Trend windows drawn in the
+/// display's own viewport keep to it too (see [`crate::trend::Trend::ui`]).
+pub const MIN_SCROLL_REPAINT: f64 = 0.25;
 
 /// How long until a plot of `span` seconds over `width` points needs a
 /// redraw for time moving on: when it has scrolled a pixel, but not more

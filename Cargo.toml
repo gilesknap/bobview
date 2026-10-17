@@ -18,7 +18,7 @@ bob = { package = "bobview-bob", path = "crates/bob", version = "=1.10.0" }
 pv = { package = "bobview-pv", path = "crates/pv", version = "=1.10.0" }
 # The trend windows' plot (archived and live PVs): the library only, with
 # no eframe, clap or clipboard.
-archiveview = { version = "0.2.1", default-features = false }
+archiveview = { version = "0.2.2", default-features = false }
 
 # archiveview's `Plot` takes a crates.io `bobview_pv::PvManager`: this makes
 # it the in-tree crate, so it is the same type as bobview's.
