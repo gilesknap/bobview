@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["LAUNCHER"],"fn":["forget","is_project","launcher_path","links","locate","normalize","project_dir","through_launcher","virtual_path"]};

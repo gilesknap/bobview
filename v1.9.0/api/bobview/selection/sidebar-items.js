@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["system"],"struct":["NoPrimary","System"],"trait":["Primary"]};

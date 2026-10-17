@@ -1,0 +1,307 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Command line - bobview</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="A lean viewer for Phoebus Display Builder .bob screens">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../highlight.css">
+        <link rel="stylesheet" href="../tomorrow-night.css">
+        <link rel="stylesheet" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../theme/grid.css">
+        <link rel="stylesheet" href="../theme/sidebar.css">
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('light')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item expanded affix "><a href="../index.html">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">Tutorials</li><li class="chapter-item expanded "><a href="../tutorials/quickstart.html"><strong aria-hidden="true">1.</strong> Quick start</a></li><li class="chapter-item expanded "><a href="../tutorials/browser.html"><strong aria-hidden="true">2.</strong> Serve displays to a browser</a></li><li class="chapter-item expanded "><a href="../tutorials/crates-io.html"><strong aria-hidden="true">3.</strong> Install from crates.io</a></li><li class="chapter-item expanded affix "><li class="part-title">How-to guides</li><li class="chapter-item expanded "><a href="../how-to/install.html"><strong aria-hidden="true">4.</strong> Install bobview</a></li><li class="chapter-item expanded "><a href="../how-to/connect-iocs.html"><strong aria-hidden="true">5.</strong> Connect to real IOCs</a></li><li class="chapter-item expanded "><a href="../how-to/http-displays.html"><strong aria-hidden="true">6.</strong> Open displays over http(s)</a></li><li class="chapter-item expanded "><a href="../how-to/software-rendering.html"><strong aria-hidden="true">7.</strong> Choose bobview or bobview-ssh</a></li><li class="chapter-item expanded "><a href="../how-to/opi-projects.html"><strong aria-hidden="true">8.</strong> Open BOY screens from an Eclipse project or DLS module</a></li><li class="chapter-item expanded "><a href="../how-to/layouts.html"><strong aria-hidden="true">9.</strong> Save and restore a layout</a></li><li class="chapter-item expanded "><a href="../how-to/trends.html"><strong aria-hidden="true">10.</strong> Trend PVs</a></li><li class="chapter-item expanded "><a href="../how-to/deploy-server.html"><strong aria-hidden="true">11.</strong> Deploy bobview-server for others</a></li><li class="chapter-item expanded "><a href="../how-to/snapshots.html"><strong aria-hidden="true">12.</strong> Take snapshots</a></li><li class="chapter-item expanded "><a href="../how-to/build.html"><strong aria-hidden="true">13.</strong> Build from source</a></li><li class="chapter-item expanded "><a href="../how-to/release.html"><strong aria-hidden="true">14.</strong> Make a release</a></li><li class="chapter-item expanded affix "><li class="part-title">Explanations</li><li class="chapter-item expanded "><a href="../explanations/scope.html"><strong aria-hidden="true">15.</strong> Scope and fidelity to Phoebus</a></li><li class="chapter-item expanded "><a href="../explanations/architecture.html"><strong aria-hidden="true">16.</strong> Architecture</a></li><li class="chapter-item expanded "><a href="../explanations/repaints.html"><strong aria-hidden="true">17.</strong> Threads, windows and repaints</a></li><li class="chapter-item expanded "><a href="../explanations/windows.html"><strong aria-hidden="true">18.</strong> Pinned windows and the viewer</a></li><li class="chapter-item expanded "><a href="../explanations/boy.html"><strong aria-hidden="true">19.</strong> How BOY screens are translated</a></li><li class="chapter-item expanded "><a href="../explanations/writes.html"><strong aria-hidden="true">20.</strong> Writes and safety</a></li><li class="chapter-item expanded affix "><li class="part-title">Reference</li><li class="chapter-item expanded "><a href="../reference/cli.html" class="active"><strong aria-hidden="true">21.</strong> Command line</a></li><li class="chapter-item expanded "><a href="../reference/environment.html"><strong aria-hidden="true">22.</strong> Environment variables</a></li><li class="chapter-item expanded "><a href="../reference/widgets.html"><strong aria-hidden="true">23.</strong> Widgets</a></li><li class="chapter-item expanded "><a href="../reference/boy-widgets.html"><strong aria-hidden="true">24.</strong> BOY widgets</a></li><li class="chapter-item expanded "><a href="../reference/macros-rules-pvs.html"><strong aria-hidden="true">25.</strong> Macros, rules and PV types</a></li><li class="chapter-item expanded "><a href="../reference/controls.html"><strong aria-hidden="true">26.</strong> The window and its controls</a></li><li class="chapter-item expanded "><a href="../reference/browser.html"><strong aria-hidden="true">27.</strong> Browser page parameters</a></li><li class="chapter-item expanded "><a href="../reference/testioc.html"><strong aria-hidden="true">28.</strong> bobview-testioc</a></li><li class="chapter-item expanded "><a href="../reference/api.html"><strong aria-hidden="true">29.</strong> Rust API</a></li><li class="chapter-item expanded "><a href="../reference/licences.html"><strong aria-hidden="true">30.</strong> Licences</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">bobview</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/gilesknap/bobview" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/gilesknap/bobview/edit/main/docs/src/reference/cli.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="command-line"><a class="header" href="#command-line">Command line</a></h1>
+<h2 id="bobview"><a class="header" href="#bobview">bobview</a></h2>
+<pre><code class="language-text">bobview [OPTIONS] [DISPLAY]
+</code></pre>
+<p><code>DISPLAY</code> is a <code>.bob</code> or <code>.opi</code> file, or an <code>http://</code> or <code>https://</code> URL.
+With no display, bobview restores the default window layout when one has
+been saved, else opens <code>index.bob</code> from the bundled displays
+(<code>~/.local/share/bobview/displays</code>) when present, else a file chooser.</p>
+<div class="table-wrapper"><table><thead><tr><th>option</th><th>meaning</th></tr></thead><tbody>
+<tr><td><code>-m</code>, <code>--macros P=X,R=Y</code></td><td>macros for the display</td></tr>
+<tr><td><code>-p</code>, <code>--project DIR</code></td><td>open the display through the linked folders of the Eclipse project in <code>DIR</code> (its <code>.project</code>, or for a BOY <code>.opi</code> screen the links of a DLS <code>runcss.sh</code> in <code>DIR</code>); see <a href="../how-to/opi-projects.html">Open BOY screens</a></td></tr>
+<tr><td><code>-z</code>, <code>--zoom FACTOR</code></td><td>fixed zoom, 0.2 to 5, instead of fitting the window</td></tr>
+<tr><td><code>-f</code>, <code>--fullscreen</code></td><td>start full screen</td></tr>
+<tr><td><code>--read-only</code></td><td>refuse every write to a PV except <code>loc://</code> ones; see <a href="../explanations/writes.html">Writes and safety</a></td></tr>
+<tr><td><code>--archiver URL</code></td><td>the EPICS Archiver Appliance trends fetch history from, e.g. <code>http://archiver:17668</code> (<code>/retrieval</code> is added); remembered for later runs (not with <code>--snapshot</code>). See <a href="../how-to/trends.html">Trend PVs</a></td></tr>
+<tr><td><code>--no-archiver</code></td><td>no archiver this run, even if <code>BOBVIEW_ARCHIVER</code> or the settings name one: trends are live only</td></tr>
+<tr><td><code>--layout NAME</code></td><td>restore the saved layout <code>NAME</code></td></tr>
+<tr><td><code>--no-layout</code></td><td>don't restore the default layout</td></tr>
+<tr><td><code>--ui-scale F</code> or <code>auto</code></td><td>size of the toolbar and menus relative to the desktop's scale, 1 being the desktop's own (default auto: smaller on a small high-DPI screen)</td></tr>
+<tr><td><code>--snapshot OUT.png</code></td><td>render to a PNG without a window and exit; see <a href="../how-to/snapshots.html">Take snapshots</a></td></tr>
+<tr><td><code>--size WxH</code> or <code>auto</code></td><td>snapshot size in pixels (default <code>1280x800</code>); <code>auto</code> sizes it as a window manager would, on a 1920x1080 monitor</td></tr>
+<tr><td><code>--scale-factor F</code></td><td>snapshot as on a screen with this desktop scale, e.g. 2.75 for a phone (default 1)</td></tr>
+<tr><td><code>--wait SECONDS</code></td><td>time for PVs to connect before a snapshot (default 2)</td></tr>
+<tr><td><code>--click X,Y</code></td><td>click here before the snapshot (repeatable)</td></tr>
+<tr><td><code>--right-click X,Y</code></td><td>right-click here before the snapshot (repeatable)</td></tr>
+<tr><td><code>--middle-click X,Y</code></td><td>middle-click here before the snapshot (repeatable)</td></tr>
+<tr><td><code>--settle SECONDS</code></td><td>time after the last click before the snapshot (default 1)</td></tr>
+<tr><td><code>-h</code>, <code>--help</code></td><td>show help</td></tr>
+<tr><td><code>-V</code>, <code>--version</code></td><td>show the version</td></tr>
+</tbody></table>
+</div>
+<h2 id="bobview-ssh"><a class="header" href="#bobview-ssh">bobview-ssh</a></h2>
+<pre><code class="language-text">bobview-ssh [OPTIONS] [DISPLAY]
+</code></pre>
+<p>Runs <code>bobview</code> with the same arguments, rendering with Mesa in software. See
+<a href="../how-to/software-rendering.html">Choose bobview or bobview-ssh</a>.</p>
+<h2 id="bobview-probe"><a class="header" href="#bobview-probe">bobview-probe</a></h2>
+<pre><code class="language-text">bobview-probe [--seconds N] [--put NAME=VALUE]... NAME...
+</code></pre>
+<p>Prints live values of PVs through bobview's PV layer, for <code>N</code> seconds
+(default 5). <code>--put</code> writes a value first (repeatable). PV names take the
+same prefixes as in a display (<code>pva://</code>, <code>loc://</code> …).</p>
+<h2 id="bobview-server"><a class="header" href="#bobview-server">bobview-server</a></h2>
+<pre><code class="language-text">bobview-server [OPTIONS]
+</code></pre>
+<p>Serves the bobview web build, <code>.bob</code> files and a PV Web Socket on one port.
+Open <code>http://HOST:PORT/?display=FILE.bob</code> in a browser (default
+<code>index.bob</code>). See <a href="../how-to/deploy-server.html">Deploy bobview-server for others</a>.</p>
+<div class="table-wrapper"><table><thead><tr><th>option</th><th>meaning</th></tr></thead><tbody>
+<tr><td><code>-p</code>, <code>--port PORT</code></td><td>port to listen on (default 8080)</td></tr>
+<tr><td><code>--bind ADDR</code></td><td>address to listen on (default <code>127.0.0.1</code>, this machine only; <code>0.0.0.0</code> is every interface)</td></tr>
+<tr><td><code>--web DIR</code></td><td>the web build from <code>scripts/build-web.sh</code> (default <code>../share/bobview/web</code> next to this binary, else <code>dist/web</code>)</td></tr>
+<tr><td><code>--opi DIR</code></td><td>serve <code>.bob</code> files from here; they take precedence over files of the same name in the web build</td></tr>
+<tr><td><code>--follow-symlinks</code></td><td>serve files through symbolic links that lead out of <code>--opi</code> or <code>--web</code> (refused by default)</td></tr>
+<tr><td><code>--write</code></td><td>let browsers write to PVs (off by default, as in PVWS); every write must carry the write token</td></tr>
+<tr><td><code>--write-token TOKEN</code></td><td>the token <code>--write</code> wants (default: <code>$BOBVIEW_WRITE_TOKEN</code> if set and not empty, else a random one printed at startup); prefer the variable, as arguments show in <code>ps</code></td></tr>
+<tr><td><code>--allow-origin ORIGIN</code></td><td>also let pages from <code>ORIGIN</code> connect, e.g. <code>https://host.example.com</code> (repeatable)</td></tr>
+<tr><td><code>--host NAME</code></td><td>let browsers call this server <code>NAME</code>, as well as an IP address, <code>localhost</code>, this machine's name and the hosts of <code>--allow-origin</code> (repeatable)</td></tr>
+<tr><td><code>--max-per-ip N</code></td><td>most clients at once from one address (default 10)</td></tr>
+<tr><td><code>--throttle-ms MS</code></td><td>least time between two batches of updates to one client (default 100)</td></tr>
+<tr><td><code>-h</code>, <code>--help</code></td><td>show help</td></tr>
+<tr><td><code>-V</code>, <code>--version</code></td><td>show the version</td></tr>
+</tbody></table>
+</div>
+<h2 id="bobview-testioc"><a class="header" href="#bobview-testioc">bobview-testioc</a></h2>
+<pre><code class="language-text">bobview-testioc [--only ea|motor|cam]...
+</code></pre>
+<p>Serves the simulated BL01T PVs; by default all three parts. See
+<a href="testioc.html">bobview-testioc</a>.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../explanations/writes.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../reference/environment.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../explanations/writes.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../reference/environment.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../theme/switcher.js"></script>
+        <script src="../theme/mermaid.min.js"></script>
+        <script src="../theme/mermaid-init.js"></script>
+
+
+    </div>
+    </body>
+</html>
