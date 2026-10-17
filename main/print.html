@@ -712,6 +712,18 @@ searches the archived names. The legend chips under the plot give each
 PV's colour, name and value: click one to hide its line, hover to pick it
 out, and <strong>×</strong> to remove it. Ctrl+V over the plot adds the PVs named in
 the clipboard.</li>
+<li><strong>Middle-click.</strong> On Linux (X11 or Wayland) a middle-click on the plot or
+legend adds the Channel Access and PV Access PVs named in the primary
+selection, as in the standalone archiveview: middle-click a widget in a
+display to select its PV name, or select names in a terminal or editor,
+then middle-click the trend. Other PVs, such as <code>loc://</code> and <code>sim://</code>
+ones, aren't added this way: use <strong>Trend</strong> in the widget's right-click
+menu. A middle-click in the search box pastes the selection there, and
+text selected in the search box becomes the primary selection. A note over
+the plot says what was added, or that the selection named no PVs (one
+naming more than 20 adds none). Windows and macOS have no primary
+selection, so there use Ctrl+V; in a snapshot a middle-click on a trend
+pastes nothing.</li>
 <li><strong>Undo.</strong> <strong>↶</strong> and <strong>↷</strong> (or Ctrl+Z and Ctrl+Shift+Z) undo and redo
 changes to the plot.</li>
 <li>Hover over the plot for a readout of every PV at that time.</li>
@@ -721,9 +733,7 @@ changes to the plot.</li>
 <li>A PV the archiver doesn't hold is plotted live only, and its chip says so.</li>
 <li>Waveforms are not plotted: their chip shows the latest array.</li>
 <li>In the browser build trends are live only: a browser can't reach the
-archiver.</li>
-<li>A middle-click on a trend does not paste the primary selection, as it
-does in the standalone archiveview: use Ctrl+V.</li>
+archiver, and a middle-click pastes nothing: use Ctrl+V.</li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="deploy-bobview-server-for-others"><a class="header" href="#deploy-bobview-server-for-others">Deploy bobview-server for others</a></h1>
 <p><a href="how-to/../tutorials/browser.html">Serve displays to a browser</a> runs <code>bobview-server</code>
@@ -1568,8 +1578,10 @@ value or a <code>caget</code>/<code>pvget</code> command, open the PV details, <
 <strong>Trend with rule PVs</strong>, or add it to an open trend. See
 <a href="reference/../how-to/trends.html">Trend PVs</a> for the trend window's own controls.</li>
 <li><strong>Middle-click</strong> to copy its PV name, as in EDM and MEDM: a middle-click
-in a terminal then pastes it, and one in
-<a href="https://github.com/gilesknap/archiveview">archiveview</a> plots it. The
+in a terminal then pastes it, and one on a
+<a href="reference/../how-to/trends.html">trend</a> or in
+<a href="https://github.com/gilesknap/archiveview">archiveview</a> plots it (a
+Channel Access or PV Access name). The
 widget flashes and the status line says "Copied <em>name</em>". See
 <a href="reference/controls.html#copying-a-pv-name">Copying a PV name</a>.</li>
 <li>On a touch screen, pinch to zoom.</li>
