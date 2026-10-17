@@ -182,7 +182,11 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="trend-pvs"><a class="header" href="#trend-pvs">Trend PVs</a></h1>
-<p>A trend window plots one or more PVs against time.</p>
+<p>A trend window plots one or more PVs against time: their archived history
+from an <a href="https://github.com/archiver-appliance/epicsarchiverap">EPICS Archiver Appliance</a>,
+joined to their live values. The plot is
+<a href="https://github.com/gilesknap/archiveview">archiveview</a>'s, so a trend in
+bobview works as the standalone <code>archiveview</code> does.</p>
 <h2 id="open-a-trend"><a class="header" href="#open-a-trend">Open a trend</a></h2>
 <ul>
 <li>Right-click a widget (long-press on a touch screen) and pick <strong>Trend</strong> for
@@ -193,19 +197,63 @@ opens a trend of its PVs instead (see <a href="../explanations/boy.html">How BOY
 </ul>
 <p>Several trends may be open at once, each in its own window over the display,
 and they stay open as you move between displays. Layouts save them.</p>
+<h2 id="give-bobview-an-archiver"><a class="header" href="#give-bobview-an-archiver">Give bobview an archiver</a></h2>
+<p>Without an archiver a trend is live only: each PV's line starts when the
+window opens. To see history, name the appliance's retrieval service:</p>
+<pre><code class="language-bash">bobview --archiver http://archiver.example.com:17668 DISPLAY
+</code></pre>
+<p><code>/retrieval</code> is added unless the URL ends with it, and Phoebus's
+<code>pbraw://host:port/retrieval</code> form works too. The archiver is chosen in this
+order:</p>
+<ol>
+<li><code>--archiver URL</code>, which is also remembered for later runs (not with
+<code>--snapshot</code>);</li>
+<li>none with <code>--no-archiver</code>, for this run only;</li>
+<li>the <code>BOBVIEW_ARCHIVER</code> environment variable (not remembered), for a
+site-wide default set in a launcher script or profile;</li>
+<li>the last archiver given with <code>--archiver</code> or picked in a trend's archiver
+pill, from <code>settings.json</code> beside the <a href="layouts.html">layouts</a>.</li>
+</ol>
+<p>The pill in each trend's top bar shows the archiver and whether it can be
+reached (green), is being checked, or cannot be reached (red). Click it to
+switch to another archiver, or to none; the switch applies to every trend
+window, and is remembered for the next run unless <code>--archiver</code> or
+<code>BOBVIEW_ARCHIVER</code> names another.</p>
+<p>To try it without an appliance, run archiveview's mock archiver, which
+serves synthetic history for the test IOC's <code>bl01t:SUM</code> and a few
+<code>MOCK:</code> PVs:</p>
+<pre><code class="language-bash">cargo install archiveview-mockarchiver
+archiveview-mockarchiver &amp;
+bobview --archiver http://127.0.0.1:17668
+</code></pre>
 <h2 id="use-a-trend"><a class="header" href="#use-a-trend">Use a trend</a></h2>
 <ul>
-<li>Pick the time span from the window's menu: 1 minute to 1 day (10 minutes
-by default). The value axis fits the data.</li>
-<li>Switch <strong>Log scale</strong> on for a value axis on a log scale.</li>
-<li>The legend below the plot gives each PV's colour, name and current value,
-or Disconnected. <strong>✖</strong> removes a PV, and <strong>Add PV</strong> adds one.</li>
+<li><strong>Time.</strong> The top bar's presets show the last hour, 8 hours, day or week;
+<strong>⋯</strong> takes a span such as <code>90m</code> or <code>2 days</code>, or two dates. Drag to pan
+and scroll to zoom time about the pointer. Moving into the past leaves
+<strong>Live</strong>; click it (or press <code>L</code>) to follow now again.</li>
+<li><strong>Values.</strong> Each value axis fits its data until you zoom it: drag an axis,
+or shift-scroll over it. PVs with different units or scales get axes of
+their own (up to four), on a log scale where that suits the values.
+Double-click the plot to reset.</li>
+<li><strong>PVs.</strong> Type in the search box to add a PV; with an archiver it also
+searches the archived names. The legend chips under the plot give each
+PV's colour, name and value: click one to hide its line, hover to pick it
+out, and <strong>×</strong> to remove it. Ctrl+V over the plot adds the PVs named in
+the clipboard.</li>
+<li><strong>Undo.</strong> <strong>↶</strong> and <strong>↷</strong> (or Ctrl+Z and Ctrl+Shift+Z) undo and redo
+changes to the plot.</li>
+<li>Hover over the plot for a readout of every PV at that time.</li>
 </ul>
 <h2 id="limits"><a class="header" href="#limits">Limits</a></h2>
-<p>A trend is live only: each PV gets a sample on every update from when the
-window opened (up to 100 000 samples, and a day, per PV), with no archived
-history. Each value holds until the next, and a gap marks where a PV was
-disconnected.</p>
+<ul>
+<li>A PV the archiver doesn't hold is plotted live only, and its chip says so.</li>
+<li>Waveforms are not plotted: their chip shows the latest array.</li>
+<li>In the browser build trends are live only: a browser can't reach the
+archiver.</li>
+<li>A middle-click on a trend does not paste the primary selection, as it
+does in the standalone archiveview: use Ctrl+V.</li>
+</ul>
 
                     </main>
 

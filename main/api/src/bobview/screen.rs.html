@@ -93,7 +93,7 @@
 <a href=#93 id=93 data-nosnippet>93</a>    <span class="doccomment">/// The x and y PVs of each trace of an XY plot.
 <a href=#94 id=94 data-nosnippet>94</a>    </span><span class="kw">pub </span>traces: Vec&lt;<span class="kw">crate</span>::plot::TracePvs&gt;,
 <a href=#95 id=95 data-nosnippet>95</a>    <span class="doccomment">/// The samples of each trace of a strip chart.
-<a href=#96 id=96 data-nosnippet>96</a>    </span><span class="kw">pub </span>series: Vec&lt;<span class="prelude-ty">Option</span>&lt;<span class="kw">crate</span>::trend::Series&gt;&gt;,
+<a href=#96 id=96 data-nosnippet>96</a>    </span><span class="kw">pub </span>series: Vec&lt;<span class="prelude-ty">Option</span>&lt;<span class="kw">crate</span>::stripchart::Series&gt;&gt;,
 <a href=#97 id=97 data-nosnippet>97</a>    <span class="doccomment">/// The vacuum-space link field that points this widget at a group.
 <a href=#98 id=98 data-nosnippet>98</a>    </span><span class="kw">pub </span>link: <span class="prelude-ty">Option</span>&lt;<span class="kw">crate</span>::group_link::Link&gt;,
 <a href=#99 id=99 data-nosnippet>99</a>    <span class="doccomment">/// What the load that made this node may still build.
@@ -879,7 +879,7 @@
 <a href=#879 id=879 data-nosnippet>879</a>                node.series = node
 <a href=#880 id=880 data-nosnippet>880</a>                    .traces
 <a href=#881 id=881 data-nosnippet>881</a>                    .iter()
-<a href=#882 id=882 data-nosnippet>882</a>                    .map(|t| t.y.clone().map(<span class="kw">crate</span>::trend::Series::new))
+<a href=#882 id=882 data-nosnippet>882</a>                    .map(|t| t.y.clone().map(<span class="kw">crate</span>::stripchart::Series::new))
 <a href=#883 id=883 data-nosnippet>883</a>                    .collect();
 <a href=#884 id=884 data-nosnippet>884</a>            }
 <a href=#885 id=885 data-nosnippet>885</a>            <span class="string">"navtabs" </span>=&gt; {

@@ -226,6 +226,16 @@ Variables</strong>, set <code>PUBLISH_CRATES</code> to <code>true</code>.</li>
 <p>The <code>publish</code> job then runs after the GitHub Release is made for each tag.
 A version can be published to crates.io only once, so fix a bad release
 with a new version.</p>
+<h2 id="archiveview"><a class="header" href="#archiveview">archiveview</a></h2>
+<p>Trend windows embed <a href="https://github.com/gilesknap/archiveview">archiveview</a>
+from crates.io, and archiveview depends on the crates.io <code>bobview-pv</code>. The
+root <code>Cargo.toml</code> patches that to <code>crates/pv</code>, so both use one <code>PvManager</code>.
+That holds only while archiveview's <code>bobview-pv</code> requirement matches this
+workspace's version: if <code>pv</code> goes to a new major version, or its API that
+archiveview uses changes, release archiveview against it first. Then raise
+the <code>archiveview</code> version in the root <code>Cargo.toml</code>, run
+<code>cargo update -p archiveview -p archiveview-archiver</code>, and check
+<code>cargo tree -i bobview-pv</code> shows a single <code>bobview-pv</code> before tagging.</p>
 
                     </main>
 

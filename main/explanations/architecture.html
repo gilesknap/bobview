@@ -193,12 +193,15 @@ names in code: <code>bob</code> is <code>bobview-bob</code>, <code>pv</code> is 
     pv[&quot;pv&lt;br/&gt;PV access&quot;]
     testioc[&quot;testioc&lt;br/&gt;test IOC&quot;]
     egui[&quot;egui / eframe&quot;]
+    archiveview[&quot;archiveview&lt;br/&gt;trend plot&quot;]
     epics[&quot;epics-rs&lt;br/&gt;epics-ca-rs, epics-pva-rs&quot;]
     pvws[&quot;PVWS&quot;]
 
     bobview --&gt; bob
     bobview --&gt; pv
     bobview --&gt; egui
+    bobview --&gt; archiveview
+    archiveview --&gt; pv
     server --&gt; pv
     pv -- desktop --&gt; epics
     pv -- browser --&gt; pvws
@@ -216,6 +219,11 @@ names in code: <code>bob</code> is <code>bobview-bob</code>, <code>pv</code> is 
 <tr><td><code>testioc</code></td><td><code>bobview-testioc</code>, a pure-Rust IOC serving the example-services BL01T PVs</td></tr>
 </tbody></table>
 </div>
+<p>bobview's trend windows are <a href="https://github.com/gilesknap/archiveview">archiveview</a>'s
+<code>Plot</code> widget, which fetches archived history from an EPICS Archiver
+Appliance and joins it to live values. It is a separate project that takes
+bobview's <code>PvManager</code>, so the workspace patches its crates.io <code>bobview-pv</code>
+to the one in <code>crates/pv</code>, making them the same type.</p>
 <p>The crates with a dashed outline also build for <code>wasm32-unknown-unknown</code>.
 Which source file does what is listed in the
 <a href="../reference/api.html#source-map">source map</a>.</p>

@@ -195,6 +195,8 @@ been saved, else opens <code>index.bob</code> from the bundled displays
 <tr><td><code>-z</code>, <code>--zoom FACTOR</code></td><td>fixed zoom, 0.2 to 5, instead of fitting the window</td></tr>
 <tr><td><code>-f</code>, <code>--fullscreen</code></td><td>start full screen</td></tr>
 <tr><td><code>--read-only</code></td><td>refuse every write to a PV except <code>loc://</code> ones; see <a href="../explanations/writes.html">Writes and safety</a></td></tr>
+<tr><td><code>--archiver URL</code></td><td>the EPICS Archiver Appliance trends fetch history from, e.g. <code>http://archiver:17668</code> (<code>/retrieval</code> is added); remembered for later runs (not with <code>--snapshot</code>). See <a href="../how-to/trends.html">Trend PVs</a></td></tr>
+<tr><td><code>--no-archiver</code></td><td>no archiver this run, even if <code>BOBVIEW_ARCHIVER</code> or the settings name one: trends are live only</td></tr>
 <tr><td><code>--layout NAME</code></td><td>restore the saved layout <code>NAME</code></td></tr>
 <tr><td><code>--no-layout</code></td><td>don't restore the default layout</td></tr>
 <tr><td><code>--ui-scale F</code> or <code>auto</code></td><td>size of the toolbar and menus relative to the desktop's scale, 1 being the desktop's own (default auto: smaller on a small high-DPI screen)</td></tr>
