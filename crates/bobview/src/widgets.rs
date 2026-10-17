@@ -1882,8 +1882,10 @@ fn slide_layout(rect: Rect, z: f32, has_label: bool) -> (Rect, Option<Rect>) {
     (track, label)
 }
 
-/// Phoebus Spinner: the value, dragged or typed, kept within the range and
-/// stepped by `increment`.
+/// Phoebus Spinner: a text entry with up and down arrows beside it, which
+/// (as the Up and Down keys do while it has focus) step the value by
+/// `increment` within the range. As in Phoebus a drag does nothing: the
+/// value is set only by the arrows or by typing it and pressing Enter.
 fn spinner(
     ui: &mut Ui,
     node: &mut Node,
@@ -1895,31 +1897,82 @@ fn spinner(
     let w = node.w.clone();
     let (min, max) = crate::meter::limits(&w, s);
     let (min, max) = (min.min(max), max.max(min));
-    // The value being dragged, until the drag ends and writes it.
-    let held = id.with("dragged");
-    let mut v = ui
-        .data(|d| d.get_temp::<f64>(held))
-        .or_else(|| s.and_then(|s| s.value.as_f64()))
-        .unwrap_or(min);
     let step = w.f64("increment").unwrap_or(1.0);
-    let drag = egui::DragValue::new(&mut v).range(min..=max).speed(step);
-    let resp = put_clipped(ui, id, rect, cx.clip.intersect(rect), drag);
-    // egui drags the value with any button: only the primary one writes, so
-    // a middle-click (which copies the PV name) or right-click never does.
-    let primary = egui::PointerButton::Primary;
-    if resp.dragged_by(primary) && resp.changed() {
-        ui.data_mut(|d| d.insert_temp(held, v));
+    let z = cx.view.zoom;
+    let enabled = can_write(&w, s);
+
+    // The arrows: a column of two, on the right unless `buttons_on_left`.
+    let bw = (16.0 * z).min(rect.width() / 2.0);
+    let (field, arrows) = if w.bool("buttons_on_left") == Some(true) {
+        let arrows = Rect::from_min_size(rect.min, Vec2::new(bw, rect.height()));
+        (
+            Rect::from_min_max(Pos2::new(arrows.right(), rect.top()), rect.max),
+            arrows,
+        )
+    } else {
+        let arrows = Rect::from_min_max(Pos2::new(rect.right() - bw, rect.top()), rect.max);
+        (
+            Rect::from_min_max(rect.min, Pos2::new(arrows.left(), rect.bottom())),
+            arrows,
+        )
+    };
+    let (up, down) = (
+        Rect::from_min_max(arrows.min, Pos2::new(arrows.right(), arrows.center().y)),
+        Rect::from_min_max(Pos2::new(arrows.left(), arrows.center().y), arrows.max),
+    );
+
+    // Up and Down while the field has focus step it, before the field
+    // takes them; a click on an arrow (primary button only) does too.
+    let mut change = 0.0;
+    if enabled && ui.memory(|m| m.has_focus(id)) {
+        change += ui.input_mut(|i| {
+            i.count_and_consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) as f64
+                - i.count_and_consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) as f64
+        });
     }
-    if resp.drag_stopped() {
-        let dragged = ui.data_mut(|d| d.remove_temp::<f64>(held));
-        if let Some(v) = dragged.filter(|_| resp.drag_stopped_by(primary)) {
-            write(node, v.to_string());
+    let painter = ui.painter().with_clip_rect(cx.clip);
+    let mut arrow = |r: Rect, sign: f64, name: &str| {
+        let resp = ui.interact(r.intersect(cx.clip), id.with(name), Sense::click());
+        button_box(
+            &painter,
+            r,
+            bg(&w, "Button_Background"),
+            enabled && resp.is_pointer_button_down_on(),
+            z,
+        );
+        let (c, h) = (r.center(), (r.width().min(r.height()) * 0.25).max(1.0));
+        let tip = Vec2::new(0.0, -h * sign as f32);
+        let side = Vec2::new(h, h * sign as f32);
+        let ink = if enabled { fg(&w) } else { Color32::GRAY };
+        painter.add(Shape::convex_polygon(
+            vec![c + tip, c + side, c + Vec2::new(-side.x, side.y)],
+            ink,
+            Stroke::NONE,
+        ));
+        if enabled && resp.clicked() {
+            change += sign;
         }
-    } else if resp.changed() && !resp.dragged() {
-        // Typed in.
+        resp
+    };
+    let up_resp = arrow(up, 1.0, "up");
+    let down_resp = arrow(down, -1.0, "down");
+
+    if change != 0.0
+        && let Some(s) = s
+        && let Some(v) = s.value.as_f64()
+    {
+        let v = (v + change * step).clamp(min, max);
         write(node, v.to_string());
+        // Show the new value while the field keeps focus.
+        if node.edit.is_some() {
+            let mut stepped = s.clone();
+            stepped.value = pv::Value::Double(v);
+            node.edit = Some(format_value(&w, &stepped));
+        }
     }
-    resp
+    text_entry(ui, node, s, field, cx, id)
+        .union(up_resp)
+        .union(down_resp)
 }
 
 /// Where a slider's parts go, along its length and across it.
@@ -3540,23 +3593,80 @@ pv.setValue(pv_value);
         screen.nodes[0].state().unwrap().value.as_f64().unwrap()
     }
 
+    /// A 200x40 control of `kind` on `loc://{pv}(50)`, ranging 0 to 100.
+    fn control(kind: &str, pv: &str) -> String {
+        format!(
+            "<display><widget type='{kind}'><width>200</width><height>40</height>\
+             <pv_name>loc://{pv}(50)</pv_name><minimum>0</minimum><maximum>100</maximum>\
+             <limits_from_pv>false</limits_from_pv></widget></display>"
+        )
+    }
+
+    /// How many times the widget's PV has changed, writes of the same
+    /// value included.
+    fn writes(screen: &Screen) -> u64 {
+        screen.nodes[0].pv.as_ref().unwrap().version()
+    }
+
     #[test]
-    fn only_the_primary_button_drags_a_slider_or_spinner_to_write() {
+    fn only_the_primary_button_drags_a_slider_to_write() {
         use egui::PointerButton::{Middle, Primary, Secondary};
-        for (kind, pv) in [("scaledslider", "drag_slider"), ("spinner", "drag_spinner")] {
-            let xml = format!(
-                "<display><widget type='{kind}'><width>200</width><height>40</height>\
-                 <pv_name>loc://{pv}(50)</pv_name><minimum>0</minimum><maximum>100</maximum>\
-                 <limits_from_pv>false</limits_from_pv></widget></display>"
-            );
-            let (from, to) = (Pos2::new(100.0, 20.0), Pos2::new(160.0, 20.0));
-            for button in [Middle, Secondary] {
-                let (screen, ..) = drive(&xml, gesture(button, from, to));
-                assert_eq!(value(&screen), 50.0, "{kind} {button:?}");
-            }
-            let (screen, ..) = drive(&xml, gesture(Primary, from, to));
-            assert_ne!(value(&screen), 50.0, "{kind}");
+        let xml = control("scaledslider", "drag_slider");
+        let (from, to) = (Pos2::new(100.0, 20.0), Pos2::new(160.0, 20.0));
+        for button in [Middle, Secondary] {
+            let (screen, ..) = drive(&xml, gesture(button, from, to));
+            assert_eq!(value(&screen), 50.0, "{button:?}");
         }
+        let (screen, ..) = drive(&xml, gesture(Primary, from, to));
+        assert_ne!(value(&screen), 50.0);
+    }
+
+    #[test]
+    fn a_spinner_is_set_by_its_arrows_or_typing_never_by_a_drag() {
+        use egui::PointerButton::{Middle, Primary, Secondary};
+        use egui::{Event, Key, Modifiers};
+        let xml = control("spinner", "spin");
+        let unwritten = writes(&drive(&xml, vec![]).0);
+        // A drag on the field or from an arrow, with any button, does nothing.
+        let field = (Pos2::new(40.0, 20.0), Pos2::new(150.0, 20.0));
+        let arrow = (Pos2::new(192.0, 10.0), Pos2::new(120.0, 30.0));
+        for button in [Primary, Middle, Secondary] {
+            for (from, to) in [field, arrow] {
+                let (screen, ..) = drive(&xml, gesture(button, from, to));
+                assert_eq!(writes(&screen), unwritten, "{button:?} {from:?}");
+                assert_eq!(value(&screen), 50.0, "{button:?} {from:?}");
+            }
+        }
+        // The arrows step by the increment (1).
+        let up = Pos2::new(192.0, 10.0);
+        let (screen, ..) = drive(&xml, gesture(Primary, up, up));
+        assert_eq!(value(&screen), 51.0);
+        let down = Pos2::new(192.0, 30.0);
+        let (screen, ..) = drive(&xml, gesture(Primary, down, down));
+        assert_eq!(value(&screen), 49.0);
+        // So do the Up and Down keys while the field has focus, and typing
+        // a value and Enter sets it.
+        let key = |key, modifiers| {
+            vec![Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }]
+        };
+        let click = gesture(Primary, field.0, field.0);
+        let mut events = click.clone();
+        events.push(key(Key::ArrowUp, Modifiers::NONE));
+        events.push(key(Key::ArrowUp, Modifiers::NONE));
+        let (screen, ..) = drive(&xml, events);
+        assert_eq!(value(&screen), 52.0);
+        let mut events = click;
+        events.push(key(Key::A, Modifiers::COMMAND));
+        events.push(vec![Event::Text("75".into())]);
+        events.push(key(Key::Enter, Modifiers::NONE));
+        let (screen, ..) = drive(&xml, events);
+        assert_eq!(value(&screen), 75.0);
     }
 
     #[test]

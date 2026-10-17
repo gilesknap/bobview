@@ -9,7 +9,8 @@ each. BOY `.opi` widgets are translated to these; see
 | label, textupdate, textentry | formats: default, decimal, exponential, engineering, hex, compact, string, sexagesimal (also HMS and DMS), binary, significant; units, precision; typed text is parsed as Phoebus does (units dropped, `0x`/`0b` numbers, enum labels) |
 | led, multi_state_led, byte_monitor | |
 | action_button, bool_button, slide_button, choice, radio, combo, checkbox | open display, write PV and open webpage actions; command actions only for DLS launcher scripts and StripTool (see [How BOY screens are translated](../explanations/boy.md#launcher-commands)) |
-| scaledslider, scrollbar, spinner | |
+| scaledslider, scrollbar | set by a click or drag with the primary (left) button |
+| spinner | its arrows (on the left with `buttons_on_left`), or Up and Down while it has focus, step the value by `increment` within its range; or type a value and press Enter. As in Phoebus, a drag does nothing |
 | linearmeter | scale, warning regions from the levels (the PV's alarm limits with `limits_from_pv`), limit markers, needle; horizontal or vertical |
 | meter | a dial: scale (linear or `log_scale`), warning regions from the levels (the PV's alarm limits with `limits_from_pv`), needle |
 | progressbar, tank, thermometer | one shared bar renderer (tank and thermometer are vertical bars with their own default fill colours) |
