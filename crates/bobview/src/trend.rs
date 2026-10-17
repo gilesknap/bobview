@@ -148,6 +148,69 @@ mod tests {
         assert_eq!(t.title(), "Trend: A and 2 more");
     }
 
+    /// The longest line the trend draws, in points, and how wide it is,
+    /// once it has stopped loading: drawn headless, as a snapshot is.
+    fn longest_line(archiver: Option<ArchiverClient>) -> (usize, f32) {
+        use std::time::{Duration, Instant};
+        let pvs = PvManager::new();
+        // Archived by the mock, and served by no IOC: what it draws is
+        // history, not a live tail.
+        let mut t = Trend::new(0, &names(&["MOCK:SINE"]), &pvs, archiver, &[]);
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 500.0));
+        let begin = Instant::now();
+        let mut frames = 0;
+        let shapes = loop {
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                time: Some(begin.elapsed().as_secs_f64()),
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| t.ui(ui));
+            out.textures_delta.clear();
+            frames += 1;
+            // A few frames after it has loaded, for the data to be drawn.
+            if frames > 3 && !t.is_loading() {
+                break out.shapes;
+            }
+            assert!(
+                begin.elapsed() < Duration::from_secs(30),
+                "the trend was still loading after 30s"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        fn walk(shape: &egui::Shape, best: &mut (usize, f32)) {
+            match shape {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, best)),
+                egui::Shape::Path(p) if p.points.len() > best.0 => {
+                    let (lo, hi) = p.points.iter().fold((f32::MAX, f32::MIN), |(lo, hi), q| {
+                        (lo.min(q.x), hi.max(q.x))
+                    });
+                    *best = (p.points.len(), hi - lo);
+                }
+                _ => {}
+            }
+        }
+        let mut best = (0, 0.0);
+        shapes.iter().for_each(|s| walk(&s.shape, &mut best));
+        best
+    }
+
+    #[test]
+    fn shows_history_from_the_archiver() {
+        let mock = mockarchiver::MockArchiver::start_local().unwrap();
+        let archiver = ArchiverClient::new(&mock.url()).unwrap();
+        // MOCK:SINE has a 10 minute period, sampled every second: the
+        // default hour of it is a long wavy line across the plot.
+        let (points, width) = longest_line(Some(archiver));
+        assert!(points > 100, "history drawn with {points} points");
+        assert!(width > 400.0, "history drawn {width} points wide");
+        // Without the archiver the longest line is the plot's furniture
+        // (an icon), so the line above is history.
+        let (points, _) = longest_line(None);
+        assert!(points < 50, "{points} points with no archiver");
+    }
+
     #[test]
     fn views_leave_the_archiver_to_bobview() {
         let pvs = PvManager::new();

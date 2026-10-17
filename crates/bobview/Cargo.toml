@@ -34,6 +34,10 @@ clap = { version = "4.6.7", features = ["derive", "wrap_help"] }
 ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
 libc = "0.2.190"
 
+# A mock Archiver Appliance, for testing that trends show its history.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+archiveview-mockarchiver = "0.2.1"
+
 # The primary selection, which a middle-click pastes, where there is one
 # (X11 and Wayland); egui sets only the clipboard. The version egui-winit
 # uses, with Wayland's data-control protocol (falling back to XWayland).
