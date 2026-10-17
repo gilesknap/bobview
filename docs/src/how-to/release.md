@@ -5,8 +5,8 @@ workspace version and the `=` versions of `bob` and `pv` under
 `[workspace.dependencies]`. Merge that to `main`, then push a matching tag:
 
 ```bash
-git tag v1.8.4
-git push origin v1.8.4
+git tag v1.2.3
+git push origin v1.2.3
 ```
 
 CI checks that the tag matches the version in `Cargo.toml` and fails the
