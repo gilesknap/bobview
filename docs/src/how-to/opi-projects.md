@@ -53,10 +53,11 @@ the module's screens folder (or its `runcss.sh`).
 
 DLS screens are often opened by a launcher script, such as
 `./srCellVacuum 04`, that supplies macros. For an `.opi` given on the command
-line in an Eclipse project (through its project path or with `--project`),
-bobview tries the launcher scripts in its directory to find them: the one
-named `<screen>.sh` first, with no arguments and with each number in the
-file name, bare and with an `r`. So:
+line in an Eclipse project (through its project path, with `--project`, or
+by its real path beside a DLS `runcss.sh`), bobview tries the launcher
+scripts in its directory to find them: the one named `<screen>.sh` first,
+with no arguments and with each number in the file name, bare and with an
+`r`. So:
 
 | screen | macros from |
 | --- | --- |

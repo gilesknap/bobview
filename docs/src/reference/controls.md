@@ -5,7 +5,8 @@
 From the left: **Back**, **Forward**, **Home** and **Reload**; zoom out,
 the zoom, zoom in and **Fit**; the **navigator** and **Open…**; the
 display's name; and on the right the window's **pin**, the **layout list**
-and **☰**, a menu of the rest (Auto-size and the layout actions).
+and **☰**, a menu of the rest (Auto-size, Bring all windows to front, Close
+all other windows and the layout actions).
 
 - Clicking the zoom shows the display at 100% and sizes the window to it
   (and the navigator, when shown).
@@ -26,8 +27,9 @@ instead of fitting the window.
 ## On a widget
 
 - **Hover** to see its PV and value.
-- **Right-click** (long-press on a touch screen) to copy the PV name or
-  value, open the PV details, **Trend** it, or **Trend with rule PVs**.
+- **Right-click** (long-press on a touch screen) to copy the PV name, its
+  value or a `caget`/`pvget` command, open the PV details, **Trend** it,
+  **Trend with rule PVs**, or add it to an open trend.
 - On a touch screen, pinch to zoom.
 
 ## Display windows

@@ -6,6 +6,7 @@ A trend window plots one or more PVs against time.
 
 - Right-click a widget (long-press on a touch screen) and pick **Trend** for
   its PV, or **Trend with rule PVs** for its PV and the PVs its rules read.
+  The same menu adds them to a trend already open.
 - In a BOY screen, a button that would open a Data Browser or StripTool
   opens a trend of its PVs instead (see [How BOY screens are translated](../explanations/boy.md)).
 
