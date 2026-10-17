@@ -467,10 +467,11 @@ impl BobApp {
     /// Fetch the trends' history from `archiver`, or none (live only),
     /// remembering it in the settings for later runs if `remember`.
     pub fn set_archiver(&mut self, archiver: Option<ArchiverClient>, remember: bool) {
+        let outgoing = self.archiver.as_ref().map(ArchiverClient::base);
         if remember
             && self
                 .settings
-                .remember_archiver(archiver.as_ref().map(ArchiverClient::base))
+                .remember_archiver(archiver.as_ref().map(ArchiverClient::base), outgoing)
         {
             self.settings.save();
         }
@@ -491,9 +492,8 @@ impl BobApp {
         );
         self.set_archiver(archiver, true);
         for t in &self.trends {
-            ctx.request_repaint_of(trend_viewport(t.id));
+            repaint_after(ctx, trend_viewport(t.id), Duration::ZERO);
         }
-        ctx.request_repaint();
     }
 
     /// A trend window of `names`, with the next id.
@@ -774,6 +774,7 @@ impl BobApp {
         self.main.is_loading()
             || self.windows.iter().any(|w| w.view.is_loading())
             || crate::screen::building()
+            || self.trends.iter().any(Trend::is_loading)
     }
 
     /// Run a command action on a thread, so a slow launcher script or file

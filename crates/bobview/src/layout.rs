@@ -39,8 +39,10 @@ pub struct Layout {
 pub struct TrendLayout {
     /// The PVs plotted, in order. Also in `view`: written for older
     /// bobviews, and all a layout from before `view` has.
+    #[serde(default)]
     pub pvs: Vec<String>,
     /// The seconds shown, as for `pvs`.
+    #[serde(default)]
     pub span: f64,
     /// A log scale, as for `pvs`.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -485,15 +487,17 @@ const MAX_RECENT_ARCHIVERS: usize = 8;
 
 impl Settings {
     /// Make `archiver` (a retrieval URL, or none) the one to use, and the
-    /// newest of the recent ones. True if that changed anything.
-    pub fn remember_archiver(&mut self, archiver: Option<&str>) -> bool {
+    /// newest of the recent ones, with `outgoing` (the one used until now,
+    /// which may have come from the environment) next, so it can be picked
+    /// again. True if that changed anything.
+    pub fn remember_archiver(&mut self, archiver: Option<&str>, outgoing: Option<&str>) -> bool {
         let before = (self.archiver_url.clone(), self.recent_archivers.clone());
         self.archiver_url = archiver.map(str::to_string);
-        if let Some(url) = archiver {
+        for url in [outgoing, archiver].into_iter().flatten() {
             self.recent_archivers.retain(|u| u != url);
             self.recent_archivers.insert(0, url.to_string());
-            self.recent_archivers.truncate(MAX_RECENT_ARCHIVERS);
         }
+        self.recent_archivers.truncate(MAX_RECENT_ARCHIVERS);
         before != (self.archiver_url.clone(), self.recent_archivers.clone())
     }
 
@@ -682,6 +686,41 @@ mod tests {
         assert_eq!(again.pvs, ["A", "B"]);
         assert_eq!(again.span, 7200.0);
         assert_eq!(again.view(), view);
+        // A view alone is enough.
+        let bare: TrendLayout =
+            serde_json::from_str(r#"{ "view": { "version": 1, "pvs": [{ "name": "C" }] } }"#)
+                .unwrap();
+        assert_eq!(bare.view().pvs, [trace("C")]);
+    }
+
+    #[test]
+    fn remembering_an_archiver_keeps_the_one_before() {
+        let mut s = Settings::default();
+        // From the environment (never remembered), then switched away from.
+        assert!(s.remember_archiver(Some("http://new/retrieval"), Some("http://env/retrieval")));
+        assert_eq!(s.archiver_url.as_deref(), Some("http://new/retrieval"));
+        assert_eq!(
+            s.recent_archivers,
+            ["http://new/retrieval", "http://env/retrieval"]
+        );
+        // Back again: each once, newest first.
+        assert!(s.remember_archiver(Some("http://env/retrieval"), Some("http://new/retrieval")));
+        assert_eq!(
+            s.recent_archivers,
+            ["http://env/retrieval", "http://new/retrieval"]
+        );
+        assert!(!s.remember_archiver(Some("http://env/retrieval"), Some("http://env/retrieval")));
+        // None: live only, but the one before is still offered.
+        assert!(s.remember_archiver(None, Some("http://env/retrieval")));
+        assert_eq!(s.archiver_url, None);
+        assert_eq!(
+            s.recent_archivers,
+            ["http://env/retrieval", "http://new/retrieval"]
+        );
+        for i in 0..20 {
+            s.remember_archiver(Some(&format!("http://{i}/retrieval")), None);
+        }
+        assert_eq!(s.recent_archivers.len(), MAX_RECENT_ARCHIVERS);
     }
 
     fn trace(name: &str) -> TraceView {

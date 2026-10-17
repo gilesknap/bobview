@@ -120,7 +120,7 @@ struct Cli {
     read_only: bool,
     /// The EPICS Archiver Appliance that trends fetch history from, e.g.
     /// http://archiver:17668 (/retrieval is added); remembered for later
-    /// runs. Without one (nor BOBVIEW_ARCHIVER), trends are live only
+    /// runs (not with --snapshot). Without one (nor BOBVIEW_ARCHIVER), trends are live only
     #[arg(long, value_name = "URL", value_parser = parse_archiver)]
     archiver: Option<archiveview::ArchiverClient>,
     /// No archiver this run, even if BOBVIEW_ARCHIVER or the settings name

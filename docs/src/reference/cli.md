@@ -18,7 +18,7 @@ been saved, else opens `index.bob` from the bundled displays
 | `-z`, `--zoom FACTOR` | fixed zoom, 0.2 to 5, instead of fitting the window |
 | `-f`, `--fullscreen` | start full screen |
 | `--read-only` | refuse every write to a PV except `loc://` ones; see [Writes and safety](../explanations/writes.md) |
-| `--archiver URL` | the EPICS Archiver Appliance trends fetch history from, e.g. `http://archiver:17668` (`/retrieval` is added); remembered for later runs. See [Trend PVs](../how-to/trends.md) |
+| `--archiver URL` | the EPICS Archiver Appliance trends fetch history from, e.g. `http://archiver:17668` (`/retrieval` is added); remembered for later runs (not with `--snapshot`). See [Trend PVs](../how-to/trends.md) |
 | `--no-archiver` | no archiver this run, even if `BOBVIEW_ARCHIVER` or the settings name one: trends are live only |
 | `--layout NAME` | restore the saved layout `NAME` |
 | `--no-layout` | don't restore the default layout |

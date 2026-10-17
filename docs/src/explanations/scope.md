@@ -16,8 +16,8 @@ builds for the browser.
   name and done natively instead; see [How BOY screens are translated](boy.md)
   and [Widgets](../reference/widgets.md).
 - **Display editing.** Use Phoebus to edit screens.
-- **Alarm services.** Trends show archived history only from an EPICS
-  Archiver Appliance, through
+- **Alarm services, and archivers other than the EPICS Archiver
+  Appliance.** Trends show history from an Archiver Appliance through
   [archiveview](https://github.com/gilesknap/archiveview); see
   [Trend PVs](../how-to/trends.md).
 

@@ -30,7 +30,8 @@ bobview --archiver http://archiver.example.com:17668 DISPLAY
 `pbraw://host:port/retrieval` form works too. The archiver is chosen in this
 order:
 
-1. `--archiver URL`, which is also remembered for later runs;
+1. `--archiver URL`, which is also remembered for later runs (not with
+   `--snapshot`);
 2. none with `--no-archiver`, for this run only;
 3. the `BOBVIEW_ARCHIVER` environment variable (not remembered), for a
    site-wide default set in a launcher script or profile;
@@ -65,7 +66,7 @@ bobview --archiver http://127.0.0.1:17668
 - **PVs.** Type in the search box to add a PV; with an archiver it also
   searches the archived names. The legend chips under the plot give each
   PV's colour, name and value: click one to hide its line, hover to pick it
-  out, and **✕** to remove it. Ctrl+V over the plot adds the PVs named in
+  out, and **×** to remove it. Ctrl+V over the plot adds the PVs named in
   the clipboard.
 - **Undo.** **↶** and **↷** (or Ctrl+Z and Ctrl+Shift+Z) undo and redo
   changes to the plot.

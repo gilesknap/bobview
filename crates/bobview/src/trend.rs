@@ -92,6 +92,13 @@ impl Trend {
         self.plot.take_archiver_change()
     }
 
+    /// Whether its plot is still fetching history, or waiting to draw
+    /// a PV whose data has come (snapshots wait for this).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn is_loading(&self) -> bool {
+        self.plot.is_loading()
+    }
+
     /// The window title: its PVs, or the first and how many more.
     pub fn title(&self) -> String {
         match self.plot.title() {
