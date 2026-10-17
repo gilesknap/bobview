@@ -30,8 +30,10 @@ pub fn menu(
     let value = state.filter(|s| s.connected).map(|s| s.format(None, true));
 
     // Also to the primary selection, as a middle-click on the widget does.
-    if ui.button("Copy PV name").clicked() {
-        requests.push(Request::Copy(copy_name(&PvName::parse(name))));
+    if ui.button("Copy PV name").clicked()
+        && let Some(names) = copy_names(node)
+    {
+        requests.push(Request::Copy(names));
     }
     if let (Some(state), Some(value)) = (state, &value) {
         if ui.button("Copy value").clicked() {
@@ -120,34 +122,45 @@ fn trend_names(node: &Node) -> Vec<String> {
 
 /// What a middle-click on the widget copies: its PV's name, or, for a plot
 /// with no PV of its own (an XY plot or strip chart), its traces' PVs,
-/// separated by spaces. Rule PVs are left out: they choose how the widget
-/// looks, and are not what it shows.
-pub fn copy_text(node: &Node) -> Option<String> {
-    if !node.pv_name.is_empty() {
-        return Some(copy_name(&PvName::parse(&node.pv_name)));
-    }
+/// separated by spaces (see [`copy_name`]). Rule PVs are left out: they
+/// choose how the widget looks, and are not what it shows.
+pub fn copy_names(node: &Node) -> Option<String> {
     let mut names: Vec<String> = Vec::new();
-    for t in &node.traces {
-        for pv in t.y.iter().chain(&t.x) {
-            let name = copy_name(pv.name());
-            if !names.contains(&name) {
-                names.push(name);
+    if !node.pv_name.is_empty() {
+        copy_name(&PvName::parse(&node.pv_name), &mut names);
+    } else {
+        for t in &node.traces {
+            for pv in t.y.iter().chain(&t.x) {
+                copy_name(pv.name(), &mut names);
             }
         }
     }
     (!names.is_empty()).then(|| names.join(" "))
 }
 
-/// A PV's name as a terminal or another EPICS tool takes it: a Channel
-/// Access name bare, a PV Access one with its `pva://`, and a local or
-/// simulated PV without bobview's `loc://` or `sim://` and its type or
-/// initial value (`x`, not `loc://x<VDouble>(1.5)`). A formula is copied
-/// whole.
-pub fn copy_name(name: &PvName) -> String {
-    match name.scheme {
-        Scheme::Ca | Scheme::Loc | Scheme::Sim => name.base().to_string(),
-        Scheme::Pva => format!("pva://{}", name.base()),
-        Scheme::Formula | Scheme::Unsupported => name.to_string(),
+/// Add a PV's name to `names` (unless it is there) as another EPICS tool
+/// takes it: a Channel Access name bare and whole, a PV Access, local or
+/// simulated one with its prefix (`loc://x`, without the type and initial
+/// value of `loc://x<VDouble>(1.5)`; a simulated PV keeps its parameters).
+/// A formula adds the PVs it reads instead, as its text has spaces.
+fn copy_name(name: &PvName, names: &mut Vec<String>) {
+    let name = match name.scheme {
+        Scheme::Ca => name.pv.clone(),
+        Scheme::Pva | Scheme::Loc | Scheme::Sim => name.key(),
+        Scheme::Unsupported => name.to_string(),
+        Scheme::Formula => {
+            for input in pv::formula_inputs(&name.pv) {
+                // An input is never a formula itself: `=` starts no name.
+                let input = PvName::parse(&input);
+                if input.scheme != Scheme::Formula {
+                    copy_name(&input, names);
+                }
+            }
+            return;
+        }
+    };
+    if !names.contains(&name) {
+        names.push(name);
     }
 }
 
@@ -380,13 +393,24 @@ mod tests {
 
     #[test]
     fn copied_names_are_as_other_tools_take_them() {
-        let name = |n| copy_name(&PvName::parse(n));
+        let name = |n| {
+            let mut names = Vec::new();
+            copy_name(&PvName::parse(n), &mut names);
+            names.join(" ")
+        };
         assert_eq!(name("BL01T:X"), "BL01T:X");
         assert_eq!(name("ca://BL01T:X"), "BL01T:X");
+        // EPICS record names may hold `<` and `(`.
+        assert_eq!(name("ca://T<1>(2)"), "T<1>(2)");
         assert_eq!(name("pva://BL01T:IMG"), "pva://BL01T:IMG");
-        assert_eq!(name("loc://x<VDouble>(1.5)"), "x");
-        assert_eq!(name("sim://sine(0, 10, 0.1)"), "sine");
-        assert_eq!(name("=`a`+1"), "=`a`+1");
+        assert_eq!(name("loc://x<VDouble>(1.5)"), "loc://x");
+        assert_eq!(name("sim://sine(0, 10, 0.1)"), "sim://sine(0, 10, 0.1)");
+        // A formula's inputs, each once.
+        assert_eq!(
+            name("=`ca://A:B` + 'pva://C' * `A:B` + 'loc://m<VLong>(1)'"),
+            "A:B pva://C loc://m"
+        );
+        assert_eq!(name("=1 + 2"), "");
     }
 
     #[test]
@@ -403,7 +427,7 @@ mod tests {
         let display = bob::Display::parse(xml).unwrap();
         let screen =
             crate::screen::Builder::new(&pvs).screen(display, &bob::Macros::default(), None, 0);
-        let copied: Vec<Option<String>> = screen.nodes.iter().map(copy_text).collect();
+        let copied: Vec<Option<String>> = screen.nodes.iter().map(copy_names).collect();
         assert_eq!(
             copied,
             [

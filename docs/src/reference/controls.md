@@ -44,15 +44,17 @@ puts the PV name on both the clipboard (for Ctrl+V) and the primary
 selection (for a middle-click, on Linux). The name is the one other tools
 take:
 
-- macros expanded, and a Channel Access name bare (`BL01T-EA-DET-01:COUNT`,
-  not `ca://BL01T-EA-DET-01:COUNT`);
+- macros expanded, and a Channel Access name bare and whole
+  (`BL01T-EA-DET-01:COUNT`, not `ca://BL01T-EA-DET-01:COUNT`);
 - a PV Access name keeps its `pva://`;
-- a `loc://` or `sim://` PV loses its prefix, type and initial value
-  (`x`, not `loc://x<VDouble>(1.5)`); a formula is copied whole.
+- a `loc://` PV keeps its prefix but not its type and initial value
+  (`loc://x`, not `loc://x<VDouble>(1.5)`); a `sim://` PV is copied whole,
+  its parameters too (`sim://sine(0, 10, 0.1)`);
+- a formula copies the PVs it reads, each named as above, not its text.
 
 A widget copies its own PV only, not the PVs its rules read. An XY plot or
-strip chart, which has no PV of its own, copies its traces' PVs, separated
-by spaces.
+strip chart, which has no PV of its own, copies its traces' PVs. Several
+names are separated by spaces.
 
 On X11 bobview holds the primary selection itself, so it is lost when
 bobview exits, as with any X application; this works over `ssh -X` too. On
@@ -60,6 +62,8 @@ Wayland bobview uses the compositor's data-control protocol where it has
 one, and XWayland's primary selection otherwise. Windows, macOS and the
 browser have no primary selection, so there the name goes to the clipboard
 only (in the browser, if it allows the page to write to the clipboard).
+Middle-click in the browser is untested, and the browser may start
+autoscrolling on it.
 
 ## Display windows
 

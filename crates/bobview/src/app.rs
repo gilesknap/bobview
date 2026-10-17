@@ -1833,7 +1833,7 @@ impl BobApp {
                 target,
             } => self.follow(ctx, origin, Location { source, macros }, &target),
             Request::Copy(text) => {
-                log::info!("copy {text}");
+                log::debug!("copy {text}");
                 ctx.copy_text(text.clone());
                 if let Err(e) = self.primary.set(&text) {
                     log::debug!("no primary selection: {e}");
@@ -3137,8 +3137,8 @@ mod tests {
                 assert!(copied.is_empty() && primary.lock().is_empty());
             }
         }
-        assert_eq!(copied, ["copy_t"]);
-        assert_eq!(*primary.lock(), ["copy_t"]);
+        assert_eq!(copied, ["loc://copy_t"]);
+        assert_eq!(*primary.lock(), ["loc://copy_t"]);
         assert!(app.main.copied.is_some());
         std::fs::remove_dir_all(&dir).ok();
     }

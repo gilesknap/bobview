@@ -26,6 +26,31 @@ use parking_lot::Mutex;
 
 use crate::{Inner, Listener, Pv, PvManager, PvName, PvState, Severity, Shared, Value};
 
+/// The PVs a formula's text names (`a+b` for the formula `=a+b`), each
+/// once, in order; none when it does not parse. A PV whose name is
+/// computed is left out, though the PVs its name is computed from are not.
+pub fn formula_inputs(text: &str) -> Vec<String> {
+    fn walk(e: &Expr, out: &mut Vec<String>) {
+        match e {
+            Expr::Num(_) | Expr::Str(_) => {}
+            Expr::Pv(name) => {
+                if !out.contains(name) {
+                    out.push(name.clone());
+                }
+            }
+            Expr::DynPv(e) | Expr::Neg(e) | Expr::Not(e) => walk(e, out),
+            Expr::Binary(_, a, b) => [a, b].into_iter().for_each(|e| walk(e, out)),
+            Expr::Cond(c, a, b) => [c, a, b].into_iter().for_each(|e| walk(e, out)),
+            Expr::Call(_, args) => args.iter().for_each(|e| walk(e, out)),
+        }
+    }
+    let mut out = Vec::new();
+    if let Ok(e) = parse(text) {
+        walk(&e, &mut out);
+    }
+    out
+}
+
 /// A parsed formula.
 #[derive(Clone, Debug, PartialEq)]
 enum Expr {
@@ -823,6 +848,17 @@ mod tests {
             "a1.5b"
         );
         assert_eq!(num("\"a\" == \"a\""), 1.0);
+    }
+
+    #[test]
+    fn lists_the_pvs_a_formula_names() {
+        assert_eq!(
+            formula_inputs("(pv(\"X:Y\")*1000) + 'loc://m(1)' + `X:Y` + max(A, -B) + (C ? 1 : D)"),
+            ["X:Y", "loc://m(1)", "A", "B", "C", "D"]
+        );
+        let dynamic = r#"pv(concat("SR01C-DI-PIN-17:", toString('loc://mode<VString>("RATE")')))"#;
+        assert_eq!(formula_inputs(dynamic), [r#"loc://mode<VString>("RATE")"#]);
+        assert!(formula_inputs("1 +").is_empty());
     }
 
     #[test]

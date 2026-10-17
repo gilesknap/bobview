@@ -351,13 +351,13 @@ fn draw_node(ui: &mut Ui, node: &mut Node, cx: &mut Cx, id: Id) {
 /// How long a widget is highlighted after a middle-click copies its PV.
 const FLASH_SECONDS: f64 = 0.4;
 
-/// Copy the widget's PV name (see [`crate::pvmenu::copy_text`]) when it is
+/// Copy the widget's PV name (see [`crate::pvmenu::copy_names`]) when it is
 /// middle-clicked, and note the time, to highlight it for a moment.
 fn middle_click_copy(ui: &Ui, resp: &Response, node: &Node, cx: &mut Cx, id: Id) {
     if !resp.middle_clicked() {
         return;
     }
-    if let Some(text) = crate::pvmenu::copy_text(node) {
+    if let Some(text) = crate::pvmenu::copy_names(node) {
         let now = ui.input(|i| i.time);
         ui.ctx().data_mut(|d| d.insert_temp(id.with("copied"), now));
         cx.requests.push(Request::Copy(text));
