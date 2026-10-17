@@ -34,6 +34,9 @@ mod launch {
     pub fn defaults(_file: &Path) -> Option<Macros> {
         None
     }
+
+    /// No launchers run here, so there is nothing to allow.
+    pub fn allow_writable_launchers(_allow: bool) {}
 }
 mod layout;
 mod meter;
