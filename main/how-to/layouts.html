@@ -201,8 +201,13 @@ trend windows open now. From the command line:</p>
 <pre><code class="language-bash">bobview                     # restores the default layout if there is one
 bobview DISPLAY             # opens DISPLAY; the default layout is not restored
 bobview --layout rf-shift   # restores layouts/rf-shift.json
+bobview --layout ~/shift.json   # restores the layout in that file
 bobview --no-layout         # ignores the default layout
 </code></pre>
+<p>A <code>--layout</code> that has a directory in it or ends in <code>.json</code> is a layout
+file's path, so a layout kept elsewhere (under version control, say) can be
+restored without copying it into <code>layouts</code>. The toolbar shows it by its file
+name, and <strong>Save layout</strong> writes back to that file.</p>
 <p><code>--snapshot</code> ignores layouts.</p>
 <h2 id="what-a-layout-holds"><a class="header" href="#what-a-layout-holds">What a layout holds</a></h2>
 <p>For each window: its display, Eclipse project and effective macros, its

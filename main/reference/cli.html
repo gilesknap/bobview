@@ -197,7 +197,7 @@ been saved, else opens <code>index.bob</code> from the bundled displays
 <tr><td><code>--read-only</code></td><td>refuse every write to a PV except <code>loc://</code> ones; see <a href="../explanations/writes.html">Writes and safety</a></td></tr>
 <tr><td><code>--archiver URL</code></td><td>the EPICS Archiver Appliance trends fetch history from, e.g. <code>http://archiver:17668</code> (<code>/retrieval</code> is added); remembered for later runs (not with <code>--snapshot</code>). See <a href="../how-to/trends.html">Trend PVs</a></td></tr>
 <tr><td><code>--no-archiver</code></td><td>no archiver this run, even if <code>BOBVIEW_ARCHIVER</code> or the settings name one: trends are live only</td></tr>
-<tr><td><code>--layout NAME</code></td><td>restore the saved layout <code>NAME</code></td></tr>
+<tr><td><code>--layout NAME</code> or <code>FILE</code></td><td>restore the saved layout <code>NAME</code>, or the layout in the JSON file <code>FILE</code> (a path with a directory in it or ending in <code>.json</code>); <strong>Save layout</strong> then writes back to that file. See <a href="../how-to/layouts.html">Save and restore a layout</a></td></tr>
 <tr><td><code>--no-layout</code></td><td>don't restore the default layout</td></tr>
 <tr><td><code>--ui-scale F</code> or <code>auto</code></td><td>size of the toolbar and menus relative to the desktop's scale, 1 being the desktop's own (default auto: smaller on a small high-DPI screen)</td></tr>
 <tr><td><code>--snapshot OUT.png</code></td><td>render to a PNG without a window and exit; see <a href="../how-to/snapshots.html">Take snapshots</a></td></tr>
