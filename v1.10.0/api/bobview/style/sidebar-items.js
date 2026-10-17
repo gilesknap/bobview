@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["BOLD","BOLD_ITALIC","ITALIC"],"fn":["align","color","font_id","install_fonts","named","severity_color"],"struct":["View"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["COMPACT_TOOLBAR_WIDTH","DEFAULT_WINDOW","FULL_TOOLBAR_WIDTH","MAX_MONITOR_FRACTION","MIN_BUTTON_PX","TOOLBAR_FRACTION"],"enum":["UiScale"],"fn":["auto_pixels_per_point","can_resize","changed","small_screen","window_size"],"struct":["Chrome"]};

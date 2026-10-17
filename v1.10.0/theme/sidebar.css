@@ -1,0 +1,10 @@
+/* Indent the sidebar's chapters under their Diátaxis part titles
+   (Tutorials, How-to guides …), leaving the Introduction above them flush. */
+.sidebar .chapter li.part-title ~ li.chapter-item {
+    margin-left: 1.25em;
+}
+
+.sidebar .chapter li.part-title {
+    margin-top: 1em;
+    font-weight: bold;
+}

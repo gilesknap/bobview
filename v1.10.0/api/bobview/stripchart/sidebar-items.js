@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_AGE","MAX_SAMPLES","MIN_SCROLL_REPAINT","TIME_STEPS"],"fn":["draw_plot","draw_stripchart","local_offset","now","parse_span","sample","scroll_repaint","time_label","time_ticks"],"struct":["Column","Line","Look","Samples","Series","Thinned"]};
