@@ -571,7 +571,12 @@ fn location_path(location: &str, dir: &Path) -> Option<PathBuf> {
             Some(rest) => &rest[rest.find('/')?..],
             None => uri,
         };
-        PathBuf::from(percent_decode(path))
+        // Decoded first, as the drive may be escaped (`/C%3A/x`).
+        let path = percent_decode(path);
+        match path.to_str() {
+            Some(p) => PathBuf::from(crate::source::file_url_path(p)),
+            None => PathBuf::from(path),
+        }
     } else if let Some(path) = project_relative(location) {
         path
     } else {
@@ -686,6 +691,24 @@ mod tests {
         assert_eq!(locate(&proj.join("a/x.opi")), proj.join("a/x.opi"));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_link_locations() {
+        let loc = |l: &str| location_path(l, Path::new(r"C:\w\proj"));
+        assert_eq!(loc(r"D:\abs\opi"), Some(PathBuf::from(r"D:\abs\opi")));
+        assert_eq!(
+            loc("file:/D:/a%20b/opi"),
+            Some(PathBuf::from(r"D:\a b\opi"))
+        );
+        assert_eq!(loc("file:///D%3A/opi"), Some(PathBuf::from(r"D:\opi")));
+        assert_eq!(
+            loc("PROJECT_LOC/sub"),
+            Some(PathBuf::from(r"C:\w\proj\sub"))
+        );
+        assert_eq!(loc("/no/drive"), None);
+    }
+
+    #[cfg(unix)]
     #[test]
     fn link_locations_resolve_against_the_project() {
         let dir = Path::new("/w/proj");
@@ -807,6 +830,7 @@ $CSS_RUN_SCRIPT -o "${launch_opi}" -s -l "$links" "$@"
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn reads_a_generated_launcher() {
         // vacuum 4-100's, verbatim.
@@ -830,6 +854,7 @@ $CSS_RUN_SCRIPT -o "${launch_opi}" -s -l "$links" "$@"
         assert_eq!(links[13].0, "devIocStats");
     }
 
+    #[cfg(unix)]
     #[test]
     fn reads_a_launcher_that_sources_versions_and_calls_functions() {
         // diagOpi 2-90's, verbatim: its links come from `opi-versions`,
@@ -910,6 +935,7 @@ $CSS_RUN_SCRIPT -o "${launch_opi}" -s -l "$links" "$@"
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlinked_screens_map_by_name_or_by_target() {
         let (root, opi, _) = module("runcss-links", Some("1-2"));
@@ -1022,6 +1048,7 @@ $CSS_RUN_SCRIPT -o "${launch_opi}" -s -l "$links" "$@"
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_function_calling_itself_ends() {
         let text = "f()\n{\n    echo \"$(f)\"\n}\nx=$(f)\nlinks=\"/a=/p/n\"\n";
@@ -1057,7 +1084,10 @@ $CSS_RUN_SCRIPT -o "${launch_opi}" -s -l "$links" "$@"
     fn oversized_project_files_are_ignored_not_cached_empty() {
         let dir = std::env::temp_dir().join(format!("bobview-bigproj-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let link = "<link><name>a</name><location>/tmp</location></link>";
+        let link = format!(
+            "<link><name>a</name><location>{}</location></link>",
+            std::env::temp_dir().display()
+        );
         let pad = " ".repeat(MAX_PROJECT_SIZE as usize);
         std::fs::write(dir.join(".project"), format!("<p>{pad}{link}</p>")).unwrap();
         assert!(links(&dir).is_none());

@@ -292,7 +292,7 @@ fn one_line(text: &str) -> String {
 /// A display's file name without its directory or extension.
 fn file_name(source: &Source) -> String {
     let text = source.to_string();
-    let base = text.rsplit('/').next().unwrap_or("");
+    let base = text.rsplit(std::path::is_separator).next().unwrap_or("");
     base.rsplit_once('.')
         .map_or(base, |(stem, _)| stem)
         .to_string()
@@ -855,8 +855,9 @@ mod tests {
         )
         .unwrap();
 
+        // Normalised, so `X/d.bob` is spelled as resolving a link spells it.
         let at = |file: &str, pairs: &[(&str, &str)]| Location {
-            source: Source::File(dir.join(file)),
+            source: Source::File(bob::project::normalize(&dir.join(file))),
             macros: Macros::from_pairs(pairs.iter().copied()),
         };
         let found = links(&at("top.bob", &[])).unwrap();

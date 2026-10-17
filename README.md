@@ -17,7 +17,9 @@ on a phone. The same app runs in a browser, served by `bobview-server`.
 | Releases | <https://github.com/gilesknap/bobview/releases> |
 
 Install on Linux (x86_64 or aarch64) or macOS, then open the bundled
-displays against the simulated beamline:
+displays against the simulated beamline (for Windows, download the zip from
+the releases; see
+[Install bobview](https://gilesknap.github.io/bobview/main/how-to/install.html#windows)):
 
 ```bash
 curl -sSfL https://raw.githubusercontent.com/gilesknap/bobview/main/install.sh | bash

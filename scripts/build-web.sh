@@ -34,7 +34,7 @@ fi
 
 cargo build --locked --release --target wasm32-unknown-unknown -p bobview --bin bobview
 target=$(cargo metadata --format-version 1 --no-deps --locked |
-    python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')
+    "${PYTHON:-python3}" -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')
 rm -rf "${out}"
 mkdir -p "${out}"
 wasm-bindgen --target web --no-typescript --out-dir "${out}" \

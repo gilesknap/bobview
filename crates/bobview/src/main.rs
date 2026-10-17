@@ -9,8 +9,32 @@ mod format;
 mod group_link;
 mod icons;
 mod image;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 mod launch;
+/// DLS launcher scripts are shell scripts: not run on Windows.
+#[cfg(not(any(unix, target_arch = "wasm32")))]
+mod launch {
+    use std::path::{Path, PathBuf};
+
+    use bob::{Macros, Source};
+
+    pub fn command_target(
+        _base: Option<&Source>,
+        _directory: Option<Source>,
+        command: &str,
+    ) -> Option<(PathBuf, Macros)> {
+        // Called for every command link the tree finds, as well as for a
+        // button pressed (which warns that the command is not supported).
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| log::warn!("launcher scripts are not run on this platform"));
+        log::debug!("not running '{command}'");
+        None
+    }
+
+    pub fn defaults(_file: &Path) -> Option<Macros> {
+        None
+    }
+}
 mod layout;
 mod meter;
 mod plot;
@@ -39,7 +63,8 @@ use eframe::egui;
 const AFTER_HELP: &str = "\
 With no display, bobview restores the default window layout when one has
 been saved (in $XDG_CONFIG_HOME/bobview/layouts, by default
-~/.config/bobview/layouts), else opens index.bob from the bundled displays
+~/.config/bobview/layouts, or %APPDATA%\\bobview\\layouts on Windows),
+else opens index.bob from the bundled displays
 (~/.local/share/bobview/displays) when present, else a file chooser.
 A display may also be an http:// or https:// URL; files it names are
 fetched relative to it. CS-Studio BOY .opi displays are translated as

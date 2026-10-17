@@ -95,9 +95,11 @@ for pkg in crates:
     if not files:
         missing.append(pkg)
     for f in files:
-        by_text[f.read_text(errors="replace").strip()].append(f"{label} ({f.name})")
+        by_text[f.read_text(encoding="utf-8", errors="replace").strip()].append(f"{label} ({f.name})")
 
 out = sys.stdout
+# UTF-8 whatever the locale (on Windows it is not), with Unix line endings.
+out.reconfigure(encoding="utf-8", newline="\n")
 out.write("Third-party software in the bobview release binaries\n")
 out.write("=" * 53 + "\n\n")
 out.write(f"bobview, bobview-probe, bobview-testioc and bobview-server (target {TARGET})\n")
@@ -125,8 +127,8 @@ for text, users in sorted(by_text.items(), key=lambda kv: kv[1][0]):
 
 out.write("\n" + "-" * 78 + "\n")
 out.write("Apache License 2.0 (full text, for the crates above that declare it)\n\n")
-out.write((ROOT / "LICENSE").read_text().strip() + "\n")
+out.write((ROOT / "LICENSE").read_text(encoding="utf-8").strip() + "\n")
 
 for name, path in EMBEDDED_FONTS:
     out.write("\n" + "-" * 78 + "\n")
-    out.write(f"{name}\n\n{path.read_text().strip()}\n")
+    out.write(f"{name}\n\n{path.read_text(encoding='utf-8').strip()}\n")

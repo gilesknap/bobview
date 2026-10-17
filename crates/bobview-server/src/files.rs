@@ -22,6 +22,34 @@ use axum::response::{IntoResponse, Response};
 /// The bytes read from a file at a time.
 const CHUNK: usize = 64 * 1024;
 
+/// Whether Windows would take `segment` for something other than the file
+/// it names: a device (`NUL`, `COM1.txt`), or a name it trims (`a.bob.`,
+/// `a.bob `) and so opens another file under.
+fn windows_unsafe(segment: &str) -> bool {
+    if segment.ends_with(['.', ' ']) {
+        return true;
+    }
+    let stem = segment
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(' ');
+    let upper = stem.to_ascii_uppercase();
+    match upper.as_str() {
+        "CON" | "PRN" | "AUX" | "NUL" => true,
+        _ => match (upper.get(..3), upper.get(3..)) {
+            (Some("COM" | "LPT"), Some(port)) => {
+                let mut c = port.chars();
+                matches!(
+                    (c.next(), c.next()),
+                    (Some('1'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}'), None)
+                )
+            }
+            _ => false,
+        },
+    }
+}
+
 /// The directories files are served from, in order, each with its real
 /// path (symbolic links resolved).
 pub struct Roots(Vec<(PathBuf, Option<PathBuf>)>);
@@ -48,6 +76,9 @@ impl Roots {
                 "" | "." => {}
                 ".." => return Found::Missing,
                 s if s.contains('\\') || s.contains('\0') => return Found::Missing,
+                // A drive (`C:`) or a file's stream (`a.bob:s`) on Windows.
+                s if cfg!(windows) && s.contains(':') => return Found::Missing,
+                s if cfg!(windows) && windows_unsafe(s) => return Found::Missing,
                 s => rel.push(s),
             }
         }
@@ -76,24 +107,14 @@ impl Roots {
             }
             // Without blocking, should a FIFO be swapped in meanwhile; the
             // check below refuses anything but a regular file.
-            let opened = {
-                use std::os::unix::fs::OpenOptionsExt;
-                std::fs::OpenOptions::new()
-                    .read(true)
-                    .custom_flags(libc::O_NONBLOCK)
-                    .open(&file)
-            };
-            let Ok(opened) = opened else {
+            let Ok(opened) = open_file(&file) else {
                 continue;
             };
             let checked = || -> Option<Metadata> {
-                use std::os::unix::fs::MetadataExt;
                 let real = std::fs::canonicalize(&file).ok()?;
-                let (now, then) = (std::fs::metadata(&real).ok()?, opened.metadata().ok()?);
+                let then = opened.metadata().ok()?;
                 // The real path is inside, and is the file that was opened.
-                (inside(&real)
-                    && then.is_file()
-                    && (now.dev(), now.ino()) == (then.dev(), then.ino()))
+                (inside(&real) && then.is_file() && is_opened(&real, &opened, &then)?)
                     .then_some(then)
             };
             return match checked() {
@@ -103,6 +124,46 @@ impl Roots {
         }
         Found::Missing
     }
+}
+
+/// Open `file` for reading, without blocking should it be a FIFO.
+#[cfg(unix)]
+fn open_file(file: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(file)
+}
+
+#[cfg(not(unix))]
+fn open_file(file: &Path) -> std::io::Result<File> {
+    File::open(file)
+}
+
+/// Whether the file at `real` is `opened` (whose metadata is `meta`).
+#[cfg(unix)]
+fn is_opened(real: &Path, _opened: &File, meta: &Metadata) -> Option<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let now = std::fs::metadata(real).ok()?;
+    Some((now.dev(), now.ino()) == (meta.dev(), meta.ino()))
+}
+
+/// Whether the file at `real` is `opened`: the same volume and file index.
+#[cfg(windows)]
+fn is_opened(real: &Path, opened: &File, _meta: &Metadata) -> Option<bool> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+    let id = |f: &File| {
+        // SAFETY: an open file's handle, and a struct the call fills in.
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        let ok = unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut info) };
+        let index = (info.nFileIndexHigh, info.nFileIndexLow);
+        (ok != 0).then_some((info.dwVolumeSerialNumber, index))
+    };
+    Some(id(&File::open(real).ok()?)? == id(opened)?)
 }
 
 /// What a request path names.
@@ -156,14 +217,17 @@ struct Validators {
 
 impl Validators {
     fn of(meta: &Metadata) -> Self {
-        use std::os::unix::fs::MetadataExt;
         let modified = meta.modified().ok();
         let since = modified.and_then(|m| m.duration_since(UNIX_EPOCH).ok());
         let nanos = since.unwrap_or_default().as_nanos();
-        Self {
-            etag: format!("\"{:x}-{:x}-{nanos:x}\"", meta.ino(), meta.len()),
-            modified,
-        }
+        #[cfg(unix)]
+        let etag = {
+            use std::os::unix::fs::MetadataExt;
+            format!("\"{:x}-{:x}-{nanos:x}\"", meta.ino(), meta.len())
+        };
+        #[cfg(not(unix))]
+        let etag = format!("\"{:x}-{nanos:x}\"", meta.len());
+        Self { etag, modified }
     }
 
     fn last_modified(&self) -> Option<String> {
@@ -326,8 +390,46 @@ fn stream(mut file: File, first: u64, count: u64) -> std::io::Result<Body> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Found, Part, Roots, part};
+    use super::{Found, Part, Roots, part, windows_unsafe};
+    #[cfg(unix)]
     use std::path::PathBuf;
+
+    #[test]
+    fn windows_names() {
+        for s in [
+            "CON",
+            "con",
+            "Nul",
+            "aux.txt",
+            "PRN.a.b",
+            "nul .txt",
+            "COM1",
+            "com9.bob",
+            "LPT5",
+            "COM\u{b9}",
+            "lpt\u{b3}.x",
+            "a.bob.",
+            "a.bob ",
+            "..bob.",
+            " ",
+        ] {
+            assert!(windows_unsafe(s), "{s:?}");
+        }
+        for s in [
+            "a.bob",
+            "CONSOLE",
+            "con1",
+            "COM0",
+            "COM10",
+            "LPT",
+            "nul_x",
+            "xCON",
+            ".nul",
+            "COM\u{b4}",
+        ] {
+            assert!(!windows_unsafe(s), "{s:?}");
+        }
+    }
 
     #[test]
     fn ranges() {
@@ -347,6 +449,25 @@ mod tests {
         assert_eq!(part(Some("bytes=x-"), 10), Part::Whole);
     }
 
+    #[test]
+    fn drives_and_streams_are_missing() {
+        let base = std::env::temp_dir().join(format!("bobview-drives-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("a.bob"), "a").unwrap();
+        let roots = Roots::new(std::slice::from_ref(&base));
+        assert!(matches!(roots.open("/a.bob"), Found::File(..)));
+        for path in [
+            "/a.bob:s",
+            "/a.bob::$DATA",
+            "/C:/Windows/win.ini",
+            "/%5C%5Chost/x",
+        ] {
+            assert!(matches!(roots.open(path), Found::Missing), "{path}");
+        }
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[cfg(unix)]
     #[test]
     fn links_out_of_the_root_are_refused() {
         let base = std::env::temp_dir().join(format!("bobview-confine-{}", std::process::id()));

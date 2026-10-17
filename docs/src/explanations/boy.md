@@ -84,7 +84,8 @@ DLS screens open others with command actions that run a launcher script,
 such as `./srCellVacuum 04`, which ends by running `runcss.sh DISPLAY -m
 MACROS` to start CS-Studio. For a local display, bobview runs a copy of such
 a script beside a stand-in `runcss.sh` that only records its arguments, and
-opens that display with those macros.
+opens that display with those macros. These are shell scripts, so they are
+not run on Windows, where such commands do nothing.
 
 A command that starts StripTool (`strip.py`, `strip.sh` or
 `buildStripToolconfig.sh` and the PV names, as in the DLS vacuum, gauge and
