@@ -42,6 +42,7 @@ use parking_lot::{Mutex, RwLock};
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::mpsc;
 
+pub use formula::formula_inputs;
 pub use name::{PvName, Scheme};
 pub use origin::{same_origin, url_origin};
 #[cfg(target_arch = "wasm32")]

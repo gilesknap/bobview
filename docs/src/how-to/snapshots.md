@@ -28,9 +28,10 @@ bobview --snapshot out.png --wait 5 screen.bob
 
 ## Click first
 
-`--click X,Y` and `--right-click X,Y` (repeatable, in the order given)
-interact with the display before the snapshot, which is taken `--settle`
-seconds (default 1) after the last click. Positions are in pixels.
+`--click X,Y`, `--right-click X,Y` and `--middle-click X,Y` (repeatable,
+in the order given) interact with the display before the snapshot, which is
+taken `--settle` seconds (default 1) after the last click. Positions are in
+pixels.
 
 ```bash
 bobview --snapshot menu.png --right-click 200,150 --settle 0.5 screen.bob

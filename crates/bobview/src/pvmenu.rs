@@ -29,8 +29,11 @@ pub fn menu(
     let name = node.pv_name.as_str();
     let value = state.filter(|s| s.connected).map(|s| s.format(None, true));
 
-    if ui.button("Copy PV name").clicked() {
-        ui.ctx().copy_text(name.to_string());
+    // Also to the primary selection, as a middle-click on the widget does.
+    if ui.button("Copy PV name").clicked()
+        && let Some(names) = copy_names(node)
+    {
+        requests.push(Request::Copy(names));
     }
     if let (Some(state), Some(value)) = (state, &value) {
         if ui.button("Copy value").clicked() {
@@ -115,6 +118,50 @@ fn trend_names(node: &Node) -> Vec<String> {
         }
     }
     names
+}
+
+/// What a middle-click on the widget copies: its PV's name, or, for a plot
+/// with no PV of its own (an XY plot or strip chart), its traces' PVs,
+/// separated by spaces (see [`copy_name`]). Rule PVs are left out: they
+/// choose how the widget looks, and are not what it shows.
+pub fn copy_names(node: &Node) -> Option<String> {
+    let mut names: Vec<String> = Vec::new();
+    if !node.pv_name.is_empty() {
+        copy_name(&PvName::parse(&node.pv_name), &mut names);
+    } else {
+        for t in &node.traces {
+            for pv in t.y.iter().chain(&t.x) {
+                copy_name(pv.name(), &mut names);
+            }
+        }
+    }
+    (!names.is_empty()).then(|| names.join(" "))
+}
+
+/// Add a PV's name to `names` (unless it is there) as another EPICS tool
+/// takes it: a Channel Access name bare and whole, a PV Access, local or
+/// simulated one with its prefix (`loc://x`, without the type and initial
+/// value of `loc://x<VDouble>(1.5)`; a simulated PV keeps its parameters).
+/// A formula adds the PVs it reads instead, as its text has spaces.
+fn copy_name(name: &PvName, names: &mut Vec<String>) {
+    let name = match name.scheme {
+        Scheme::Ca => name.pv.clone(),
+        Scheme::Pva | Scheme::Loc | Scheme::Sim => name.key(),
+        Scheme::Unsupported => name.to_string(),
+        Scheme::Formula => {
+            for input in pv::formula_inputs(&name.pv) {
+                // An input is never a formula itself: `=` starts no name.
+                let input = PvName::parse(&input);
+                if input.scheme != Scheme::Formula {
+                    copy_name(&input, names);
+                }
+            }
+            return;
+        }
+    };
+    if !names.contains(&name) {
+        names.push(name);
+    }
 }
 
 /// The body of the PV details window.
@@ -342,6 +389,53 @@ mod tests {
         assert_eq!(cmd("sim://sine"), None);
         assert_eq!(cmd("PV;id").as_deref(), Some("caget 'PV;id'"));
         assert_eq!(cmd("pva://a'b $x").as_deref(), Some(r"pvget 'a'\''b $x'"));
+    }
+
+    #[test]
+    fn copied_names_are_as_other_tools_take_them() {
+        let name = |n| {
+            let mut names = Vec::new();
+            copy_name(&PvName::parse(n), &mut names);
+            names.join(" ")
+        };
+        assert_eq!(name("BL01T:X"), "BL01T:X");
+        assert_eq!(name("ca://BL01T:X"), "BL01T:X");
+        // EPICS record names may hold `<` and `(`.
+        assert_eq!(name("ca://T<1>(2)"), "T<1>(2)");
+        assert_eq!(name("pva://BL01T:IMG"), "pva://BL01T:IMG");
+        assert_eq!(name("loc://x<VDouble>(1.5)"), "loc://x");
+        assert_eq!(name("sim://sine(0, 10, 0.1)"), "sim://sine(0, 10, 0.1)");
+        // A formula's inputs, each once.
+        assert_eq!(
+            name("=`ca://A:B` + 'pva://C' * `A:B` + 'loc://m<VLong>(1)'"),
+            "A:B pva://C loc://m"
+        );
+        assert_eq!(name("=1 + 2"), "");
+    }
+
+    #[test]
+    fn a_widget_copies_its_pv_and_a_plot_its_traces() {
+        let xml = r#"<display><macros><P>BL01T</P></macros>
+            <widget type="textupdate"><pv_name>ca://$(P):M1</pv_name>
+              <rules><rule name="r" prop_id="visible"><exp bool_exp="pv0 == 1"><value>false</value></exp>
+              <pv_name>$(P):HIDE</pv_name></rule></rules></widget>
+            <widget type="xyplot"><traces>
+              <trace><x_pv>$(P):X</x_pv><y_pv>pva://$(P):Y1</y_pv></trace>
+              <trace><x_pv>$(P):X</x_pv><y_pv>$(P):Y2</y_pv></trace></traces></widget>
+            <widget type="xyplot"></widget></display>"#;
+        let pvs = pv::PvManager::new();
+        let display = bob::Display::parse(xml).unwrap();
+        let screen =
+            crate::screen::Builder::new(&pvs).screen(display, &bob::Macros::default(), None, 0);
+        let copied: Vec<Option<String>> = screen.nodes.iter().map(copy_names).collect();
+        assert_eq!(
+            copied,
+            [
+                Some("BL01T:M1".into()),
+                Some("pva://BL01T:Y1 BL01T:X BL01T:Y2".into()),
+                None
+            ]
+        );
     }
 
     #[test]

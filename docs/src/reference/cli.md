@@ -27,6 +27,7 @@ been saved, else opens `index.bob` from the bundled displays
 | `--wait SECONDS` | time for PVs to connect before a snapshot (default 2) |
 | `--click X,Y` | click here before the snapshot (repeatable) |
 | `--right-click X,Y` | right-click here before the snapshot (repeatable) |
+| `--middle-click X,Y` | middle-click here before the snapshot (repeatable) |
 | `--settle SECONDS` | time after the last click before the snapshot (default 1) |
 | `-h`, `--help` | show help |
 | `-V`, `--version` | show the version |

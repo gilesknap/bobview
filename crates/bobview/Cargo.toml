@@ -33,6 +33,12 @@ clap = { version = "4.6.7", features = ["derive", "wrap_help"] }
 ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
 libc = "0.2.190"
 
+# The primary selection, which a middle-click pastes, where there is one
+# (X11 and Wayland); egui sets only the clipboard. The version egui-winit
+# uses, with Wayland's data-control protocol (falling back to XWayland).
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
+
 # The browser build: see web/index.html.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Local time for trend axes from the browser's time zone.
