@@ -14,6 +14,9 @@ concurrency:
   group: docs-${{ github.event_name == 'push' && 'gh-pages' || github.ref }}
   cancel-in-progress: ${{ github.event_name != 'push' }}
 
+permissions:
+  contents: read
+
 jobs:
   docs:
     # The mdBook in docs/, with rustdoc for the workspace under api/, built
@@ -24,12 +27,14 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
         with:
           # mdbook-mermaid 0.15 is built for mdBook 0.4.36 and later 0.4s
           tool: mdbook@0.4.40,mdbook-mermaid@0.15.0
@@ -61,7 +66,7 @@ jobs:
 
       - name: Publish docs to gh-pages
         if: github.event_name == 'push'
-        uses: peaceiris/actions-gh-pages@v4
+        uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453 # v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: .github/pages
