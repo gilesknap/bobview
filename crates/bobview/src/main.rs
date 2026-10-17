@@ -534,10 +534,13 @@ impl log::Log for Logger {
         let library = ["eframe", "egui", "epics", "winit", "glutin"]
             .iter()
             .any(|t| m.target().starts_with(t));
-        let limit = if library && self.0 < log::LevelFilter::Debug {
-            log::LevelFilter::Warn
-        } else {
-            self.0
+        // arboard warns, at every window opened, that a Wayland compositor
+        // without data-control (GNOME's) has it fall back to XWayland.
+        let quiet = m.target().starts_with("arboard");
+        let limit = match self.0 < log::LevelFilter::Debug {
+            true if quiet => log::LevelFilter::Error,
+            true if library => log::LevelFilter::Warn,
+            _ => self.0,
         };
         m.level() <= limit
     }

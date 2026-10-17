@@ -46,3 +46,14 @@ impl Primary for System {
         Err("no primary selection here".into())
     }
 }
+
+/// No primary selection, for snapshots.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct NoPrimary;
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Primary for NoPrimary {
+    fn set(&mut self, _text: &str) -> Result<(), String> {
+        Err("not set in a snapshot".into())
+    }
+}

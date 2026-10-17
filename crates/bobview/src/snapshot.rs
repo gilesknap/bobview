@@ -42,6 +42,9 @@ pub fn run(start: Location, opts: &Options, out: &Path) -> Result<(), String> {
     let ctx = egui::Context::default();
     let mut app = BobApp::new(&ctx, Some(start), opts.zoom, opts.ui_scale);
     app.set_read_only(opts.read_only);
+    // A --middle-click copies to the clipboard only: a snapshot leaves the
+    // desktop's primary selection alone.
+    app.set_primary(Box::new(crate::selection::NoPrimary));
     let mut textures: HashMap<TextureId, ColorImage> = HashMap::new();
     let begin = Instant::now();
     let native = opts.scale_factor;

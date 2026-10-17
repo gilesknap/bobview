@@ -453,6 +453,13 @@ impl BobApp {
         self.pvs.set_read_only(on);
     }
 
+    /// Put copied PV names on `primary` instead of the desktop's primary
+    /// selection.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_primary(&mut self, primary: Box<dyn selection::Primary>) {
+        self.primary = primary;
+    }
+
     /// Restore `layout` (saved as `name`) once the window is up.
     #[cfg_attr(
         target_arch = "wasm32",
