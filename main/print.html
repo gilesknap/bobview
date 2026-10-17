@@ -774,8 +774,8 @@ place. The site's root redirects to <code>main/</code>.</p>
 <p>Set the version in the workspace's <code>Cargo.toml</code>, in both places: the
 workspace version and the <code>=</code> versions of <code>bob</code> and <code>pv</code> under
 <code>[workspace.dependencies]</code>. Merge that to <code>main</code>, then push a matching tag:</p>
-<pre><code class="language-bash">git tag v1.8.2
-git push origin v1.8.2
+<pre><code class="language-bash">git tag v1.8.4
+git push origin v1.8.4
 </code></pre>
 <p>CI checks that the tag matches the version in <code>Cargo.toml</code> and fails the
 build if not. It creates the GitHub Release itself and builds on native
