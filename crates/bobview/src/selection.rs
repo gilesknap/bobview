@@ -78,7 +78,7 @@ pub type MakeRead = Box<dyn FnOnce() -> Box<dyn ReadPrimary> + Send>;
 pub fn system_reader() -> Option<MakeRead> {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        Some(Box::new(|| Box::new(SystemRead::default())))
+        Some(Box::new(|| Box::new(SystemRead)))
     }
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     {
@@ -88,24 +88,20 @@ pub fn system_reader() -> Option<MakeRead> {
 
 /// The X11 or Wayland primary selection, read on a [`Reader`]'s thread.
 #[cfg(all(unix, not(target_os = "macos")))]
-#[derive(Default)]
-struct SystemRead {
-    clipboard: Option<arboard::Clipboard>,
-}
+struct SystemRead;
 
 #[cfg(all(unix, not(target_os = "macos")))]
 impl ReadPrimary for SystemRead {
     fn get(&mut self) -> Option<String> {
         use arboard::{GetExtLinux, LinuxClipboardKind};
-        let clipboard = match &mut self.clipboard {
-            Some(c) => c,
-            None => self.clipboard.insert(
-                arboard::Clipboard::new()
-                    .inspect_err(|e| log::debug!("no primary selection: {e}"))
-                    .ok()?,
-            ),
-        };
-        clipboard
+        // A clipboard for this read only. On X11 every arboard clipboard in
+        // the process shares one connection, and the last dropped hands
+        // the clipboard to the desktop's clipboard manager: kept here, that
+        // could be this thread's, after `main` returns, cut short at exit.
+        // While egui's or the writer's lives, making one is a cheap clone.
+        arboard::Clipboard::new()
+            .inspect_err(|e| log::debug!("no primary selection: {e}"))
+            .ok()?
             .get()
             .clipboard(LinuxClipboardKind::Primary)
             .text()

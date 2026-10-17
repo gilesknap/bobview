@@ -70,10 +70,13 @@ bobview --archiver http://127.0.0.1:17668
   out, and **×** to remove it. Ctrl+V over the plot adds the PVs named in
   the clipboard.
 - **Middle-click.** On Linux (X11 or Wayland) a middle-click on the plot or
-  legend adds the PVs named in the primary selection, as in the standalone
-  archiveview: middle-click a widget in a display to select its PV name,
-  or select names in a terminal or editor, then middle-click the trend. A
-  middle-click in the search box pastes the selection there. A note over
+  legend adds the Channel Access and PV Access PVs named in the primary
+  selection, as in the standalone archiveview: middle-click a widget in a
+  display to select its PV name, or select names in a terminal or editor,
+  then middle-click the trend. Other PVs, such as `loc://` and `sim://`
+  ones, aren't added this way: use **Trend** in the widget's right-click
+  menu. A middle-click in the search box pastes the selection there, and
+  text selected in the search box becomes the primary selection. A note over
   the plot says what was added, or that the selection named no PVs (one
   naming more than 20 adds none). Windows and macOS have no primary
   selection, so there use Ctrl+V; in a snapshot a middle-click on a trend

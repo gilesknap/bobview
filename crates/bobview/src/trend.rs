@@ -33,9 +33,21 @@ pub struct Trend {
     reading: Option<(u64, Instant)>,
     /// What a paste did, floating over the bottom of the plot for a while.
     notice: Option<Notice>,
+    /// Text selected in the search box, and when, until it has been
+    /// steady for [`PRIMARY_DEBOUNCE`] to become the primary selection.
+    search_selection: Option<(String, Instant)>,
 }
 
-/// How long a middle-click waits for the primary selection.
+/// Text selected in the search box becomes the primary selection once it
+/// has stayed the same this long, as in archiveview: not at every
+/// shift+arrow, which over `ssh -X` costs a round trip each.
+const PRIMARY_DEBOUNCE: Duration = Duration::from_millis(150);
+
+/// How long a middle-click waits for the primary selection, as in
+/// archiveview: long enough for a slow owner (or `ssh -X`), short enough
+/// that a hung one (arboard waits up to 4 s per format) gets a "Could not
+/// read the selection" while the click is still fresh, rather than PVs
+/// turning up long after.
 pub const SELECTION_WAIT: Duration = Duration::from_secs(2);
 
 /// A short message over the plot.
@@ -70,6 +82,7 @@ impl Trend {
             geometry: Geometry::default(),
             reading: None,
             notice: None,
+            search_selection: None,
         }
     }
 
@@ -153,6 +166,22 @@ impl Trend {
         self.plot.take_middle_click()
     }
 
+    /// Text selected in its search box that has been steady since before
+    /// `now` less [`PRIMARY_DEBOUNCE`], once, to make the primary
+    /// selection; and when to ask again, while some is waiting.
+    pub fn take_search_selection(&mut self, now: Instant) -> (Option<String>, Option<Duration>) {
+        if let Some(text) = self.plot.take_search_selection() {
+            self.search_selection = Some((text, now));
+        }
+        match &self.search_selection {
+            Some((_, since)) if now.duration_since(*since) >= PRIMARY_DEBOUNCE => {
+                (self.search_selection.take().map(|(t, _)| t), None)
+            }
+            Some((_, since)) => (None, Some(PRIMARY_DEBOUNCE - now.duration_since(*since))),
+            None => (None, None),
+        }
+    }
+
     /// The middle-click numbered `n`, at `now`, is waiting for the
     /// selection (an earlier one's answer is then ignored).
     pub fn reading(&mut self, n: u64, now: Instant) {
@@ -217,7 +246,7 @@ impl Trend {
     }
 
     /// The notice, over the bottom middle of `rect`, until it expires.
-    fn toast(&mut self, ui: &egui::Ui, rect: egui::Rect) {
+    fn toast(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
         let Some(notice) = &mut self.notice else {
             return;
         };
@@ -235,17 +264,16 @@ impl Trend {
             ui.visuals().text_color()
         };
         let text = egui::RichText::new(&notice.text).color(color);
-        egui::Area::new(egui::Id::new(("bobview-trend-notice", self.id)))
-            .order(egui::Order::Foreground)
-            .pivot(egui::Align2::CENTER_BOTTOM)
-            .fixed_pos(rect.center_bottom() - egui::vec2(0.0, 56.0))
-            .interactable(false)
-            .show(ui.ctx(), |ui| {
-                egui::Frame::popup(ui.style())
-                    .corner_radius(16.0)
-                    .inner_margin(egui::Margin::symmetric(14, 8))
-                    .show(ui, |ui| ui.label(text));
-            });
+        // In the trend's own layer, over the plot drawn before it: a trend
+        // window behind another (where windows are embedded) keeps its
+        // notice behind too.
+        let layout = egui::Layout::bottom_up(egui::Align::Center);
+        let mut over = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(layout));
+        over.add_space(56.0);
+        egui::Frame::popup(over.style())
+            .corner_radius(16.0)
+            .inner_margin(egui::Margin::symmetric(14, 8))
+            .show(&mut over, |ui| ui.label(text));
     }
 }
 

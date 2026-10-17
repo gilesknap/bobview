@@ -488,7 +488,9 @@ impl BobApp {
 
     /// Answer the trends' middle-clicks from the primary selection: ask
     /// for it for a new click, hand each answer to its trend, and give up
-    /// on a click whose answer is slow. Called after any trend is drawn.
+    /// on a click whose answer is slow; and make text selected in a
+    /// trend's search box the primary selection. Called after any trend
+    /// is drawn.
     fn trend_selections(&mut self, ctx: &egui::Context) {
         let now = web_time::Instant::now();
         for trend in &mut self.trends {
@@ -525,6 +527,17 @@ impl BobApp {
         for trend in &mut self.trends {
             if trend.time_out_reading(now) {
                 repaint_after(ctx, trend_viewport(trend.id), Duration::ZERO);
+            }
+            // Text selected in its search box, once steady, as standalone
+            // archiveview does.
+            match trend.take_search_selection(now) {
+                (Some(text), _) => {
+                    if let Err(e) = self.primary.set(&text) {
+                        log::debug!("no primary selection: {e}");
+                    }
+                }
+                (None, Some(wait)) => repaint_after(ctx, trend_viewport(trend.id), wait),
+                (None, None) => {}
             }
         }
     }

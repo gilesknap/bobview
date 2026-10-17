@@ -34,7 +34,8 @@ instead of fitting the window.
 - **Middle-click** to copy its PV name, as in EDM and MEDM: a middle-click
   in a terminal then pastes it, and one on a
   [trend](../how-to/trends.md) or in
-  [archiveview](https://github.com/gilesknap/archiveview) plots it. The
+  [archiveview](https://github.com/gilesknap/archiveview) plots it (a
+  Channel Access or PV Access name). The
   widget flashes and the status line says "Copied *name*". See
   [Copying a PV name](#copying-a-pv-name).
 - On a touch screen, pinch to zoom.
