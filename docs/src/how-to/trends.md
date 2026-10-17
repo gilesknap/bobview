@@ -69,6 +69,15 @@ bobview --archiver http://127.0.0.1:17668
   PV's colour, name and value: click one to hide its line, hover to pick it
   out, and **×** to remove it. Ctrl+V over the plot adds the PVs named in
   the clipboard.
+- **Middle-click.** On Linux (X11 or Wayland) a middle-click on the plot or
+  legend adds the PVs named in the primary selection, as in the standalone
+  archiveview: middle-click a widget in a display to select its PV name,
+  or select names in a terminal or editor, then middle-click the trend. A
+  middle-click in the search box pastes the selection there. A note over
+  the plot says what was added, or that the selection named no PVs (one
+  naming more than 20 adds none). Windows and macOS have no primary
+  selection, so there use Ctrl+V; in a snapshot a middle-click on a trend
+  pastes nothing.
 - **Undo.** **↶** and **↷** (or Ctrl+Z and Ctrl+Shift+Z) undo and redo
   changes to the plot.
 - Hover over the plot for a readout of every PV at that time.
@@ -78,6 +87,4 @@ bobview --archiver http://127.0.0.1:17668
 - A PV the archiver doesn't hold is plotted live only, and its chip says so.
 - Waveforms are not plotted: their chip shows the latest array.
 - In the browser build trends are live only: a browser can't reach the
-  archiver.
-- A middle-click on a trend does not paste the primary selection, as it
-  does in the standalone archiveview: use Ctrl+V.
+  archiver, and a middle-click pastes nothing: use Ctrl+V.

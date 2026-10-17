@@ -45,9 +45,11 @@ pub fn run(start: Location, opts: &Options, out: &Path) -> Result<(), String> {
     let mut app = BobApp::new(&ctx, Some(start), opts.zoom, opts.ui_scale);
     app.set_read_only(opts.read_only);
     app.set_archiver(opts.archiver.clone(), false);
-    // A --middle-click copies to the clipboard only: a snapshot leaves the
-    // desktop's primary selection alone.
+    // A --middle-click copies to the clipboard only, and one on a trend
+    // pastes nothing: a snapshot leaves the desktop's primary selection
+    // alone.
     app.set_primary(Box::new(crate::selection::NoPrimary));
+    app.set_selection_reader(None);
     let mut textures: HashMap<TextureId, ColorImage> = HashMap::new();
     let begin = Instant::now();
     let native = opts.scale_factor;

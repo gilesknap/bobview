@@ -32,7 +32,8 @@ instead of fitting the window.
   **Trend with rule PVs**, or add it to an open trend. See
   [Trend PVs](../how-to/trends.md) for the trend window's own controls.
 - **Middle-click** to copy its PV name, as in EDM and MEDM: a middle-click
-  in a terminal then pastes it, and one in
+  in a terminal then pastes it, and one on a
+  [trend](../how-to/trends.md) or in
   [archiveview](https://github.com/gilesknap/archiveview) plots it. The
   widget flashes and the status line says "Copied *name*". See
   [Copying a PV name](#copying-a-pv-name).
