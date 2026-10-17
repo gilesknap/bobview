@@ -1,16 +1,18 @@
 # Make a release
 
-Push a tag such as `v0.2.2`:
+Set the version in the workspace's `Cargo.toml`, in both places: the
+workspace version and the `=` versions of `bob` and `pv` under
+`[workspace.dependencies]`. Merge that to `main`, then push a matching tag:
 
 ```bash
-git tag v0.2.2
-git push origin v0.2.2
+git tag v1.8.2
+git push origin v1.8.2
 ```
 
-CI creates the GitHub Release itself and builds with the version taken from
-the tag, so `Cargo.toml` needs no bump. It builds on native runners for
-each platform (`ubuntu-24.04`, `ubuntu-24.04-arm` and macOS) and attaches a
-`bobview-<arch>-<os>.tar.gz` for each, such as
+CI checks that the tag matches the version in `Cargo.toml` and fails the
+build if not. It creates the GitHub Release itself and builds on native
+runners for each platform (`ubuntu-24.04`, `ubuntu-24.04-arm` and macOS),
+attaching a `bobview-<arch>-<os>.tar.gz` for each, such as
 `bobview-x86_64-linux.tar.gz` and `bobview-aarch64-linux.tar.gz`.
 
 The Linux builds use `cargo zigbuild` to link against glibc 2.28, so they
@@ -21,3 +23,36 @@ run on RHEL 8+, Ubuntu 20.04+ and Debian 10+. Each tarball carries
 The tag also publishes a copy of these docs at
 `https://gilesknap.github.io/bobview/<tag>/`, which the version menu in the
 docs' top bar then lists beside `main`.
+
+## Publish to crates.io
+
+The workspace publishes five crates: `bobview`, `bobview-server`, and the
+libraries they use, `bobview-bob`, `bobview-pv` and `bobview-testioc` (the
+names `bob` and `pv` were taken; the code still calls them `bob`, `pv` and
+`testioc`). Check them first with
+
+```bash
+cargo publish --workspace --dry-run
+```
+
+which packages each crate and builds it as crates.io will.
+
+The first time, publish by hand: log in to crates.io with GitHub, create an
+API token with the publish scope, then
+
+```bash
+cargo login
+cargo publish --workspace
+```
+
+Cargo publishes them in dependency order. After that, CI can publish each
+release itself with trusted publishing, which needs no stored token:
+
+1. On crates.io, in each crate's **Settings → Trusted Publishing**, add the
+   repository `gilesknap/bobview` and the workflow `ci.yml`.
+2. In the repository's **Settings → Secrets and variables → Actions →
+   Variables**, set `PUBLISH_CRATES` to `true`.
+
+The `publish` job then runs after the GitHub Release is made for each tag.
+A version can be published to crates.io only once, so fix a bad release
+with a new version.

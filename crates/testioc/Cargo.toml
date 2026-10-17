@@ -1,9 +1,17 @@
 [package]
-name = "testioc"
+name = "bobview-testioc"
 description = "Pure-Rust CA and PVA test IOC serving the example-services BL01T PVs"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["epics", "channel-access", "pv-access", "ioc", "simulation"]
+categories = ["simulation", "science"]
+
+[lib]
+name = "testioc"
 
 [[bin]]
 name = "bobview-testioc"

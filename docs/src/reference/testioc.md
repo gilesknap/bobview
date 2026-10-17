@@ -48,7 +48,7 @@ frame is posted for every frame counted (10 Hz by default) while
 the frame counter. To look at a frame without a viewer:
 
 ```bash
-cargo run -p testioc --example frame_png -- /tmp/frame 1 50
+cargo run -p bobview-testioc --example frame_png -- /tmp/frame 1 50
 ```
 
 ## Build for the phone
@@ -56,5 +56,5 @@ cargo run -p testioc --example frame_png -- /tmp/frame 1 50
 From x86_64:
 
 ```bash
-cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.36 -p testioc
+cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.36 -p bobview-testioc
 ```

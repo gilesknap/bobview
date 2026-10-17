@@ -6,6 +6,7 @@
 
 - [Quick start](tutorials/quickstart.md)
 - [Serve displays to a browser](tutorials/browser.md)
+- [Install from crates.io](tutorials/crates-io.md)
 
 # How-to guides
 

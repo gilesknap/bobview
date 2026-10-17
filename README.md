@@ -27,5 +27,7 @@ EPICS_CA_ADDR_LIST=127.0.0.1 bobview
 
 Linux needs a few graphics libraries first; see
 [Install bobview](https://gilesknap.github.io/bobview/main/how-to/install.html).
+Or build it with Cargo: `cargo install bobview bobview-testioc`; see
+[Install from crates.io](https://gilesknap.github.io/bobview/main/tutorials/crates-io.html).
 
 See the [documentation](https://gilesknap.github.io/bobview) for everything else.

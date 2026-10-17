@@ -1,9 +1,17 @@
 [package]
 description = "Parser for Phoebus Display Builder .bob files"
-name = "bob"
+name = "bobview-bob"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["epics", "phoebus", "display-builder", "cs-studio"]
+categories = ["parser-implementations", "science"]
+
+[lib]
+name = "bob"
 
 [dependencies]
 log = "0.4.34"
