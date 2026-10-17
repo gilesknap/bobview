@@ -24,21 +24,48 @@ jobs:
       - name: Clippy the browser build
         run: cargo clippy -p bobview-pv -p bobview --target wasm32-unknown-unknown -- -D warnings
       - run: cargo test --workspace
+      - name: Install archiveview-mockarchiver for trend history
+        # a mock Archiver Appliance from crates.io; rust-cache keeps the
+        # installed binary between runs
+        run: cargo install archiveview-mockarchiver --version "^0.2.1" --locked
       - name: Snapshot the test displays against bobview-testioc
         env:
           EPICS_CA_ADDR_LIST: 127.0.0.1
           EPICS_CA_AUTO_ADDR_LIST: "NO"
           EPICS_PVA_ADDR_LIST: 127.0.0.1
           EPICS_PVA_AUTO_ADDR_LIST: "NO"
+          ARCHIVER: http://127.0.0.1:17668
         run: |
+          # a bobview failure behind tee fails the step
+          set -o pipefail
           cargo build --workspace
           target/debug/bobview-testioc &
+          archiveview-mockarchiver --port 17668 &
           mkdir -p snapshots
           for f in tests/displays/*.bob; do
             target/debug/bobview --snapshot "snapshots/$(basename "$f" .bob).png" \
               --size 1280x800 --wait 5 "$f"
           done
-          kill %1
+          # A trend of bl01t:SUM from its right-click menu on index.bob (at
+          # these pixels at 1280x800): the mock archives it and the test IOC
+          # serves it, so the hour of history joins the live value at the
+          # right edge. (trend::tests checks that history is drawn.)
+          for i in $(seq 50); do
+            curl -sf "${ARCHIVER}/retrieval/bpl/getVersion" && break
+            sleep 0.2
+          done
+          curl -sf "${ARCHIVER}/retrieval/bpl/getVersion" > /dev/null \
+            || { echo "::error::the mock archiver is not answering"; exit 1; }
+          echo
+          # the last click, on the grey beside the display, takes the
+          # pointer off the plot (no crosshair or tooltip)
+          target/debug/bobview --snapshot snapshots/trend-archiver.png --archiver "${ARCHIVER}" \
+            --size 1280x800 --wait 5 --right-click 700,314 --click 725,444 --click 1100,700 \
+            tests/displays/index.bob 2>&1 | tee trend.log
+          # the clicks hit the menu, the trend opened and it was rendered
+          grep -q "trend bl01t:SUM" trend.log
+          test -s snapshots/trend-archiver.png
+          kill %1 %2
       - uses: actions/upload-artifact@v4
         with:
           name: snapshots
