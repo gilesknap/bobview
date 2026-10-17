@@ -36,7 +36,7 @@ libc = "0.2.190"
 
 # A mock Archiver Appliance, for testing that trends show its history.
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-archiveview-mockarchiver = "0.2.1"
+archiveview-mockarchiver = "0.2.2"
 
 # The primary selection, which a middle-click pastes, where there is one
 # (X11 and Wayland); egui sets only the clipboard. The version egui-winit

@@ -17,6 +17,7 @@ use pv::PvManager;
 use web_time::{Duration, Instant};
 
 use crate::layout::Geometry;
+use crate::stripchart::MIN_SCROLL_REPAINT;
 
 /// A trend window's plot, and where its window is.
 pub struct Trend {
@@ -36,6 +37,9 @@ pub struct Trend {
     /// Text selected in the search box, and when, until it has been
     /// steady for [`PRIMARY_DEBOUNCE`] to become the primary selection.
     search_selection: Option<(String, Instant)>,
+    /// The floor on the plot's own repaints, as last set: see
+    /// [`Trend::ui`].
+    min_repaint: Duration,
 }
 
 /// Text selected in the search box becomes the primary selection once it
@@ -83,6 +87,7 @@ impl Trend {
             reading: None,
             notice: None,
             search_selection: None,
+            min_repaint: Duration::ZERO,
         }
     }
 
@@ -96,6 +101,12 @@ impl Trend {
     #[cfg(test)]
     pub fn notice(&self) -> Option<(&str, bool)> {
         self.notice.as_ref().map(|n| (n.text.as_str(), n.error))
+    }
+
+    /// The floor on the plot's own repaints, as last drawn.
+    #[cfg(test)]
+    pub fn min_repaint(&self) -> Duration {
+        self.min_repaint
     }
 
     /// The PVs' names, as added.
@@ -232,7 +243,23 @@ impl Trend {
     /// Draw it in the space `ui` offers, and no more: in a window inside
     /// the main one (an auto-sized `egui::Window`) the plot's legend
     /// would otherwise push the window taller every frame.
+    ///
+    /// Where windows are embedded (the browser, snapshots) the plot is
+    /// in the root viewport, so each repaint it schedules itself redraws
+    /// the whole display: those are held to a strip chart's
+    /// [`MIN_SCROLL_REPAINT`] there. In its own native window it keeps
+    /// its own pace. Set as it is drawn, so it holds for every trend
+    /// however it was opened, and whenever the embedding was decided.
     pub fn ui(&mut self, ui: &mut egui::Ui) {
+        let min_repaint = if ui.ctx().embed_viewports() {
+            Duration::from_secs_f64(MIN_SCROLL_REPAINT)
+        } else {
+            Duration::ZERO
+        };
+        if min_repaint != self.min_repaint {
+            self.min_repaint = min_repaint;
+            self.plot.set_min_repaint_interval(min_repaint);
+        }
         let rect = ui.available_rect_before_wrap();
         let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(rect));
         self.plot.ui(&mut inner);
@@ -400,6 +427,28 @@ mod tests {
         t.reading(4, start);
         t.selected(4, MiddleClick::Search, Some("D:E".into()));
         assert_eq!(t.names(), ["A", "B:C"]);
+    }
+
+    /// Draw `t` for a pass of `ctx`.
+    fn draw(ctx: &egui::Context, t: &mut Trend) {
+        let mut out = ctx.run_ui(Default::default(), |ui| t.ui(ui));
+        out.textures_delta.clear();
+    }
+
+    #[test]
+    fn embedded_trends_hold_their_repaints_to_the_strip_charts() {
+        let pvs = PvManager::new();
+        let mut t = Trend::new(0, &names(&["A"]), &pvs, None, &[]);
+        assert_eq!(t.min_repaint(), Duration::ZERO);
+        // In the root viewport (the browser, snapshots).
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(true);
+        draw(&ctx, &mut t);
+        assert_eq!(t.min_repaint().as_secs_f64(), MIN_SCROLL_REPAINT);
+        // In a native window of its own: its own pace.
+        ctx.set_embed_viewports(false);
+        draw(&ctx, &mut t);
+        assert_eq!(t.min_repaint(), Duration::ZERO);
     }
 
     #[test]
