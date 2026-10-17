@@ -603,7 +603,10 @@ mod tests {
     /// opens, embedded displays and all.
     fn links(nodes: &mut [Node], pvs: &PvManager, out: &mut Vec<Location>) {
         for n in nodes {
-            while n.poll_building(Duration::from_millis(10)) {}
+            let until = std::time::Instant::now() + Duration::from_secs(20);
+            while n.poll_building(Duration::from_millis(10)) {
+                assert!(std::time::Instant::now() < until, "never built");
+            }
             if let Some(action) = n.w.actions().first() {
                 let mut requests = Vec::new();
                 let mut cx = Cx {
@@ -695,7 +698,9 @@ mod tests {
 
         let mut view = View::new(&pvs, Some(1.0));
         view.open(found[0].clone());
+        let until = std::time::Instant::now() + Duration::from_secs(20);
         while view.is_loading() {
+            assert!(std::time::Instant::now() < until, "never loaded");
             view.poll_loading(&egui::Context::default());
         }
         assert!(view.screen.is_some(), "{:?}", view.error);
@@ -704,6 +709,22 @@ mod tests {
         assert!(!view.shows(&found[2]), "the group's gauge is not gauge 01");
         // The same gauge from the cell opened again (with a new `$(DID)`).
         assert!(view.shows(&load()[0]));
+        // The navigator's links are the clicks' (shown bold, and raised).
+        let nav: Vec<_> = crate::tree::links(&Location {
+            source: bob::Source::File(host.clone()),
+            macros: cell.clone(),
+        })
+        .unwrap()
+        .links
+        .into_iter()
+        .filter_map(|l| match l.target {
+            crate::tree::Target::Display(loc) => Some(loc),
+            _ => None,
+        })
+        .collect();
+        assert_eq!(nav.len(), 3);
+        let shown: Vec<_> = nav.iter().map(|l| view.shows(l)).collect();
+        assert_eq!(shown, [true, false, false]);
         std::fs::remove_dir_all(&dir).ok();
     }
 

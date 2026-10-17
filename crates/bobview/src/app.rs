@@ -31,19 +31,25 @@ pub struct Location {
 
 impl Location {
     /// The same display with the same effective macros, however they were
-    /// layered (later definitions win). A BOY display's `$(DID)` is left
-    /// out: one opened in a window of its own is given a fresh one whatever
-    /// a link passes (the id of the display the link is on).
+    /// layered (see `effective`).
     pub(crate) fn same_display(&self, other: &Location) -> bool {
+        self.source == other.source && self.effective() == other.effective()
+    }
+
+    /// The macros that tell this display apart, later definitions winning.
+    /// A BOY display's `$(DID)` is left out: one opened in a window of its
+    /// own is given a fresh one whatever a link passes (the id of the
+    /// display the link is on).
+    pub(crate) fn effective(&self) -> std::collections::BTreeMap<&str, &str> {
         let opi = self
             .source
             .to_string()
             .to_ascii_lowercase()
             .ends_with(".opi");
-        fn effective(m: &Macros, opi: bool) -> std::collections::BTreeMap<&str, &str> {
-            m.iter().filter(|(k, _)| !(opi && *k == "DID")).collect()
-        }
-        self.source == other.source && effective(&self.macros, opi) == effective(&other.macros, opi)
+        self.macros
+            .iter()
+            .filter(|(k, _)| !(opi && *k == "DID"))
+            .collect()
     }
 }
 

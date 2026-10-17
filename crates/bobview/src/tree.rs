@@ -57,7 +57,9 @@ pub struct Links {
 /// Read the display at `loc` for its links.
 pub fn links(loc: &Location) -> Result<Links, bob::Error> {
     let display = crate::fetch::load(&loc.source)?;
-    let macros = display.macros.with(&loc.macros);
+    // As the display is built with them (see `Builder::screen`): the
+    // whole chain of macros over its defaults, not only their last layer.
+    let macros = over(&display.macros, &loc.macros);
     let mut all = Vec::new();
     walk(
         &display.widgets,
@@ -199,7 +201,7 @@ fn embed(
         }
         Err(_) => return Ok(()),
     };
-    let macros = display.macros.with(macros);
+    let macros = over(&display.macros, macros);
     let widgets = if group.trim().is_empty() {
         &display.widgets[..]
     } else {
@@ -298,11 +300,16 @@ fn file_name(source: &Source) -> String {
         .to_string()
 }
 
+/// `defaults` with `macros` over them, as a display is built.
+fn over(defaults: &Macros, macros: &Macros) -> Macros {
+    let left = std::sync::atomic::AtomicUsize::new(bob::MAX_LOAD_BYTES);
+    Macros::over(defaults, macros, &left)
+}
+
 /// What tells displays apart: the file and the effective macros, as
 /// `Location::same_display` compares them.
 pub fn key(loc: &Location) -> String {
-    let macros: BTreeMap<&str, &str> = loc.macros.iter().collect();
-    format!("{}\0{macros:?}", loc.source)
+    format!("{}\0{:?}", loc.source, loc.effective())
 }
 
 /// What tells links' targets apart.

@@ -23,7 +23,8 @@ unpinned), so clicking a window once makes it where the next link goes.
 "Already open" means the same display with the same macros, in another
 window. The macros are all those the display would be opened with: the
 link's own, and those of the group, widget or embedded display it is on, so
-each gauge of a cell, opened through one gauge screen, gets its own window.
+each gauge of a cell, opened through one gauge screen, gets its own window. A BOY
+display's `$(DID)` doesn't count, since each window gives it its own.
 
 ## Why it works this way
 
