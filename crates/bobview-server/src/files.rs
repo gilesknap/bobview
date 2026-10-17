@@ -22,6 +22,34 @@ use axum::response::{IntoResponse, Response};
 /// The bytes read from a file at a time.
 const CHUNK: usize = 64 * 1024;
 
+/// Whether Windows would take `segment` for something other than the file
+/// it names: a device (`NUL`, `COM1.txt`), or a name it trims (`a.bob.`,
+/// `a.bob `) and so opens another file under.
+fn windows_unsafe(segment: &str) -> bool {
+    if segment.ends_with(['.', ' ']) {
+        return true;
+    }
+    let stem = segment
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(' ');
+    let upper = stem.to_ascii_uppercase();
+    match upper.as_str() {
+        "CON" | "PRN" | "AUX" | "NUL" => true,
+        _ => match (upper.get(..3), upper.get(3..)) {
+            (Some("COM" | "LPT"), Some(port)) => {
+                let mut c = port.chars();
+                matches!(
+                    (c.next(), c.next()),
+                    (Some('1'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}'), None)
+                )
+            }
+            _ => false,
+        },
+    }
+}
+
 /// The directories files are served from, in order, each with its real
 /// path (symbolic links resolved).
 pub struct Roots(Vec<(PathBuf, Option<PathBuf>)>);
@@ -50,6 +78,7 @@ impl Roots {
                 s if s.contains('\\') || s.contains('\0') => return Found::Missing,
                 // A drive (`C:`) or a file's stream (`a.bob:s`) on Windows.
                 s if cfg!(windows) && s.contains(':') => return Found::Missing,
+                s if cfg!(windows) && windows_unsafe(s) => return Found::Missing,
                 s => rel.push(s),
             }
         }
@@ -361,9 +390,46 @@ fn stream(mut file: File, first: u64, count: u64) -> std::io::Result<Body> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Found, Part, Roots, part};
+    use super::{Found, Part, Roots, part, windows_unsafe};
     #[cfg(unix)]
     use std::path::PathBuf;
+
+    #[test]
+    fn windows_names() {
+        for s in [
+            "CON",
+            "con",
+            "Nul",
+            "aux.txt",
+            "PRN.a.b",
+            "nul .txt",
+            "COM1",
+            "com9.bob",
+            "LPT5",
+            "COM\u{b9}",
+            "lpt\u{b3}.x",
+            "a.bob.",
+            "a.bob ",
+            "..bob.",
+            " ",
+        ] {
+            assert!(windows_unsafe(s), "{s:?}");
+        }
+        for s in [
+            "a.bob",
+            "CONSOLE",
+            "con1",
+            "COM0",
+            "COM10",
+            "LPT",
+            "nul_x",
+            "xCON",
+            ".nul",
+            "COM\u{b4}",
+        ] {
+            assert!(!windows_unsafe(s), "{s:?}");
+        }
+    }
 
     #[test]
     fn ranges() {

@@ -131,4 +131,4 @@ out.write((ROOT / "LICENSE").read_text(encoding="utf-8").strip() + "\n")
 
 for name, path in EMBEDDED_FONTS:
     out.write("\n" + "-" * 78 + "\n")
-    out.write(f"{name}\n\n{path.read_text(encoding="utf-8").strip()}\n")
+    out.write(f"{name}\n\n{path.read_text(encoding='utf-8').strip()}\n")

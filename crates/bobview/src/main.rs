@@ -23,7 +23,11 @@ mod launch {
         _directory: Option<Source>,
         command: &str,
     ) -> Option<(PathBuf, Macros)> {
-        log::warn!("not running '{command}': launcher scripts are not run on this platform");
+        // Called for every command link the tree finds, as well as for a
+        // button pressed (which warns that the command is not supported).
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| log::warn!("launcher scripts are not run on this platform"));
+        log::debug!("not running '{command}'");
         None
     }
 
@@ -59,7 +63,8 @@ use eframe::egui;
 const AFTER_HELP: &str = "\
 With no display, bobview restores the default window layout when one has
 been saved (in $XDG_CONFIG_HOME/bobview/layouts, by default
-~/.config/bobview/layouts), else opens index.bob from the bundled displays
+~/.config/bobview/layouts, or %APPDATA%\\bobview\\layouts on Windows),
+else opens index.bob from the bundled displays
 (~/.local/share/bobview/displays) when present, else a file chooser.
 A display may also be an http:// or https:// URL; files it names are
 fetched relative to it. CS-Studio BOY .opi displays are translated as

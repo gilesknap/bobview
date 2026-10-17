@@ -84,7 +84,8 @@ which is too old, and bobview fails to start. There, put Mesa's software
 [mesa-dist-win](https://github.com/pal1000/mesa-dist-win/releases)) beside
 `bobview.exe`, and it draws on the CPU instead.
 
-Layouts are saved in `%APPDATA%\bobview\layouts`. DLS launcher scripts,
+Layouts are saved in `%APPDATA%\bobview\layouts` (in
+`%XDG_CONFIG_HOME%\bobview\layouts` if that is set). DLS launcher scripts,
 which are shell scripts, are not run on Windows, so their command actions do
 nothing (see [How BOY screens are translated](../explanations/boy.md#launcher-commands)).
 To remove bobview, delete the unzipped folder and `%APPDATA%\bobview`.

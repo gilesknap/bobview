@@ -1,7 +1,7 @@
 //! Saved window layouts: which displays are open, in which windows, where.
 //!
 //! A layout is a JSON file in `$XDG_CONFIG_HOME/bobview/layouts` (by default
-//! `~/.config/bobview/layouts`), named after the layout; `default.json` is
+//! `~/.config/bobview/layouts`, or `%APPDATA%\bobview\layouts` on Windows), named after the layout; `default.json` is
 //! restored at startup. Positions and sizes are in desktop points (egui's
 //! points times its zoom factor), so they don't depend on the controls' scale.
 
@@ -287,13 +287,14 @@ impl Layout {
 }
 
 /// `$XDG_CONFIG_HOME/bobview`, by default `~/.config/bobview` (on Windows
-/// `%APPDATA%\bobview` when neither variable is set).
+/// `%APPDATA%\bobview`, ahead of `~/.config/bobview`, when
+/// `XDG_CONFIG_HOME` is not set).
 pub fn config_dir() -> Option<PathBuf> {
     let var = |name| std::env::var_os(name).filter(|d| !d.is_empty());
     let base = var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .or_else(|| var("APPDATA").filter(|_| cfg!(windows)).map(PathBuf::from))?;
+        .or_else(|| var("APPDATA").filter(|_| cfg!(windows)).map(PathBuf::from))
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
     Some(base.join("bobview"))
 }
 
