@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["CHUNK"],"enum":["Found","Part"],"fn":["part","respond","secs","serve","stream"],"struct":["Roots","Validators"]};
+window.SIDEBAR_ITEMS = {"constant":["CHUNK"],"enum":["Found","Part"],"fn":["is_opened","open_file","part","respond","secs","serve","stream","windows_unsafe"],"struct":["Roots","Validators"]};

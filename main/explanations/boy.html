@@ -250,7 +250,8 @@ links the screen (an empty one, as many DLS modules have, does not).</p>
 <p>DLS screens open others with command actions that run a launcher script,
 such as <code>./srCellVacuum 04</code>, which ends by running <code>runcss.sh DISPLAY -m MACROS</code> to start CS-Studio. For a local display, bobview runs a copy of such
 a script beside a stand-in <code>runcss.sh</code> that only records its arguments, and
-opens that display with those macros.</p>
+opens that display with those macros. These are shell scripts, so they are
+not run on Windows, where such commands do nothing.</p>
 <p>A command that starts StripTool (<code>strip.py</code>, <code>strip.sh</code> or
 <code>buildStripToolconfig.sh</code> and the PV names, as in the DLS vacuum, gauge and
 RGA screens) opens a trend of those PVs instead; a last word without a <code>:</code>,

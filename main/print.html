@@ -395,9 +395,10 @@ given with <code>--web DIR</code>. The <a href="tutorials/browser.html">browser 
 </ul>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="install-bobview"><a class="header" href="#install-bobview">Install bobview</a></h1>
 <p>bobview runs on x86_64 and aarch64 Linux (including the Android 16 Linux
-Terminal, Debian 13) and on macOS 11 or later (Apple silicon or Intel).
-<code>install.sh</code> picks the release build to match the machine. To build it from
-crates.io with Cargo instead, see <a href="how-to/../tutorials/crates-io.html">Install from crates.io</a>.</p>
+Terminal, Debian 13), on macOS 11 or later (Apple silicon or Intel), and on
+x86_64 Windows (<a href="how-to/install.html#windows">see below</a>). <code>install.sh</code> picks the release build
+to match the machine. To build it from crates.io with Cargo instead, see
+<a href="how-to/../tutorials/crates-io.html">Install from crates.io</a>.</p>
 <h2 id="install-the-prerequisites"><a class="header" href="#install-the-prerequisites">Install the prerequisites</a></h2>
 <p>On Debian and Ubuntu:</p>
 <pre><code class="language-bash">sudo apt install libxkbcommon0 libwayland-client0 libegl1 libgl1-mesa-dri
@@ -430,6 +431,31 @@ Ubuntu 20.04+ and Debian 10+.</p>
 <p>Run the install command again to upgrade; it replaces the binaries and the
 <code>displays</code> and <code>web</code> folders. To remove bobview, delete the <code>bin/bobview*</code>
 files and <code>share/bobview</code> from <code>~/.local</code>.</p>
+<h2 id="windows"><a class="header" href="#windows">Windows</a></h2>
+<p>The Windows build is new, and has not yet been tried against real IOCs.</p>
+<p>Download <code>bobview-x86_64-windows.zip</code> from the
+<a href="https://github.com/gilesknap/bobview/releases/latest">latest release</a>, unzip
+it anywhere, and run <code>bin\bobview.exe</code>. Nothing else needs installing. The
+zip holds the same files as the table above, as <code>.exe</code>, without <code>bobview-ssh</code>
+and <code>install.sh</code>; add its <code>bin</code> folder to <code>PATH</code> to run the commands from a
+terminal. To try it against the simulated beamline, in PowerShell:</p>
+<pre><code class="language-powershell">Start-Process bin\bobview-testioc.exe
+$env:EPICS_CA_ADDR_LIST = "127.0.0.1"
+bin\bobview.exe
+</code></pre>
+<p>Windows may ask to let <code>bobview-testioc</code> and <code>bobview</code> through the firewall:
+Channel Access and PV Access search for PVs over UDP.</p>
+<p>bobview draws with OpenGL, which a GPU driver provides. A virtual machine or
+remote desktop session without one has only Windows' built-in OpenGL 1.1,
+which is too old, and bobview fails to start. There, put Mesa's software
+<code>opengl32.dll</code> (llvmpipe, for example from
+<a href="https://github.com/pal1000/mesa-dist-win/releases">mesa-dist-win</a>) beside
+<code>bobview.exe</code>, and it draws on the CPU instead.</p>
+<p>Layouts are saved in <code>%APPDATA%\bobview\layouts</code> (in
+<code>%XDG_CONFIG_HOME%\bobview\layouts</code> if that is set). DLS launcher scripts,
+which are shell scripts, are not run on Windows, so their command actions do
+nothing (see <a href="how-to/../explanations/boy.html#launcher-commands">How BOY screens are translated</a>).
+To remove bobview, delete the unzipped folder and <code>%APPDATA%\bobview</code>.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="connect-to-real-iocs"><a class="header" href="#connect-to-real-iocs">Connect to real IOCs</a></h1>
 <p>bobview uses the standard EPICS client variables (see
 <a href="how-to/../reference/environment.html">Environment variables</a>).</p>
@@ -572,7 +598,8 @@ with no arguments and with each number in the file name, bare and with an
 </div>
 <p>Macros given with <code>-m</code> override these. Screens with no number in their name
 (<code>srInjCellVacuum.opi</code> is cell 01) need <code>-m</code> with the macros their
-launcher would give, or opening from the overview.</p>
+launcher would give, or opening from the overview. Launcher scripts are not
+run on Windows, so there every such screen needs <code>-m</code>.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="save-and-restore-a-layout"><a class="header" href="#save-and-restore-a-layout">Save and restore a layout</a></h1>
 <p>A layout records the open windows so that a control-room arrangement can be
 put back with one command. <a href="how-to/../explanations/windows.html">Pinned windows and the viewer</a>
@@ -604,8 +631,8 @@ navigator. For each trend window: its PVs, time span, log scale, position
 and size. A layout from before windows were pinned pins them all if it was
 saved in multi-window mode, and none if not.</p>
 <p>Layouts are JSON files in <code>$XDG_CONFIG_HOME/bobview/layouts</code> (by default
-<code>~/.config/bobview/layouts</code>), so they can be copied between machines or
-kept under version control.</p>
+<code>~/.config/bobview/layouts</code>, and on Windows <code>%APPDATA%\bobview\layouts</code>), so
+they can be copied between machines or kept under version control.</p>
 <h2 id="positions-on-wayland-and-with-changed-monitors"><a class="header" href="#positions-on-wayland-and-with-changed-monitors">Positions on Wayland and with changed monitors</a></h2>
 <p>A saved position that is on none of the monitors now (a laptop that was
 docked) is dropped and the window manager places the window.</p>
@@ -785,12 +812,13 @@ git push origin v1.2.3
 </code></pre>
 <p>CI checks that the tag matches the version in <code>Cargo.toml</code> and fails the
 build if not. It creates the GitHub Release itself and builds on a runner
-for each platform (<code>ubuntu-24.04</code>, <code>ubuntu-24.04-arm</code> and <code>macos-15</code>, which
-also cross-builds the x86_64 Mac build), attaching a
-<code>bobview-&lt;arch&gt;-&lt;os&gt;.tar.gz</code> for each, such as <code>bobview-x86_64-linux.tar.gz</code>
-and <code>bobview-aarch64-macos.tar.gz</code>.</p>
+for each platform (<code>ubuntu-24.04</code>, <code>ubuntu-24.04-arm</code>, <code>macos-15</code>, which
+also cross-builds the x86_64 Mac build, and <code>windows-2022</code>), attaching a
+<code>bobview-&lt;arch&gt;-&lt;os&gt;.tar.gz</code> for each Linux and macOS build, such as
+<code>bobview-x86_64-linux.tar.gz</code> and <code>bobview-aarch64-macos.tar.gz</code>, and
+<code>bobview-x86_64-windows.zip</code> for Windows.</p>
 <p>The Linux builds use <code>cargo zigbuild</code> to link against glibc 2.28, so they
-run on RHEL 8+, Ubuntu 20.04+ and Debian 10+. Each tarball carries
+run on RHEL 8+, Ubuntu 20.04+ and Debian 10+. Each archive carries
 <code>THIRD_PARTY_LICENSES.txt</code>, generated by <code>scripts/third-party-licenses.py</code>.
 <code>install.sh</code> downloads the latest release for the machine it runs on.</p>
 <p>The tag also publishes a copy of these docs at
@@ -994,7 +1022,7 @@ calls every window's notifier, so each shows it.</p>
     A-&gt;&gt;R: begin: may ask again
     A-&gt;&gt;S: widgets read the latest state, and draw
 </pre>
-<h2 id="windows"><a class="header" href="#windows">Windows</a></h2>
+<h2 id="windows-1"><a class="header" href="#windows-1">Windows</a></h2>
 <p>The main window is eframe's root viewport. Each display and trend window is
 a deferred viewport (<code>show_viewport_deferred</code>) with a pass of its own, so it
 is redrawn for its own input and PVs, not when another window is. The app,
@@ -1154,7 +1182,8 @@ links the screen (an empty one, as many DLS modules have, does not).</p>
 <p>DLS screens open others with command actions that run a launcher script,
 such as <code>./srCellVacuum 04</code>, which ends by running <code>runcss.sh DISPLAY -m MACROS</code> to start CS-Studio. For a local display, bobview runs a copy of such
 a script beside a stand-in <code>runcss.sh</code> that only records its arguments, and
-opens that display with those macros.</p>
+opens that display with those macros. These are shell scripts, so they are
+not run on Windows, where such commands do nothing.</p>
 <p>A command that starts StripTool (<code>strip.py</code>, <code>strip.sh</code> or
 <code>buildStripToolconfig.sh</code> and the PV names, as in the DLS vacuum, gauge and
 RGA screens) opens a trend of those PVs instead; a last word without a <code>:</code>,
@@ -1300,7 +1329,7 @@ default 5075) and <code>EPICS_PVAS_BROADCAST_PORT</code> (UDP search, default 50
 <div class="table-wrapper"><table><thead><tr><th>variable</th><th>meaning</th></tr></thead><tbody>
 <tr><td><code>BOBVIEW_LOG</code></td><td>log level, e.g. <code>debug</code> for more output</td></tr>
 <tr><td><code>BOBVIEW_UI_SCALE</code></td><td>as <code>--ui-scale</code></td></tr>
-<tr><td><code>XDG_CONFIG_HOME</code></td><td>layouts are in <code>$XDG_CONFIG_HOME/bobview/layouts</code> (default <code>~/.config/bobview/layouts</code>)</td></tr>
+<tr><td><code>XDG_CONFIG_HOME</code></td><td>layouts are in <code>$XDG_CONFIG_HOME/bobview/layouts</code> (default <code>~/.config/bobview/layouts</code>; on Windows <code>%APPDATA%\bobview\layouts</code>)</td></tr>
 <tr><td><code>WAYLAND_DISPLAY</code></td><td>set it empty to run under XWayland, so layouts keep window positions</td></tr>
 </tbody></table>
 </div>
@@ -1635,7 +1664,7 @@ not with a plain <code>mdbook serve</code>.</p>
 (EPICS-style open licence), and embed the Liberation Sans fonts and a symbol
 subset of Noto Sans Math (both SIL Open Font Licence) and egui's default
 fonts. Their notices are in <code>THIRD_PARTY_LICENSES.txt</code> in each release
-tarball, generated by <code>scripts/third-party-licenses.py</code>.</p>
+archive (tarball or zip), generated by <code>scripts/third-party-licenses.py</code>.</p>
 <p><code>tests/displays/demo.bob</code> and the test IOC's <code>ea.db</code> come from
 epics-containers example-services (Apache-2.0).</p>
 <p>These docs draw their diagrams with <a href="https://mermaid.js.org">Mermaid</a>

@@ -183,9 +183,10 @@
                     <main>
                         <h1 id="install-bobview"><a class="header" href="#install-bobview">Install bobview</a></h1>
 <p>bobview runs on x86_64 and aarch64 Linux (including the Android 16 Linux
-Terminal, Debian 13) and on macOS 11 or later (Apple silicon or Intel).
-<code>install.sh</code> picks the release build to match the machine. To build it from
-crates.io with Cargo instead, see <a href="../tutorials/crates-io.html">Install from crates.io</a>.</p>
+Terminal, Debian 13), on macOS 11 or later (Apple silicon or Intel), and on
+x86_64 Windows (<a href="#windows">see below</a>). <code>install.sh</code> picks the release build
+to match the machine. To build it from crates.io with Cargo instead, see
+<a href="../tutorials/crates-io.html">Install from crates.io</a>.</p>
 <h2 id="install-the-prerequisites"><a class="header" href="#install-the-prerequisites">Install the prerequisites</a></h2>
 <p>On Debian and Ubuntu:</p>
 <pre><code class="language-bash">sudo apt install libxkbcommon0 libwayland-client0 libegl1 libgl1-mesa-dri
@@ -218,6 +219,31 @@ Ubuntu 20.04+ and Debian 10+.</p>
 <p>Run the install command again to upgrade; it replaces the binaries and the
 <code>displays</code> and <code>web</code> folders. To remove bobview, delete the <code>bin/bobview*</code>
 files and <code>share/bobview</code> from <code>~/.local</code>.</p>
+<h2 id="windows"><a class="header" href="#windows">Windows</a></h2>
+<p>The Windows build is new, and has not yet been tried against real IOCs.</p>
+<p>Download <code>bobview-x86_64-windows.zip</code> from the
+<a href="https://github.com/gilesknap/bobview/releases/latest">latest release</a>, unzip
+it anywhere, and run <code>bin\bobview.exe</code>. Nothing else needs installing. The
+zip holds the same files as the table above, as <code>.exe</code>, without <code>bobview-ssh</code>
+and <code>install.sh</code>; add its <code>bin</code> folder to <code>PATH</code> to run the commands from a
+terminal. To try it against the simulated beamline, in PowerShell:</p>
+<pre><code class="language-powershell">Start-Process bin\bobview-testioc.exe
+$env:EPICS_CA_ADDR_LIST = "127.0.0.1"
+bin\bobview.exe
+</code></pre>
+<p>Windows may ask to let <code>bobview-testioc</code> and <code>bobview</code> through the firewall:
+Channel Access and PV Access search for PVs over UDP.</p>
+<p>bobview draws with OpenGL, which a GPU driver provides. A virtual machine or
+remote desktop session without one has only Windows' built-in OpenGL 1.1,
+which is too old, and bobview fails to start. There, put Mesa's software
+<code>opengl32.dll</code> (llvmpipe, for example from
+<a href="https://github.com/pal1000/mesa-dist-win/releases">mesa-dist-win</a>) beside
+<code>bobview.exe</code>, and it draws on the CPU instead.</p>
+<p>Layouts are saved in <code>%APPDATA%\bobview\layouts</code> (in
+<code>%XDG_CONFIG_HOME%\bobview\layouts</code> if that is set). DLS launcher scripts,
+which are shell scripts, are not run on Windows, so their command actions do
+nothing (see <a href="../explanations/boy.html#launcher-commands">How BOY screens are translated</a>).
+To remove bobview, delete the unzipped folder and <code>%APPDATA%\bobview</code>.</p>
 
                     </main>
 
