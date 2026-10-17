@@ -61,7 +61,8 @@ installed. You should see live values within a second or two.
 - **Hover** over a widget: a tooltip shows its PV and value.
 - **Right-click** a widget (long-press on a touch screen): copy the PV name
   or value, open the PV's details, or **Trend** it. A trend window plots the
-  PV against time; leave it open.
+  PV against time; leave it open. Given an archiver (`--archiver URL`), it
+  shows the PV's history too: see [Trend PVs](../how-to/trends.md).
 - **Middle-click** a widget to copy its PV name. On Linux a middle-click in
   a terminal pastes it; elsewhere, paste it as usual (Ctrl+V or ⌘V).
 - **Click a button** that opens another display. Use **Back** and

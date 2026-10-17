@@ -8,8 +8,9 @@ images, and is small enough to run on a phone, in the Android 16 Linux
 Terminal (Debian 13, aarch64). The same app runs in a browser, served by
 `bobview-server`.
 
-Scripts (Jython/JavaScript), display editing, alarm and archiver services are
-out of scope; see [Scope and fidelity to Phoebus](explanations/scope.md).
+Trends plot PVs' archived history from an EPICS Archiver Appliance as well
+as their live values. Scripts (Jython/JavaScript), display editing and alarm
+services are out of scope; see [Scope and fidelity to Phoebus](explanations/scope.md).
 
 <div class="compass">
   <div class="axis axis-top-left">Learning: acquiring skills</div>

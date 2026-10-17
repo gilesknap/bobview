@@ -29,7 +29,8 @@ instead of fitting the window.
 - **Hover** to see its PV and value.
 - **Right-click** (long-press on a touch screen) to copy the PV name, its
   value or a `caget`/`pvget` command, open the PV details, **Trend** it,
-  **Trend with rule PVs**, or add it to an open trend.
+  **Trend with rule PVs**, or add it to an open trend. See
+  [Trend PVs](../how-to/trends.md) for the trend window's own controls.
 - **Middle-click** to copy its PV name, as in EDM and MEDM: a middle-click
   in a terminal then pastes it, and one in
   [archiveview](https://github.com/gilesknap/archiveview) plots it. The

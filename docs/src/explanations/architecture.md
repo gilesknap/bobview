@@ -13,12 +13,15 @@ graph LR
     pv["pv<br/>PV access"]
     testioc["testioc<br/>test IOC"]
     egui["egui / eframe"]
+    archiveview["archiveview<br/>trend plot"]
     epics["epics-rs<br/>epics-ca-rs, epics-pva-rs"]
     pvws["PVWS"]
 
     bobview --> bob
     bobview --> pv
     bobview --> egui
+    bobview --> archiveview
+    archiveview --> pv
     server --> pv
     pv -- desktop --> epics
     pv -- browser --> pvws
@@ -36,6 +39,12 @@ graph LR
 | `bobview` | the viewer: an [egui](https://github.com/emilk/egui) app that draws displays, plus `bobview-probe` |
 | `bobview-server` | serves the web build, `.bob` files and a PV Web Socket from one port |
 | `testioc` | `bobview-testioc`, a pure-Rust IOC serving the example-services BL01T PVs |
+
+bobview's trend windows are [archiveview](https://github.com/gilesknap/archiveview)'s
+`Plot` widget, which fetches archived history from an EPICS Archiver
+Appliance and joins it to live values. It is a separate project that takes
+bobview's `PvManager`, so the workspace patches its crates.io `bobview-pv`
+to the one in `crates/pv`, making them the same type.
 
 The crates with a dashed outline also build for `wasm32-unknown-unknown`.
 Which source file does what is listed in the

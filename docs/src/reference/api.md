@@ -57,7 +57,8 @@ The main source files, for finding your way in. See
 | `rules.rs` | the rule expression language |
 | `widgets.rs` | painting and interaction for each widget type, and `Request` |
 | `image.rs`, `symbol.rs`, `svg.rs` | the image widget; symbol and picture widgets, loaded on worker threads; safe SVG parsing |
-| `plot.rs`, `meter.rs`, `trend.rs`, `axis.rs` | XY plots, meters, trends and their shared scales |
+| `plot.rs`, `meter.rs`, `stripchart.rs`, `axis.rs` | XY plots, meters, the strip chart and their shared scales |
+| `trend.rs` | trend windows: an [archiveview](https://github.com/gilesknap/archiveview) `Plot` each |
 | `format.rs` | values as text and back, as Phoebus formats them |
 | `tree.rs` | the navigator |
 | `pvmenu.rs` | the PV context menu and details window |
