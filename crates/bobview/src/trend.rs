@@ -203,7 +203,11 @@ mod tests {
         // MOCK:SINE has a 10 minute period, sampled every second: the
         // default hour of it is a long wavy line across the plot.
         let (points, width) = longest_line(Some(archiver));
-        assert!(points > 100, "history drawn with {points} points");
+        assert!(
+            points > 100,
+            "history drawn with {points} points (is http_proxy sending 127.0.0.1 to a \
+             proxy? set no_proxy=127.0.0.1,localhost)"
+        );
         assert!(width > 400.0, "history drawn {width} points wide");
         // Without the archiver the longest line is the plot's furniture
         // (an icon), so the line above is history.

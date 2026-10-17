@@ -36,6 +36,8 @@ jobs:
           EPICS_PVA_AUTO_ADDR_LIST: "NO"
           ARCHIVER: http://127.0.0.1:17668
         run: |
+          # a bobview failure behind tee fails the step
+          set -o pipefail
           cargo build --workspace
           target/debug/bobview-testioc &
           archiveview-mockarchiver --port 17668 &
@@ -52,12 +54,17 @@ jobs:
             curl -sf "${ARCHIVER}/retrieval/bpl/getVersion" && break
             sleep 0.2
           done
+          curl -sf "${ARCHIVER}/retrieval/bpl/getVersion" > /dev/null \
+            || { echo "::error::the mock archiver is not answering"; exit 1; }
           echo
+          # the last click, on the grey beside the display, takes the
+          # pointer off the plot (no crosshair or tooltip)
           target/debug/bobview --snapshot snapshots/trend-archiver.png --archiver "${ARCHIVER}" \
-            --size 1280x800 --wait 5 --right-click 700,314 --click 725,444 tests/displays/index.bob \
-            2>&1 | tee trend.log
-          # the clicks hit the menu, and the trend opened
+            --size 1280x800 --wait 5 --right-click 700,314 --click 725,444 --click 1100,700 \
+            tests/displays/index.bob 2>&1 | tee trend.log
+          # the clicks hit the menu, the trend opened and it was rendered
           grep -q "trend bl01t:SUM" trend.log
+          test -s snapshots/trend-archiver.png
           kill %1 %2
       - uses: actions/upload-artifact@v4
         with:
