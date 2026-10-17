@@ -62,8 +62,8 @@ installed. You should see live values within a second or two.
 - **Right-click** a widget (long-press on a touch screen): copy the PV name
   or value, open the PV's details, or **Trend** it. A trend window plots the
   PV against time; leave it open.
-- **Middle-click** a widget to copy its PV name; a middle-click in a
-  terminal pastes it.
+- **Middle-click** a widget to copy its PV name. On Linux a middle-click in
+  a terminal pastes it; elsewhere, paste it as usual (Ctrl+V or ⌘V).
 - **Click a button** that opens another display. Use **Back** and
   **Forward** in the toolbar to move between them, and **Home** to return
   to `index.bob`.
