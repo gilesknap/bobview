@@ -387,7 +387,9 @@ enum Route {
 /// displays have no `windows` of their own. Otherwise a display already
 /// open with the same macros is raised (`showing`), or shown again in place
 /// when that is the link's own window; shift+click opens a new
-/// window; a link in an unpinned window navigates in place, and one in a
+/// window, pinning the display window used last so that the new one goes
+/// beside it (see `pin_last_used`); a link in an unpinned window navigates
+/// in place, and one in a
 /// `pinned` window opens in the `viewer`, or a new window when every window
 /// is pinned.
 fn route(
@@ -770,9 +772,30 @@ impl BobApp {
             }
             Route::NewWindow => {
                 log::info!("open {} (new window)", loc.source);
+                if origin.shift {
+                    self.pin_last_used();
+                }
                 let window = self.open_window(ctx, loc, Geometry::default(), false, false);
                 self.place_beside(ctx, window, origin.window);
             }
+        }
+    }
+
+    /// Pin the unpinned display window used last, so that a window opened
+    /// now goes beside it, not over it, and a run of shift+clicks builds a
+    /// row. Not the main window, even as the viewer: unpinned, it navigates
+    /// in place, as the user chose.
+    fn pin_last_used(&mut self) {
+        // Of those used at once, the newest, as for the viewer.
+        let last = self
+            .windows
+            .iter_mut()
+            .filter(|w| !w.close && !w.pinned)
+            .max_by_key(|w| w.used.at);
+        if let Some(w) = last {
+            w.pinned = true;
+            self.clock += 1;
+            w.pinned_at = self.clock;
         }
     }
 
@@ -1478,7 +1501,8 @@ const NAVIGATOR_HELP: &str = "Navigator: a tree of the displays the home display
 
 /// What a window's pin does.
 const PIN_HELP: &str = "Pinned: links open their displays in the unpinned window used last, \
-     or a new one (shift+click: a new window, ctrl+click: in place). \
+     or a new one (shift+click: a new window, pinning the display window used last; \
+     ctrl+click: in place). \
      Unpinned: links open in place. \
      A display already open in another window is raised.";
 
@@ -3006,14 +3030,18 @@ mod tests {
         assert_eq!(app.windows.len(), 1);
         assert_eq!(current(&app, 0), Some(other.clone()));
         assert_eq!(app.windows[0].view.back, [display("b")]);
-        // Shift+click opens a new window, which becomes the viewer.
+        // Shift+click opens a new window, which becomes the viewer, and pins
+        // the one before it.
         open(&mut app, shift(main), display("d"));
         assert_eq!(app.windows.len(), 2);
+        assert!(app.windows[0].pinned);
         let second = WindowKey::Child(app.windows[1].id);
         open(&mut app, plain(main), display("e"));
         assert_eq!(current(&app, 1), Some(display("e")));
         assert_eq!(current(&app, 0), Some(other));
         // A link in an unpinned window navigates it.
+        app.windows[0].pinned = false;
+        app.windows[0].used.touch(&mut app.clock);
         open(&mut app, plain(first), display("f"));
         assert_eq!(current(&app, 0), Some(display("f")));
         // Pinned, a window is no longer the viewer: the other one is.
@@ -3059,6 +3087,83 @@ mod tests {
         app.request(&ctx, plain(main), Request::CloseOthers);
         assert_eq!(open_windows(&app), 0);
         assert_eq!(app.main.current, Some(display("a")));
+    }
+
+    #[test]
+    fn shift_click_pins_the_display_window_used_last() {
+        use super::{BobApp, Location, Origin, WindowKey};
+        use crate::widgets::Request;
+        let _cache = crate::fetch::tests::CACHE_USERS.lock();
+        let ctx = eframe::egui::Context::default();
+        let mut app = BobApp::new(&ctx, None, Some(1.0), crate::chrome::UiScale::Auto);
+        let display = |name: &str| Location {
+            source: bob::Source::File(format!("/no/such/{name}.bob").into()),
+            macros: bob::Macros::default(),
+        };
+        let open = |app: &mut BobApp, window, ctrl, shift, name: &str| {
+            let loc = display(name);
+            let req = Request::Open {
+                source: loc.source,
+                macros: loc.macros,
+                target: "replace".into(),
+            };
+            let origin = Origin {
+                window,
+                ctrl,
+                shift,
+            };
+            app.request(&ctx, origin, req);
+        };
+        let pinned = |app: &BobApp| app.windows.iter().map(|w| w.pinned).collect::<Vec<_>>();
+        let main = WindowKey::Main;
+        // Nothing to pin yet: the main window is pinned, and stays so.
+        open(&mut app, main, false, true, "a");
+        assert_eq!(pinned(&app), [false]);
+        assert!(app.main_pinned);
+        // The next pins it, with the time for the place beside it to be first.
+        let before = app.clock;
+        open(&mut app, main, false, true, "b");
+        assert_eq!(pinned(&app), [true, false]);
+        assert!(app.windows[0].pinned_at > before);
+        // A display already open is raised: nothing pinned, nothing opened.
+        open(&mut app, main, false, true, "a");
+        assert_eq!(pinned(&app), [true, false]);
+        // Reloaded, by its own window's link: nothing pinned either.
+        let second = WindowKey::Child(app.windows[1].id);
+        open(&mut app, second, false, true, "b");
+        assert_eq!(pinned(&app), [true, false]);
+
+        // Two unpinned: only the one used last is pinned, the older one
+        // staying the unpinned one, and a new window still opens.
+        app.windows[0].pinned = false;
+        app.windows[1].used.touch(&mut app.clock);
+        open(&mut app, main, false, true, "c");
+        assert_eq!(pinned(&app), [false, true, false]);
+        assert_eq!(app.windows[2].view.current, Some(display("c")));
+
+        // A closing window is passed over.
+        app.windows[2].close = true;
+        open(&mut app, main, false, true, "d");
+        assert_eq!(pinned(&app), [true, true, false, false]);
+
+        // The main window unpinned and used last, so the viewer, stays
+        // unpinned while the child used last is pinned.
+        app.main_pinned = false;
+        app.main_used.touch(&mut app.clock);
+        assert_eq!(app.viewer(), Some(main));
+        open(&mut app, main, false, true, "e");
+        assert!(!app.main_pinned);
+        assert_eq!(pinned(&app), [true, true, false, true, false]);
+        assert_eq!(app.windows.len(), 5);
+
+        // No other route pins: a plain link in place, ctrl, or a plain link
+        // to the viewer.
+        open(&mut app, main, false, false, "f");
+        open(&mut app, main, true, false, "g");
+        app.main_pinned = true;
+        open(&mut app, main, false, false, "h");
+        assert_eq!(app.windows[4].view.current, Some(display("h")));
+        assert_eq!(pinned(&app), [true, true, false, true, false]);
     }
 
     #[test]

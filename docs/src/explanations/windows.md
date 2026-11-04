@@ -15,7 +15,7 @@ these rules, whatever target the screen gives it:
 |---|---|---|
 | in a pinned window | raise that window | open in the viewer, or a new window if every window is pinned |
 | in an unpinned window | raise that window | open in place |
-| **shift**+click | raise that window | open in a new window |
+| **shift**+click | raise that window | pin the display window used last, and open in a new window |
 | **ctrl**+click | open in place | open in place |
 
 The **viewer** is the unpinned window used last (focused, opened or
@@ -33,7 +33,12 @@ it links to come and go in one other window: an overview on one side and a
 detail on the other. Pin that one too to keep it, and the next link opens a
 new viewer. Unpinned, the main window navigates in place, as a single
 window does. Holding shift opens every display in a window of its own, as
-the old multi-window mode did.
+the old multi-window mode did: each shift+click pins the unpinned display
+window used last, so the new window opens beside it rather than over it, and
+a run of them builds a row of windows. The newest stays unpinned, as the
+viewer. The main window is never pinned this way, since that would switch
+off its navigating in place. A shift+click that only raises or reloads a
+display already open pins nothing.
 
 A display opened in place or in the viewer keeps that window's history for
 Back and Forward. A link to the display its own window shows reloads it in

@@ -88,7 +88,7 @@ The right-click menu on the display's background has **Show toolbar** and
 | Alt+← / Alt+→ | back / forward |
 | Ctrl+W | close the window (the main window quits bobview and closes its windows) |
 | Ctrl+T | show or hide a display window's toolbar |
-| shift+click on a link | open in a new window |
+| shift+click on a link | open in a new window, pinning the display window used last |
 | ctrl+click on a link | open in place |
 
 ## Navigator
