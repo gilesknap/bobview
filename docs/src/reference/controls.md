@@ -88,7 +88,9 @@ Showing the toolbar makes the window taller by the toolbar's height, and
 hiding it shrinks the window by the same amount, so the display keeps its
 size and zoom. A window that is maximised or full screen doesn't change, and
 one that reaches the monitor's height grows only that far, so there the
-display gives the toolbar the room.
+display gives the toolbar the room. Display windows drawn inside the main
+window (in a browser, and in snapshots) don't resize for either: the display
+gives the toolbar the room, and clicking the zoom only sets 100%.
 
 ## Keys
 
@@ -98,7 +100,7 @@ display gives the toolbar the room.
 | Alt+← / Alt+→ | back / forward |
 | Ctrl+W | close the window (the main window quits bobview and closes its windows) |
 | Ctrl+T | show or hide a display window's toolbar |
-| shift+click on a link | open in a new window, pinning the display window used last |
+| shift+click on a link | open in a new window, pinning the unpinned display window used last |
 | ctrl+click on a link | open in place |
 
 ## Navigator

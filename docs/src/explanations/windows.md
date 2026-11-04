@@ -15,7 +15,7 @@ these rules, whatever target the screen gives it:
 |---|---|---|
 | in a pinned window | raise that window | open in the viewer, or a new window if every window is pinned |
 | in an unpinned window | raise that window | open in place |
-| **shift**+click | raise that window | pin the display window used last, and open in a new window |
+| **shift**+click | raise that window | pin the unpinned display window used last, and open in a new window |
 | **ctrl**+click | open in place | open in place |
 
 The **viewer** is the unpinned window used last (focused, opened or
