@@ -1182,7 +1182,7 @@ these rules, whatever target the screen gives it:</p>
 <div class="table-wrapper"><table><thead><tr><th>Click</th><th>Display already open somewhere</th><th>Not open</th></tr></thead><tbody>
 <tr><td>in a pinned window</td><td>raise that window</td><td>open in the viewer, or a new window if every window is pinned</td></tr>
 <tr><td>in an unpinned window</td><td>raise that window</td><td>open in place</td></tr>
-<tr><td><strong>shift</strong>+click</td><td>raise that window</td><td>open in a new window</td></tr>
+<tr><td><strong>shift</strong>+click</td><td>raise that window</td><td>pin the unpinned display window used last, and open in a new window</td></tr>
 <tr><td><strong>ctrl</strong>+click</td><td>open in place</td><td>open in place</td></tr>
 </tbody></table>
 </div>
@@ -1199,7 +1199,12 @@ it links to come and go in one other window: an overview on one side and a
 detail on the other. Pin that one too to keep it, and the next link opens a
 new viewer. Unpinned, the main window navigates in place, as a single
 window does. Holding shift opens every display in a window of its own, as
-the old multi-window mode did.</p>
+the old multi-window mode did: each shift+click pins the unpinned display
+window used last, so the new window opens beside it rather than over it, and
+a run of them builds a row of windows. The newest stays unpinned, as the
+viewer. The main window is never pinned this way, since that would switch
+off its navigating in place. A shift+click that only raises or reloads a
+display already open pins nothing.</p>
 <p>A display opened in place or in the viewer keeps that window's history for
 Back and Forward. A link to the display its own window shows reloads it in
 place, as a Refresh button wants, without adding to Back. BOY Exit buttons
@@ -1582,6 +1587,7 @@ into ☰.</li>
 <li>On a small high-DPI screen the toolbar and menus are scaled down so they
 take a small share of it; <code>--ui-scale F</code> (or <code>BOBVIEW_UI_SCALE=F</code>) fixes
 their size.</li>
+<li>A menu too tall for its window scrolls inside it, in every window.</li>
 </ul>
 <h2 id="window-size"><a class="header" href="#window-size">Window size</a></h2>
 <p>The window opens at the size of the first display (when the screen has
@@ -1640,13 +1646,22 @@ appear in the top-right corner of the display: Back (while the toolbar is
 hidden), the window's pin, and a chevron that shows or hides the toolbar.
 The right-click menu on the display's background has <strong>Show toolbar</strong> and
 <strong>Close</strong>. Pinned windows have 📌 before their title.</p>
+<p>Clicking the toolbar's zoom shows the display at 100% and sizes the window to
+it, as on the main toolbar.</p>
+<p>Showing the toolbar makes the window taller by the toolbar's height, and
+hiding it shrinks the window by the same amount, so the display keeps its
+size and zoom. A window that is maximised or full screen doesn't change, and
+one that reaches the monitor's height grows only that far, so there the
+display gives the toolbar the room. Display windows drawn inside the main
+window (in a browser, and in snapshots) don't resize for either: the display
+gives the toolbar the room, and clicking the zoom only sets 100%.</p>
 <h2 id="keys"><a class="header" href="#keys">Keys</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>key</th><th>action</th></tr></thead><tbody>
 <tr><td>Ctrl+R</td><td>reload</td></tr>
 <tr><td>Alt+← / Alt+→</td><td>back / forward</td></tr>
 <tr><td>Ctrl+W</td><td>close the window (the main window quits bobview and closes its windows)</td></tr>
 <tr><td>Ctrl+T</td><td>show or hide a display window's toolbar</td></tr>
-<tr><td>shift+click on a link</td><td>open in a new window</td></tr>
+<tr><td>shift+click on a link</td><td>open in a new window, pinning the unpinned display window used last (a display already open is raised, and nothing pinned)</td></tr>
 <tr><td>ctrl+click on a link</td><td>open in place</td></tr>
 </tbody></table>
 </div>
