@@ -15,6 +15,7 @@ all other windows and the layout actions).
 - On a small high-DPI screen the toolbar and menus are scaled down so they
   take a small share of it; `--ui-scale F` (or `BOBVIEW_UI_SCALE=F`) fixes
   their size.
+- A menu too tall for its window scrolls inside it, in every window.
 
 ## Window size
 
@@ -80,6 +81,17 @@ hidden), the window's pin, and a chevron that shows or hides the toolbar.
 The right-click menu on the display's background has **Show toolbar** and
 **Close**. Pinned windows have 📌 before their title.
 
+Clicking the toolbar's zoom shows the display at 100% and sizes the window to
+it, as on the main toolbar.
+
+Showing the toolbar makes the window taller by the toolbar's height, and
+hiding it shrinks the window by the same amount, so the display keeps its
+size and zoom. A window that is maximised or full screen doesn't change, and
+one that reaches the monitor's height grows only that far, so there the
+display gives the toolbar the room. Display windows drawn inside the main
+window (in a browser, and in snapshots) don't resize for either: the display
+gives the toolbar the room, and clicking the zoom only sets 100%.
+
 ## Keys
 
 | key | action |
@@ -88,7 +100,7 @@ The right-click menu on the display's background has **Show toolbar** and
 | Alt+← / Alt+→ | back / forward |
 | Ctrl+W | close the window (the main window quits bobview and closes its windows) |
 | Ctrl+T | show or hide a display window's toolbar |
-| shift+click on a link | open in a new window |
+| shift+click on a link | open in a new window, pinning the unpinned display window used last (a display already open is raised, and nothing pinned) |
 | ctrl+click on a link | open in place |
 
 ## Navigator

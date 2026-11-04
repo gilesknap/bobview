@@ -69,6 +69,9 @@ pub struct View {
     pub forward: Vec<Location>,
     pub zoom: f32,
     pub fit: bool,
+    /// Keep the zoom Fit gave, whatever the room: the window is being resized
+    /// to give the display the room it had.
+    pub hold_zoom: bool,
     error: Option<String>,
     /// The display being loaded is the current one again: keep the window size.
     reloading: bool,
@@ -124,6 +127,7 @@ impl View {
             forward: Vec::new(),
             zoom: zoom.unwrap_or(1.0),
             fit: zoom.is_none(),
+            hold_zoom: false,
             error: None,
             reloading: false,
             new_display: false,
@@ -405,7 +409,7 @@ impl View {
                     return;
                 };
                 let avail = ui.available_size();
-                if self.fit && screen.width > 0.0 {
+                if self.fit && !self.hold_zoom && screen.width > 0.0 {
                     let fit = (avail.x / screen.width as f32)
                         .min(avail.y / screen.height.max(1.0) as f32);
                     self.zoom = (fit * ui_zoom).clamp(0.2, 5.0);

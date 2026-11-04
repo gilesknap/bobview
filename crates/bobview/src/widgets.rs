@@ -317,9 +317,10 @@ fn draw_node(ui: &mut Ui, node: &mut Node, cx: &mut Cx, id: Id) {
         };
         // The context menu has its own popup id, so it does not fight a
         // combo or action button's own menu (which uses the default id).
-        egui::Popup::context_menu(&resp)
-            .id(id.with("context-menu"))
-            .show(|ui| crate::pvmenu::menu(ui, node, state.as_ref(), cx.trends, cx.requests));
+        let popup = egui::Popup::context_menu(&resp).id(id.with("context-menu"));
+        crate::chrome::menu(popup, |ui| {
+            crate::pvmenu::menu(ui, node, state.as_ref(), cx.trends, cx.requests);
+        });
         middle_click_copy(ui, &resp, node, cx, id);
         let text = tooltip(node, state.as_ref());
         if !text.is_empty() {
@@ -1290,7 +1291,7 @@ fn action_button(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut Cx, id: Id) 
     if allowed && actions.len() == 1 && resp.clicked() {
         run_action(node, &actions[0], cx);
     } else if allowed && actions.len() > 1 {
-        egui::Popup::menu(&resp).show(|ui| {
+        crate::chrome::menu(egui::Popup::menu(&resp), |ui| {
             for a in &actions {
                 if ui.button(node.expand(a.label())).clicked() {
                     run_action(node, a, cx);
@@ -1686,7 +1687,7 @@ fn combo(
         &ui.style().text_styles[&egui::TextStyle::Button],
     );
     let row_h = if cx.touch { TOUCH_TARGET } else { 0.0 };
-    egui::Popup::menu(&resp).width(rect.width()).show(|ui| {
+    crate::chrome::menu(egui::Popup::menu(&resp).width(rect.width()), |ui| {
         ui.set_min_width(rect.width() - ui.spacing().menu_margin.sum().x);
         for (i, item) in items.iter().enumerate() {
             let label = egui::RichText::new(item).font(item_font.clone());

@@ -96,7 +96,7 @@ fn add_to_trend(
             }
         }
         _ => {
-            ui.menu_button(format!("Add{what} to trend"), |ui| {
+            crate::chrome::submenu(ui, &format!("Add{what} to trend"), |ui| {
                 for (id, title) in trends {
                     if ui.button(title).clicked() {
                         requests.push(Request::TrendAdd(*id, names.to_vec()));
