@@ -1066,10 +1066,7 @@ impl BobApp {
                 }
                 let readout = egui::Button::new(format!("{:.0}%", view.zoom * 100.0))
                     .min_size(Vec2::new(56.0, button));
-                actual_size = ui
-                    .add(readout)
-                    .on_hover_text("Actual size: 100%, and the window sized to fit the display")
-                    .clicked();
+                actual_size = ui.add(readout).on_hover_text(ACTUAL_SIZE_HELP).clicked();
                 if !compact
                     && icons::button(ui, Icon::ZoomIn, false, true)
                         .on_hover_text("Zoom in")
@@ -1524,6 +1521,9 @@ const RESTORE_WAIT: f64 = 2.0;
 /// What the navigator shows.
 const NAVIGATOR_HELP: &str = "Navigator: a tree of the displays the home display links to, \
      and those they link to. Click one to open it as a link would (shift and ctrl too).";
+
+/// What clicking a window's zoom does.
+const ACTUAL_SIZE_HELP: &str = "Actual size: 100%, and the window sized to fit the display";
 
 /// What a window's pin does.
 const PIN_HELP: &str = "Pinned: links open their displays in the unpinned window used last, \
@@ -2472,12 +2472,18 @@ fn child_ui(
     }
     let mut panels = 0.0;
     if w.toolbar {
-        w.room.height = egui::Panel::top(Id::new(("toolbar", w.id)))
-            .show(ui, |ui| display_toolbar(ui, &mut w.view, home))
-            .response
-            .rect
-            .height();
+        let toolbar = egui::Panel::top(Id::new(("toolbar", w.id)))
+            .show(ui, |ui| display_toolbar(ui, &mut w.view, home));
+        w.room.height = toolbar.response.rect.height();
         panels += w.room.height;
+        // Actual size: 100%, and the window sized to it below, as to a new
+        // display.
+        if toolbar.inner {
+            w.view.fit = false;
+            w.view.zoom = 1.0;
+            w.fit_next = true;
+            w.view.new_display = true;
+        }
     }
     if native.is_some() {
         follow_toolbar(ui, w);
@@ -2690,8 +2696,9 @@ fn corner_glyph(ui: &egui::Ui, resp: &egui::Response, icon: Icon) {
 }
 
 /// A display window's toolbar: navigation, reload and zoom. The window and
-/// layout controls stay on the main window.
-fn display_toolbar(ui: &mut egui::Ui, view: &mut View, home: &Option<Location>) {
+/// layout controls stay on the main window. Whether the zoom was clicked,
+/// which asks for the actual size.
+fn display_toolbar(ui: &mut egui::Ui, view: &mut View, home: &Option<Location>) -> bool {
     ui.horizontal(|ui| {
         if ui
             .add_enabled(!view.back.is_empty(), egui::Button::new("◀"))
@@ -2720,7 +2727,10 @@ fn display_toolbar(ui: &mut egui::Ui, view: &mut View, home: &Option<Location>) 
         if ui.button("+").clicked() {
             view.zoom_by(1.25);
         }
-        ui.label(format!("{:.0}%", view.zoom * 100.0));
+        let actual_size = ui
+            .button(format!("{:.0}%", view.zoom * 100.0))
+            .on_hover_text(ACTUAL_SIZE_HELP)
+            .clicked();
         ui.separator();
         if ui
             .add_enabled(home.is_some(), egui::Button::new("⌂"))
@@ -2730,7 +2740,9 @@ fn display_toolbar(ui: &mut egui::Ui, view: &mut View, home: &Option<Location>) 
         {
             view.open(home);
         }
-    });
+        actual_size
+    })
+    .inner
 }
 
 /// A new trend window's size, in points.
@@ -3832,6 +3844,48 @@ mod tests {
         win.pass(Vec::new());
         assert_eq!(win.settle(), zoom);
         assert_eq!(win.size, start);
+    }
+
+    #[test]
+    fn clicking_a_display_windows_zoom_sets_the_actual_size() {
+        use eframe::egui::{Event, Modifiers, PointerButton, Pos2};
+        let mut win = ToolbarWindow::new();
+        win.app.windows[0].toolbar = true;
+        win.settle();
+        // The window sized by the toolbar being shown, and not again until
+        // the zoom is clicked.
+        let asked = win.asked;
+        let toolbar = win.app.windows[0].room.height;
+        // Along the toolbar, for what sets 100%.
+        let hit = (0..600).step_by(4).find(|x| {
+            let w = &mut win.app.windows[0];
+            (w.view.fit, w.view.zoom) = (true, 0.77);
+            let pos = Pos2::new(*x as f32, toolbar / 2.0);
+            let press = |pressed| Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            };
+            win.pass(vec![Event::PointerMoved(pos)]);
+            win.pass(vec![press(true)]);
+            win.pass(vec![press(false)]);
+            let w = &win.app.windows[0];
+            !w.view.fit && w.view.zoom == 1.0
+        });
+        assert!(hit.is_some(), "the zoom is a button");
+        assert_eq!(win.asked, asked + 1);
+        // One shot: sized to the display under its controls, then left be.
+        let w = &win.app.windows[0];
+        assert!(!w.fit_next);
+        assert!(!w.view.new_display);
+        let display = w.view.natural_size(1.0).unwrap();
+        win.settle();
+        assert_eq!(win.size.x, display.x + 1.0);
+        let status = win.size.y - display.y - toolbar;
+        assert!(status > 1.0 && status < 40.0, "{:?}", win.size);
+        assert_eq!(win.app.windows[0].view.zoom, 1.0);
+        assert_eq!(win.asked, asked + 1);
     }
 
     #[test]

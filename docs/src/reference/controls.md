@@ -80,6 +80,9 @@ hidden), the window's pin, and a chevron that shows or hides the toolbar.
 The right-click menu on the display's background has **Show toolbar** and
 **Close**. Pinned windows have 📌 before their title.
 
+Clicking the toolbar's zoom shows the display at 100% and sizes the window to
+it, as on the main toolbar.
+
 Showing the toolbar makes the window taller by the toolbar's height, and
 hiding it shrinks the window by the same amount, so the display keeps its
 size and zoom. A window that is maximised or full screen doesn't change, and
