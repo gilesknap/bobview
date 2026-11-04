@@ -164,16 +164,17 @@ fn menu_contents<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> 
     // Beside the items, not over them, and only there when there is more.
     ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
     let width = ui.spacing().scroll.allocated_width();
-    // While there is a bar the rows keep their one line, the menu widening
-    // by it, if the window has room for that: their width as first laid out,
-    // when nothing wraps, and whether it scrolled last frame.
+    // While there is a bar the rows keep the width they were first laid out
+    // at, as egui would, the menu widening by it if the window has room (and
+    // a point, as a scroll area rounds its width).
     let id = egui::containers::menu::find_menu_root(ui).id;
     let seen = id.with("menu scrolls");
-    let (scrolled, mut natural): (bool, f32) = ui.data(|d| d.get_temp(seen)).unwrap_or_default();
-    if scrolled && natural + width + margin.x <= window.x {
-        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-    }
+    let (scrolled, mut rows): (bool, f32) = ui.data(|d| d.get_temp(seen)).unwrap_or_default();
     let sizing = ui.is_sizing_pass();
+    let widened = rows + width + 1.0;
+    if scrolled && !sizing && widened + margin.x <= window.x {
+        ui.set_max_width(widened);
+    }
     let out = egui::ScrollArea::vertical()
         .max_height(room)
         .min_scrolled_height(0.0)
@@ -181,9 +182,9 @@ fn menu_contents<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> 
     let inner = out.inner_rect;
     let scrolls = out.content_size.y > inner.height();
     if sizing {
-        natural = out.content_size.x;
+        rows = out.content_size.x;
     }
-    ui.data_mut(|d| d.insert_temp(seen, (scrolls, natural)));
+    ui.data_mut(|d| d.insert_temp(seen, (scrolls, rows)));
     let bar = scrolls
         .then(|| Rect::from_x_y_ranges(inner.right()..=inner.right() + width, inner.y_range()));
     // As egui's `CloseOnClick`, but for that bar. Not the click that opened
@@ -798,6 +799,89 @@ mod tests {
         );
         assert_eq!(plain.height(), capped.height());
         assert!(plain.height() > 40.0, "it wraps: {plain:?}");
+    }
+
+    /// Where a menu of `labels` ends in a window `width` by `height`, as egui
+    /// draws it or not: its frame, and the furthest right of its rows.
+    fn right_edges(width: f32, height: f32, labels: &[&str], plain: bool) -> (f32, f32) {
+        use std::cell::Cell;
+        let rows = Cell::new(0.0_f32);
+        let mut fill = |ui: &mut egui::Ui| {
+            rows.set(0.0);
+            for label in labels {
+                rows.set(rows.get().max(ui.button(*label).rect.right()));
+            }
+        };
+        let mut win = MenuWindow::new(height);
+        win.width = width;
+        win.plain = plain;
+        let shown = win.open(&mut fill);
+        (shown.right(), rows.get())
+    }
+
+    #[test]
+    fn a_menu_stays_in_a_window_it_would_have_stayed_in() {
+        // As a PV's context menu, and as a menu too tall only for wrapping.
+        let pv: &[&str] = &[
+            "Copy PV name",
+            "Copy value",
+            "Copy name and value",
+            "Copy name, value, alarm and time",
+            "Copy \"caget BL01T-MO-SIMC-01:M1.RBV\"",
+            "Trend",
+            "Trend with rule PVs (3)",
+            "Add to \"A trend window\"",
+            "PV details…",
+        ];
+        let generic: &[&str] = &[
+            "Bring all windows to front",
+            "Close all other windows",
+            "Save layout as…",
+            "Save as default",
+            "Save default on exit",
+            "Auto-size window",
+            "Show the toolbar",
+            "Close this window",
+        ];
+        for (labels, height) in [(pv, 120.0), (generic, 200.0)] {
+            // Narrower than the menu, then with room for it and its bar.
+            for width in (100..=420).step_by(4) {
+                let width = width as f32;
+                let plain = right_edges(width, height, labels, true);
+                let (menu, rows) = right_edges(width, height, labels, false);
+                let at = format!("{width}x{height}, {} labels", labels.len());
+                if plain.0 <= width {
+                    assert!(menu <= width, "the menu ends at {menu} in {at}");
+                }
+                if plain.1 <= width {
+                    assert!(rows <= width, "the rows end at {rows} in {at}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_menu_too_tall_because_its_rows_wrap_stays_narrow() {
+        let labels: Vec<String> = (0..8)
+            .map(|i| format!("A label of number {i} which wraps here"))
+            .collect();
+        let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let mut wide = MenuWindow::new(200.0);
+        let mut tall = MenuWindow::new(200.0);
+        tall.width = 172.0;
+        tall.plain = true;
+        let fill = |ui: &mut egui::Ui| {
+            for label in &labels {
+                ui.button(*label).clicked();
+            }
+        };
+        // It fits in a wide window; here it wraps, and doesn't fit.
+        assert!(wide.open(fill).height() < 200.0);
+        assert!(tall.open(fill).height() > 200.0);
+        let (plain, _) = right_edges(172.0, 200.0, &labels, true);
+        let (menu, rows) = right_edges(172.0, 200.0, &labels, false);
+        assert!(plain <= 172.0, "{plain}");
+        assert!(menu <= 172.0 && rows <= 172.0, "{menu} {rows}");
     }
 
     #[test]

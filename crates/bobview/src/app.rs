@@ -2606,12 +2606,16 @@ fn follow_toolbar(ui: &egui::Ui, w: &mut DisplayWindow) {
     let resizable = chrome::can_resize(&info, zoom);
     let border = w.frame.map_or(0.0, |f| f.border.y / zoom);
     let room = &mut w.room;
+    // In whole physical pixels, as the window is: half a one would be rounded
+    // up both ways, growing the window with each show and hide.
+    let ppp = ui.ctx().pixels_per_point();
+    let height = (room.height * ppp).round() / ppp;
     if w.toolbar != room.shown {
         room.shown = w.toolbar;
         let by = if w.toolbar {
-            room.height
+            height
         } else {
-            -room.grew.take().unwrap_or(room.height)
+            -room.grew.take().unwrap_or(height)
         };
         if resizable {
             // From the size last asked for, when toggled again before that
@@ -2665,7 +2669,7 @@ fn follow_toolbar(ui: &egui::Ui, w: &mut DisplayWindow) {
         } else if changed && (arrived || now >= asked.until) {
             room.asked = None;
             if let Some(from) = asked.from {
-                room.grew = Some((inner.y - from).clamp(0.0, room.height));
+                room.grew = Some((inner.y - from).clamp(0.0, height));
             }
         } else if now < asked.until {
             ui.ctx()
@@ -3746,6 +3750,8 @@ mod tests {
         refuse: bool,
         /// The tallest a window manager lets it be, inside.
         clamp: f32,
+        /// It has whole physical pixels, as a real window does.
+        pixels: bool,
         auto_size: bool,
         asked: usize,
         delay: usize,
@@ -3787,6 +3793,7 @@ mod tests {
                 maximized: false,
                 refuse: false,
                 clamp: f32::INFINITY,
+                pixels: false,
                 auto_size: false,
                 asked: 0,
                 delay: 2,
@@ -3857,6 +3864,7 @@ mod tests {
                     self.asked += 1;
                     if !self.refuse {
                         let size = size * zoom;
+                        let size = if self.pixels { size.round() } else { size };
                         let size = eframe::egui::vec2(size.x, size.y.min(self.clamp));
                         self.pending.push((self.delay, size));
                     }
@@ -4171,6 +4179,41 @@ mod tests {
         }
         assert_eq!(win.size, start);
         assert_eq!(win.app.windows[0].view.zoom, zoom);
+    }
+
+    #[test]
+    fn a_toolbar_toggled_at_any_scale_returns_to_the_exact_size() {
+        // With native scale 1, the zoom factor makes the physical pixels: at
+        // 1.5 and 2.5 a toolbar 23 points high is a half pixel.
+        for scale in [1.0, 1.25, 1.5, 1.75, 2.0, 2.5] {
+            let mut win = ToolbarWindow::zoomed(scale);
+            win.pixels = true;
+            let start = win.size;
+            for cycle in 0..6 {
+                win.app.windows[0].toolbar = true;
+                win.settle();
+                let shown = win.size;
+                assert!(shown.y > start.y);
+                win.app.windows[0].toolbar = false;
+                win.settle();
+                assert_eq!(win.size, start, "{scale}, cycle {cycle}, from {shown:?}");
+            }
+            // From a window opened with its toolbar: hidden, then shown.
+            let mut win = ToolbarWindow::zoomed(scale);
+            win.pixels = true;
+            win.app.windows[0].toolbar = true;
+            win.settle();
+            // As from a layout, the height not yet measured.
+            win.app.windows[0].room.grew = None;
+            let start = win.size;
+            for cycle in 0..6 {
+                win.app.windows[0].toolbar = false;
+                win.settle();
+                win.app.windows[0].toolbar = true;
+                win.settle();
+                assert_eq!(win.size, start, "{scale}, shown first, cycle {cycle}");
+            }
+        }
     }
 
     #[test]
