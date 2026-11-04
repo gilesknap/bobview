@@ -142,6 +142,8 @@ pub fn small_screen(info: &egui::ViewportInfo, zoom_factor: f32) -> bool {
 /// Show `popup` as a menu of `add`, no taller than the window: egui keeps a
 /// popup in its window by moving it, so a taller one would be cut off. One
 /// that fits looks as it would without this: its scroll area takes no room.
+/// A context menu right-clicked again elsewhere moves there rather than
+/// closing, deliberately: egui's `CloseOnClick` closed it first.
 pub fn menu<R>(
     popup: egui::Popup,
     add: impl FnOnce(&mut egui::Ui) -> R,
@@ -153,27 +155,42 @@ pub fn menu<R>(
 }
 
 fn menu_contents<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    let frame = egui::Frame::popup(ui.style()).total_margin().sum().y;
-    let room = (ui.ctx().content_rect().height() - frame).max(0.0);
+    let margin = egui::Frame::popup(ui.style()).total_margin().sum();
+    let window = ui.ctx().content_rect().size();
+    let room = (window.y - margin.y).max(0.0);
     // A popup has last frame's size to draw in (at first, a default): it may
     // be as tall as there is room for.
     ui.set_max_height(room);
     // Beside the items, not over them, and only there when there is more.
     ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+    let width = ui.spacing().scroll.allocated_width();
+    // While there is a bar the rows keep their one line, the menu widening
+    // by it, if the window has room for that: their width as first laid out,
+    // when nothing wraps, and whether it scrolled last frame.
+    let id = egui::containers::menu::find_menu_root(ui).id;
+    let seen = id.with("menu scrolls");
+    let (scrolled, mut natural): (bool, f32) = ui.data(|d| d.get_temp(seen)).unwrap_or_default();
+    if scrolled && natural + width + margin.x <= window.x {
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+    }
+    let sizing = ui.is_sizing_pass();
     let out = egui::ScrollArea::vertical()
         .max_height(room)
         .min_scrolled_height(0.0)
         .show(ui, add);
     let inner = out.inner_rect;
-    let bar = (out.content_size.y > inner.height()).then(|| {
-        let width = ui.spacing().scroll.allocated_width();
-        Rect::from_x_y_ranges(inner.right()..=inner.right() + width, inner.y_range())
-    });
+    let scrolls = out.content_size.y > inner.height();
+    if sizing {
+        natural = out.content_size.x;
+    }
+    ui.data_mut(|d| d.insert_temp(seen, (scrolls, natural)));
+    let bar = scrolls
+        .then(|| Rect::from_x_y_ranges(inner.right()..=inner.right() + width, inner.y_range()));
     // As egui's `CloseOnClick`, but for that bar. Not the click that opened
     // it, nor while a submenu is open, which then decides.
-    let id = egui::containers::menu::find_menu_root(ui).id;
     let shown = ui.ctx().read_response(id).map(|r| r.rect);
-    let click = ui.input(|i| i.pointer.latest_pos().filter(|_| i.pointer.any_click()));
+    // Not the latest position: a touch's release has none.
+    let click = ui.input(|i| i.pointer.interact_pos().filter(|_| i.pointer.any_click()));
     if let (Some(pos), Some(shown)) = (click, shown)
         && shown.contains(pos)
         && !bar.is_some_and(|bar| bar.contains(pos))
@@ -408,6 +425,7 @@ mod tests {
     /// A window holding a button with a menu, drawn pass by pass.
     struct MenuWindow {
         ctx: egui::Context,
+        width: f32,
         height: f32,
         /// Drawn as egui would, not by `menu`.
         plain: bool,
@@ -419,6 +437,7 @@ mod tests {
         fn new(height: f32) -> Self {
             Self {
                 ctx: egui::Context::default(),
+                width: 800.0,
                 height,
                 plain: false,
                 menu: None,
@@ -426,7 +445,8 @@ mod tests {
         }
 
         fn pass(&mut self, events: Vec<egui::Event>, mut fill: impl FnMut(&mut egui::Ui)) {
-            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(800.0, self.height));
+            let screen =
+                egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(self.width, self.height));
             let input = egui::RawInput {
                 screen_rect: Some(screen),
                 events,
@@ -450,25 +470,16 @@ mod tests {
 
         /// Click the button, and draw the menu until it has settled.
         fn open(&mut self, mut fill: impl FnMut(&mut egui::Ui)) -> egui::Rect {
-            self.click(egui::Pos2::new(15.0, 15.0), &mut fill);
-            // The scroll bar slides in, widening the menu.
+            let pos = egui::Pos2::new(15.0, 15.0);
+            self.pass(Vec::new(), &mut fill);
+            self.pass(vec![egui::Event::PointerMoved(pos)], &mut fill);
+            self.pass(vec![press(pos, true)], &mut fill);
+            self.pass(vec![press(pos, false)], &mut fill);
+            // The scroll bar slides in, and the menu widens by it.
             for _ in 0..30 {
                 self.pass(Vec::new(), &mut fill);
             }
             self.menu.expect("the menu is open")
-        }
-
-        fn click(&mut self, pos: egui::Pos2, fill: &mut impl FnMut(&mut egui::Ui)) {
-            let press = |pressed| egui::Event::PointerButton {
-                pos,
-                button: egui::PointerButton::Primary,
-                pressed,
-                modifiers: egui::Modifiers::NONE,
-            };
-            self.pass(Vec::new(), &mut *fill);
-            self.pass(vec![egui::Event::PointerMoved(pos)], &mut *fill);
-            self.pass(vec![press(true)], &mut *fill);
-            self.pass(vec![press(false)], &mut *fill);
         }
     }
 
@@ -485,19 +496,33 @@ mod tests {
         });
     }
 
-    /// Press and release the primary button at `pos`, the pointer there
-    /// first.
-    fn click_at(win: &mut MenuWindow, pos: egui::Pos2, fill: &mut impl FnMut(&mut egui::Ui)) {
-        let press = |pressed| egui::Event::PointerButton {
+    /// The primary button pressed or released at `pos`.
+    fn press(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
             pos,
             button: egui::PointerButton::Primary,
             pressed,
             modifiers: egui::Modifiers::NONE,
-        };
+        }
+    }
+
+    /// The wheel turned far enough to reach the end of any list here.
+    fn wheel_to_the_end() -> egui::Event {
+        egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: Vec2::new(0.0, -5000.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    /// Press and release the primary button at `pos`, the pointer there
+    /// first.
+    fn click_at(win: &mut MenuWindow, pos: egui::Pos2, fill: &mut impl FnMut(&mut egui::Ui)) {
         win.pass(vec![egui::Event::PointerMoved(pos)], &mut *fill);
         win.pass(vec![], &mut *fill);
-        win.pass(vec![press(true)], &mut *fill);
-        win.pass(vec![press(false)], &mut *fill);
+        win.pass(vec![press(pos, true)], &mut *fill);
+        win.pass(vec![press(pos, false)], &mut *fill);
         win.pass(vec![], &mut *fill);
     }
 
@@ -530,14 +555,8 @@ mod tests {
             // Below the window, until scrolled to.
             win.pass(Vec::new(), &mut fill);
             assert!(last.get().unwrap().top() > height);
-            let scroll = egui::Event::MouseWheel {
-                unit: egui::MouseWheelUnit::Point,
-                delta: Vec2::new(0.0, -5000.0),
-                phase: egui::TouchPhase::Move,
-                modifiers: egui::Modifiers::NONE,
-            };
             win.pass(vec![egui::Event::PointerMoved(shown.center())], &mut fill);
-            win.pass(vec![scroll], &mut fill);
+            win.pass(vec![wheel_to_the_end()], &mut fill);
             for _ in 0..60 {
                 win.pass(Vec::new(), &mut fill);
             }
@@ -649,12 +668,6 @@ mod tests {
         let top = first.get().unwrap();
         let from = egui::pos2(top.right() + 7.0, shown.top() + 12.0);
         let to = from + Vec2::new(0.0, 100.0);
-        let press = |pos, pressed| egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed,
-            modifiers: egui::Modifiers::NONE,
-        };
         win.pass(vec![egui::Event::PointerMoved(from)], &mut fill);
         win.pass(vec![], &mut fill);
         win.pass(vec![press(from, true)], &mut fill);
@@ -687,8 +700,8 @@ mod tests {
     #[test]
     fn a_click_in_a_menu_that_fits_closes_it_as_ever() {
         use std::cell::Cell;
-        // On an item, on the frame's margin, and on the button that opened
-        // it; a click on a submenu's button keeps it.
+        // On an item and on the frame's margin; the click that opens it over
+        // its button doesn't count.
         let rect = Cell::new(None);
         let mut fill = |ui: &mut egui::Ui| {
             rect.set(Some(ui.button("An item").rect));
@@ -708,6 +721,83 @@ mod tests {
         let mut win = MenuWindow::new(60.0);
         win.open(|ui| items(ui, 6));
         assert!(win.menu.is_some(), "open over its button");
+    }
+
+    #[test]
+    fn a_tap_on_a_menus_item_chooses_it_and_closes_the_menu() {
+        use std::cell::Cell;
+        // A touch's release also says that the pointer has gone.
+        let (rect, hit) = (Cell::new(None), Cell::new(false));
+        let mut fill = |ui: &mut egui::Ui| {
+            let resp = ui.button("An item");
+            rect.set(Some(resp.rect));
+            hit.set(hit.get() || resp.clicked());
+        };
+        let mut win = MenuWindow::new(400.0);
+        win.open(&mut fill);
+        let pos = rect.get().unwrap().center();
+        win.pass(vec![egui::Event::PointerMoved(pos)], &mut fill);
+        win.pass(vec![press(pos, true)], &mut fill);
+        let release = vec![press(pos, false), egui::Event::PointerGone];
+        win.pass(release, &mut fill);
+        win.pass(vec![], &mut fill);
+        assert!(hit.get(), "chosen");
+        assert!(win.menu.is_none(), "and closed");
+    }
+
+    /// The height of each row of a menu of `labels`, in a window `width` wide
+    /// and `height` tall, and the menu.
+    fn rows(width: f32, height: f32, labels: &[String]) -> (Vec<f32>, egui::Rect) {
+        use std::cell::RefCell;
+        let heights = RefCell::new(Vec::new());
+        let mut fill = |ui: &mut egui::Ui| {
+            heights.borrow_mut().clear();
+            for label in labels {
+                heights.borrow_mut().push(ui.button(label).rect.height());
+            }
+        };
+        let mut win = MenuWindow::new(height);
+        win.width = width;
+        let shown = win.open(&mut fill);
+        (heights.into_inner(), shown)
+    }
+
+    #[test]
+    fn a_scrolling_menus_rows_keep_their_one_line() {
+        let labels: Vec<String> = (0..60).map(|i| format!("Item {i}")).collect();
+        let (fits, _) = rows(800.0, 1200.0, &labels[..4]);
+        let (scrolls, shown) = rows(800.0, 200.0, &labels);
+        assert!(scrolls.iter().all(|h| *h == fits[0]), "{scrolls:?}");
+        assert!(shown.right() <= 800.0);
+        // No wider than the window for it: the labels wrap instead.
+        let long: Vec<String> = (0..60).map(|i| format!("A long label {i}")).collect();
+        let (_, wide) = rows(800.0, 200.0, &long);
+        let (narrow, shown) = rows(wide.width() - 4.0, 200.0, &long);
+        assert!(shown.right() <= wide.width() - 4.0, "{shown:?}");
+        assert!(narrow.iter().any(|h| *h > fits[0]), "{narrow:?}");
+        // A menu that fits wraps as it would without scrolling.
+        let window = 60.0;
+        let (plain, capped) = (
+            {
+                let mut win = MenuWindow::new(800.0);
+                win.width = window;
+                win.plain = true;
+                win.open(|ui| {
+                    ui.button("A label too long for this narrow window")
+                        .clicked();
+                })
+            },
+            {
+                let mut win = MenuWindow::new(800.0);
+                win.width = window;
+                win.open(|ui| {
+                    ui.button("A label too long for this narrow window")
+                        .clicked();
+                })
+            },
+        );
+        assert_eq!(plain.height(), capped.height());
+        assert!(plain.height() > 40.0, "it wraps: {plain:?}");
     }
 
     #[test]
@@ -737,41 +827,34 @@ mod tests {
     fn a_submenu_scrolls_and_chooses_inside_a_scrolled_menu() {
         use std::cell::Cell;
         let mut win = MenuWindow::new(200.0);
-        let (button, sub, item, hit) = (
+        let (above, below, last, hit) = (
             Cell::new(None),
             Cell::new(None),
             Cell::new(None),
             Cell::new(false),
         );
         let mut fill = |ui: &mut egui::Ui| {
-            for row in 0..40 {
-                if row == 2 {
-                    let resp = ui.menu_button("A submenu", |ui| {
-                        menu_contents(ui, |ui| {
-                            for i in 0..40 {
-                                let resp = ui.button(format!("Sub {i}"));
-                                if i == 1 {
-                                    item.set(Some(resp.rect));
-                                }
-                                hit.set(hit.get() || resp.clicked());
-                            }
-                            sub.set(Some(ui.clip_rect()));
-                        });
-                    });
-                    button.set(Some(resp.response.rect));
-                } else {
-                    ui.button(format!("Item {row}")).clicked();
+            above.set(Some(ui.button("Above").rect));
+            submenu(ui, "A submenu", |ui| {
+                for i in 0..40 {
+                    ui.button(format!("Sub {i}")).clicked();
                 }
+                let resp = ui.button("The last");
+                last.set(Some(resp.rect));
+                hit.set(hit.get() || resp.clicked());
+            });
+            below.set(Some(ui.button("Below").rect));
+            for row in 0..40 {
+                ui.button(format!("Item {row}")).clicked();
             }
         };
         win.open(&mut fill);
-        let over = button.get().unwrap().center();
+        let (a, b): (egui::Rect, egui::Rect) = (above.get().unwrap(), below.get().unwrap());
+        let over = egui::pos2(a.center().x, (a.center().y + b.center().y) / 2.0);
         win.pass(vec![egui::Event::PointerMoved(over)], &mut fill);
-        for _ in 0..4 {
+        for _ in 0..30 {
             win.pass(Vec::new(), &mut fill);
         }
-        let clip = sub.get().expect("the submenu is open");
-        assert!(clip.top() >= 0.0 && clip.bottom() <= 200.0, "{clip:?}");
         // A click on its button keeps both open.
         click_at(&mut win, over, &mut fill);
         assert!(win.menu.is_some());
@@ -779,13 +862,20 @@ mod tests {
         for _ in 0..4 {
             win.pass(Vec::new(), &mut fill);
         }
-        // An item in it chooses, and closes the menu.
-        let pos = item.get().unwrap().center();
-        win.pass(vec![egui::Event::PointerMoved(pos)], &mut fill);
-        for _ in 0..3 {
+        // Its last item, below the window until scrolled to.
+        let r: egui::Rect = last.get().expect("the submenu is open");
+        assert!(r.top() > 200.0, "{r:?}");
+        let inside = egui::pos2(r.center().x, 100.0);
+        win.pass(vec![egui::Event::PointerMoved(inside)], &mut fill);
+        win.pass(vec![], &mut fill);
+        win.pass(vec![wheel_to_the_end()], &mut fill);
+        for _ in 0..60 {
             win.pass(Vec::new(), &mut fill);
         }
-        click_at(&mut win, pos, &mut fill);
+        let r: egui::Rect = last.get().unwrap();
+        assert!(r.bottom() <= 200.0, "reachable: {r:?}");
+        // It chooses, and closes the menu.
+        click_at(&mut win, r.center(), &mut fill);
         assert!(hit.get(), "the submenu's item is chosen");
         assert!(win.menu.is_none(), "and the menu closes");
     }
@@ -795,24 +885,9 @@ mod tests {
         // So the layout list is left as egui draws it.
         let ctx = egui::Context::default();
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(800.0, 120.0));
-        let mut rect = None;
-        let pos = egui::Pos2::new(15.0, 15.0);
-        let press = |pressed| egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed,
-            modifiers: egui::Modifiers::NONE,
-        };
         let mut last = None;
-        for events in [
-            vec![],
-            vec![egui::Event::PointerMoved(pos)],
-            vec![press(true)],
-            vec![press(false)],
-            vec![],
-            vec![],
-            vec![],
-        ] {
+        let pos = egui::Pos2::new(15.0, 15.0);
+        let mut pass = |events| {
             let input = egui::RawInput {
                 screen_rect: Some(screen),
                 events,
@@ -822,17 +897,33 @@ mod tests {
                 egui::ComboBox::from_id_salt("combo")
                     .selected_text("Combo")
                     .show_ui(ui, |ui| {
-                        rect = Some(ui.clip_rect());
                         for i in 0..40 {
                             last = Some(ui.button(format!("Item {i}")).rect);
                         }
                     });
             });
             out.textures_delta.clear();
+            last
+        };
+        pass(vec![]);
+        pass(vec![egui::Event::PointerMoved(pos)]);
+        pass(vec![press(pos, true)]);
+        pass(vec![press(pos, false)]);
+        for _ in 0..3 {
+            pass(vec![]);
         }
-        let clip = rect.expect("the list is open");
-        assert!(clip.bottom() <= 120.0, "{clip:?}");
-        assert!(last.unwrap().bottom() > 120.0, "and it scrolls");
+        let end: egui::Rect = pass(vec![]).expect("the list is open");
+        assert!(end.top() > 120.0, "{end:?}");
+        // Its last item reached, in the window.
+        let inside = egui::pos2(end.center().x, 60.0);
+        pass(vec![egui::Event::PointerMoved(inside)]);
+        pass(vec![]);
+        pass(vec![wheel_to_the_end()]);
+        for _ in 0..60 {
+            pass(vec![]);
+        }
+        let end: egui::Rect = pass(vec![]).unwrap();
+        assert!(end.bottom() <= 120.0, "reached: {end:?}");
     }
 
     #[test]
