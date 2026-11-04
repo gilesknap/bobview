@@ -1180,7 +1180,8 @@ impl BobApp {
                 if windows && !compact {
                     icons::group(ui, false, |ui| {
                         action =
-                            layout_dropdown(ui, self.layout_name.as_deref(), &mut self.layouts);
+                            layout_dropdown(ui, self.layout_name.as_deref(), &mut self.layouts)
+                                .or(action.take());
                     });
                     let pin = icons::group(ui, false, |ui| {
                         icons::button(ui, Icon::Pin, self.main_pinned, true)
@@ -4651,6 +4652,63 @@ mod tests {
         }
         d.click(pos2(menu.center().x, menu.bottom() - margin - 8.0));
         assert_eq!(d.loaded.as_deref(), names.last().map(String::as_str));
+    }
+
+    #[test]
+    fn the_more_menus_layout_actions_get_past_the_layout_dropdown() {
+        use eframe::egui::{self, Event, Modifiers, PointerButton, Pos2, Rect, Vec2};
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(false);
+        let mut app = super::BobApp::new(&ctx, None, Some(1.0), crate::chrome::UiScale::Fixed(1.0));
+        let size = Vec2::new(900.0, 600.0);
+        let pass = |app: &mut super::BobApp, events| {
+            let screen = Rect::from_min_size(Pos2::ZERO, size);
+            let mut input = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            };
+            let info = input.viewports.entry(egui::ViewportId::ROOT).or_default();
+            info.native_pixels_per_point = Some(1.0);
+            info.inner_rect = Some(screen);
+            info.monitor_size = Some(Vec2::new(1920.0, 1080.0));
+            ctx.run_ui(input, |ui| {
+                app.draw(ui);
+            })
+            .textures_delta
+            .clear();
+        };
+        let click = |app: &mut super::BobApp, pos: Pos2| {
+            let press = |pressed| Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            };
+            pass(app, vec![Event::PointerMoved(pos)]);
+            pass(app, Vec::new());
+            pass(app, vec![press(true)]);
+            pass(app, vec![press(false)]);
+            for _ in 0..3 {
+                pass(app, Vec::new());
+            }
+        };
+        pass(&mut app, Vec::new());
+        assert!(app.can_windows, "the dropdown is shown");
+        let more = Pos2::new(size.x - 26.0, 18.0);
+        click(&mut app, more);
+        let menu = menu_shown(&ctx).expect("the menu is open");
+        // Down its rows to Save layout as…, not as far as those that write
+        // to the disk. Each click closes it, or opens it again.
+        let mut y = menu.top() + 10.0;
+        while app.save_as.is_none() && y < menu.top() + menu.height() * 0.6 {
+            if !egui::Popup::is_any_open(&ctx) {
+                click(&mut app, more);
+            }
+            click(&mut app, Pos2::new(menu.center().x, y));
+            y += 6.0;
+        }
+        assert!(app.save_as.is_some(), "Save layout as… asked for its name");
     }
 
     #[test]

@@ -100,7 +100,7 @@ gives the toolbar the room, and clicking the zoom only sets 100%.
 | Alt+← / Alt+→ | back / forward |
 | Ctrl+W | close the window (the main window quits bobview and closes its windows) |
 | Ctrl+T | show or hide a display window's toolbar |
-| shift+click on a link | open in a new window, pinning the unpinned display window used last |
+| shift+click on a link | open in a new window, pinning the unpinned display window used last (a display already open is raised, and nothing pinned) |
 | ctrl+click on a link | open in place |
 
 ## Navigator
