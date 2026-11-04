@@ -1179,16 +1179,8 @@ impl BobApp {
                 });
                 if windows && !compact {
                     icons::group(ui, false, |ui| {
-                        egui::ComboBox::from_id_salt("layout")
-                            .selected_text(
-                                self.layout_name.as_deref().map_or("Layout", layout::label),
-                            )
-                            .show_ui(ui, |ui| {
-                                action =
-                                    layout_list(ui, self.layout_name.as_deref(), &mut self.layouts);
-                            })
-                            .response
-                            .on_hover_text("Load a saved layout");
+                        action =
+                            layout_dropdown(ui, self.layout_name.as_deref(), &mut self.layouts);
                     });
                     let pin = icons::group(ui, false, |ui| {
                         icons::button(ui, Icon::Pin, self.main_pinned, true)
@@ -1561,6 +1553,26 @@ enum LayoutAction {
     Save(String),
     SaveAs,
     Delete(String),
+}
+
+/// A button showing the layout loaded, whose menu lists the saved ones to
+/// load one.
+fn layout_dropdown(
+    ui: &mut egui::Ui,
+    current: Option<&str>,
+    layouts: &mut LayoutList,
+) -> Option<LayoutAction> {
+    let name = current.map_or("Layout", layout::label);
+    let button = egui::Button::new(name)
+        .right_text("⏷")
+        .min_size(Vec2::new(ui.spacing().combo_width, 0.0));
+    let resp = ui.add(button).on_hover_text("Load a saved layout");
+    let popup = egui::Popup::menu(&resp).width(resp.rect.width());
+    chrome::menu(popup, |ui| {
+        ui.set_min_width(resp.rect.width() - ui.spacing().menu_margin.sum().x);
+        layout_list(ui, current, layouts)
+    })
+    .and_then(|shown| shown.inner)
 }
 
 /// The saved layouts, to load one.
@@ -2557,6 +2569,10 @@ fn child_ui(
     let info = ui.input(|i| i.viewport().clone());
     if w.view.new_display && info.monitor_size.is_some() {
         w.view.new_display = false;
+        // Set since `follow_toolbar`, by the corner's Back: it isn't waited
+        // for, nor to be measured, any more.
+        w.room.asked = None;
+        w.view.hold_zoom = false;
         let zoom = ui.ctx().zoom_factor();
         let display = w.view.natural_size(zoom);
         // One that failed to load leaves a window not yet sized to be
@@ -4218,13 +4234,72 @@ mod tests {
 
     #[test]
     fn a_new_display_ends_the_wait_for_a_toolbars_resize() {
+        use super::{Origin, WindowKey};
+        use crate::widgets::Request;
+        let open = |win: &mut ToolbarWindow, name: &str| {
+            let source = bob::Source::File(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../tests/displays")
+                    .join(name),
+            );
+            let req = Request::Open {
+                source,
+                macros: bob::Macros::default(),
+                target: "replace".into(),
+            };
+            let origin = Origin {
+                window: WindowKey::Child(win.app.windows[0].id),
+                ctrl: true,
+                shift: false,
+            };
+            let ctx = win.ctx.clone();
+            win.app.request(&ctx, origin, req);
+            // Its first pass, once it has loaded.
+            while win.app.windows[0].view.is_loading() {
+                win.pass(Vec::new());
+            }
+        };
+        // A link followed while the toolbar's resize is on its way: sized to
+        // the display, under all of the toolbar, which hiding then takes off.
         let mut win = ToolbarWindow::new();
+        win.auto_size = true;
+        win.app.windows[0].fit_next = true;
         win.delay = 20;
         win.app.windows[0].toolbar = true;
         win.pass(Vec::new());
         assert!(win.app.windows[0].view.hold_zoom);
-        win.app.windows[0].view.new_display = true;
+        open(&mut win, "controls.bob");
         win.pass(Vec::new());
+        assert!(win.app.windows[0].room.asked.is_none());
+        assert!(!win.app.windows[0].view.hold_zoom);
+        for _ in 0..40 {
+            win.pass(Vec::new());
+        }
+        let (sized, height) = (win.size, win.app.windows[0].room.height);
+        assert_eq!(win.app.windows[0].room.grew, None);
+        win.delay = 2;
+        win.app.windows[0].toolbar = false;
+        win.settle();
+        assert_eq!(win.size.y, sized.y - height);
+
+        // The corner's Back, drawn after the wait is looked at, in the pass
+        // that also takes the new display: the wait ends there too.
+        let mut win = ToolbarWindow::new();
+        win.app.windows[0].toolbar = true;
+        open(&mut win, "controls.bob");
+        win.settle();
+        win.delay = 20;
+        win.app.windows[0].toolbar = false;
+        win.pass(Vec::new());
+        assert!(win.app.windows[0].view.hold_zoom);
+        let back = eframe::egui::pos2(win.size.x - 65.0, 12.0);
+        let shown = win.app.windows[0].view.shown;
+        // The corner's buttons appear with the pointer.
+        win.pass(vec![eframe::egui::Event::PointerMoved(back)]);
+        win.pass(Vec::new());
+        win.pass(Vec::new());
+        toolbar_click(&mut win, back);
+        assert_eq!(win.app.windows[0].view.shown, shown + 1, "went back");
         assert!(win.app.windows[0].room.asked.is_none());
         assert!(!win.app.windows[0].view.hold_zoom);
     }
@@ -4469,6 +4544,113 @@ mod tests {
         let shown = menu_shown(&ctx).expect("the list is open");
         assert!(shown.top() >= 0.0 && shown.bottom() <= 300.0, "{shown:?}");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The toolbar's real layout dropdown over `names`, alone in a short
+    /// window, pass by pass; what it asked to load.
+    struct Dropdown {
+        ctx: eframe::egui::Context,
+        layouts: super::LayoutList,
+        loaded: Option<String>,
+    }
+
+    impl Dropdown {
+        fn new(names: Vec<String>) -> Self {
+            let mut dropdown = Self {
+                ctx: eframe::egui::Context::default(),
+                layouts: super::LayoutList { names, frame: None },
+                loaded: None,
+            };
+            let pos = eframe::egui::pos2(15.0, 15.0);
+            dropdown.click(pos);
+            for _ in 0..30 {
+                dropdown.pass(Vec::new());
+            }
+            dropdown
+        }
+
+        fn pass(&mut self, events: Vec<eframe::egui::Event>) {
+            use eframe::egui::{self, Pos2, Rect, Vec2};
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 200.0))),
+                events,
+                ..Default::default()
+            };
+            let (layouts, loaded) = (&mut self.layouts, &mut self.loaded);
+            let mut out = self.ctx.run_ui(input, |ui| {
+                // Listed, not read from the disk.
+                layouts.frame = Some(ui.ctx().cumulative_frame_nr());
+                if let Some(super::LayoutAction::Load(name)) =
+                    super::layout_dropdown(ui, None, layouts)
+                {
+                    *loaded = Some(name);
+                }
+            });
+            out.textures_delta.clear();
+        }
+
+        fn click(&mut self, pos: eframe::egui::Pos2) {
+            use eframe::egui::{Event, Modifiers, PointerButton};
+            let press = |pressed| Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            };
+            self.pass(vec![Event::PointerMoved(pos)]);
+            self.pass(Vec::new());
+            self.pass(vec![press(true)]);
+            self.pass(vec![press(false)]);
+            self.pass(Vec::new());
+        }
+
+        fn shown(&self) -> Option<eframe::egui::Rect> {
+            let open = eframe::egui::Popup::is_any_open(&self.ctx);
+            menu_shown(&self.ctx).filter(|_| open)
+        }
+    }
+
+    #[test]
+    fn the_layout_dropdown_scrolls_chooses_and_keeps_its_bar() {
+        use eframe::egui::{Event, Modifiers, MouseWheelUnit, TouchPhase, Vec2, pos2};
+        let names: Vec<String> = (0..40).map(|i| format!("layout {i:02}")).collect();
+        let dropdown = || Dropdown::new(names.clone());
+        // The menu's frame has a 7 point margin, then the bar, 10 wide.
+        let (margin, bar) = (7.0, 10.0);
+
+        let mut d = dropdown();
+        let menu = d.shown().expect("it opens");
+        assert!(menu.bottom() <= 200.0, "{menu:?}");
+        // A click on the bar, its handle and its track, keeps it open.
+        for y in [menu.top() + 15.0, menu.bottom() - 15.0] {
+            d.click(pos2(menu.right() - margin - 3.0, y));
+            assert!(d.shown().is_some(), "at {y}");
+            assert_eq!(d.loaded, None);
+        }
+
+        // Three points inside a row's right edge chooses it, and closes.
+        let mut d = dropdown();
+        let menu = d.shown().unwrap();
+        d.click(pos2(menu.right() - margin - bar - 3.0, menu.top() + 15.0));
+        assert_eq!(d.loaded.as_deref(), Some(names[0].as_str()));
+        assert!(d.shown().is_none(), "closed");
+
+        // The last row, reached by the wheel.
+        let mut d = dropdown();
+        let menu = d.shown().unwrap();
+        d.pass(vec![Event::PointerMoved(menu.center())]);
+        d.pass(Vec::new());
+        d.pass(vec![Event::MouseWheel {
+            unit: MouseWheelUnit::Point,
+            delta: Vec2::new(0.0, -5000.0),
+            phase: TouchPhase::Move,
+            modifiers: Modifiers::NONE,
+        }]);
+        for _ in 0..60 {
+            d.pass(Vec::new());
+        }
+        d.click(pos2(menu.center().x, menu.bottom() - margin - 8.0));
+        assert_eq!(d.loaded.as_deref(), names.last().map(String::as_str));
     }
 
     #[test]

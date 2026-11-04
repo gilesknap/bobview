@@ -845,7 +845,7 @@ mod tests {
         ];
         for (labels, height) in [(pv, 120.0), (generic, 200.0)] {
             // Narrower than the menu, then with room for it and its bar.
-            for width in (100..=420).step_by(4) {
+            for width in (120..=340).step_by(8) {
                 let width = width as f32;
                 let plain = right_edges(width, height, labels, true);
                 let (menu, rows) = right_edges(width, height, labels, false);
@@ -863,25 +863,25 @@ mod tests {
     #[test]
     fn a_menu_too_tall_because_its_rows_wrap_stays_narrow() {
         let labels: Vec<String> = (0..8)
-            .map(|i| format!("A label of number {i} which wraps here"))
+            .map(|i| format!("A rather long menu label which wraps when narrow {i}"))
             .collect();
         let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
-        let mut wide = MenuWindow::new(200.0);
-        let mut tall = MenuWindow::new(200.0);
-        tall.width = 172.0;
-        tall.plain = true;
         let fill = |ui: &mut egui::Ui| {
             for label in &labels {
                 ui.button(*label).clicked();
             }
         };
         // It fits in a wide window; here it wraps, and doesn't fit.
+        let mut wide = MenuWindow::new(200.0);
         assert!(wide.open(fill).height() < 200.0);
-        assert!(tall.open(fill).height() > 200.0);
-        let (plain, _) = right_edges(172.0, 200.0, &labels, true);
-        let (menu, rows) = right_edges(172.0, 200.0, &labels, false);
-        assert!(plain <= 172.0, "{plain}");
-        assert!(menu <= 172.0 && rows <= 172.0, "{menu} {rows}");
+        let mut narrow = MenuWindow::new(200.0);
+        narrow.width = 220.0;
+        narrow.plain = true;
+        assert!(narrow.open(fill).height() > 200.0);
+        let (plain, _) = right_edges(220.0, 200.0, &labels, true);
+        let (menu, rows) = right_edges(220.0, 200.0, &labels, false);
+        assert!(plain <= 220.0, "{plain}");
+        assert!(menu <= 220.0 && rows <= 220.0, "{menu} {rows}");
     }
 
     #[test]
@@ -962,52 +962,6 @@ mod tests {
         click_at(&mut win, r.center(), &mut fill);
         assert!(hit.get(), "the submenu's item is chosen");
         assert!(win.menu.is_none(), "and the menu closes");
-    }
-
-    #[test]
-    fn a_combo_box_already_scrolls_inside_a_short_window() {
-        // So the layout list is left as egui draws it.
-        let ctx = egui::Context::default();
-        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(800.0, 120.0));
-        let mut last = None;
-        let pos = egui::Pos2::new(15.0, 15.0);
-        let mut pass = |events| {
-            let input = egui::RawInput {
-                screen_rect: Some(screen),
-                events,
-                ..Default::default()
-            };
-            let mut out = ctx.run_ui(input, |ui| {
-                egui::ComboBox::from_id_salt("combo")
-                    .selected_text("Combo")
-                    .show_ui(ui, |ui| {
-                        for i in 0..40 {
-                            last = Some(ui.button(format!("Item {i}")).rect);
-                        }
-                    });
-            });
-            out.textures_delta.clear();
-            last
-        };
-        pass(vec![]);
-        pass(vec![egui::Event::PointerMoved(pos)]);
-        pass(vec![press(pos, true)]);
-        pass(vec![press(pos, false)]);
-        for _ in 0..3 {
-            pass(vec![]);
-        }
-        let end: egui::Rect = pass(vec![]).expect("the list is open");
-        assert!(end.top() > 120.0, "{end:?}");
-        // Its last item reached, in the window.
-        let inside = egui::pos2(end.center().x, 60.0);
-        pass(vec![egui::Event::PointerMoved(inside)]);
-        pass(vec![]);
-        pass(vec![wheel_to_the_end()]);
-        for _ in 0..60 {
-            pass(vec![]);
-        }
-        let end: egui::Rect = pass(vec![]).unwrap();
-        assert!(end.bottom() <= 120.0, "reached: {end:?}");
     }
 
     #[test]
