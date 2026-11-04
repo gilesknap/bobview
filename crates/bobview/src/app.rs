@@ -235,6 +235,8 @@ struct DisplayWindow {
     fit_next: bool,
     /// Show the display toolbar (Ctrl+T, the chevron or the context menu).
     toolbar: bool,
+    /// How the window's size follows the toolbar.
+    room: ToolbarRoom,
     /// Where the window is, for saving a layout.
     geometry: Geometry,
     /// Where it is on the desktop, to open windows beside it.
@@ -247,6 +249,26 @@ struct DisplayWindow {
     pinned_at: u64,
     used: Used,
     close: bool,
+}
+
+/// How long a display keeps its zoom waiting for its window to be resized
+/// around its toolbar, in seconds: a window manager may refuse.
+const TOOLBAR_RESIZE_WAIT: f64 = 0.5;
+
+/// How a display window's size follows its toolbar being shown or hidden, so
+/// that the display keeps its size.
+#[derive(Default)]
+struct ToolbarRoom {
+    /// Whether the toolbar was shown, as last seen, to tell it has been
+    /// toggled, whichever way.
+    shown: bool,
+    /// Its height as last drawn.
+    height: f32,
+    /// What showing it added to the window, for hiding it to take off.
+    grew: Option<f32>,
+    /// The size asked of the window and when to stop waiting for it, by
+    /// egui's time.
+    asked: Option<(Vec2, f64)>,
 }
 
 /// Where a window is on the desktop, in desktop points: its outer rectangle,
@@ -838,6 +860,10 @@ impl BobApp {
             builder,
             fit_next: geometry.size.is_none(),
             toolbar,
+            room: ToolbarRoom {
+                shown: toolbar,
+                ..Default::default()
+            },
             geometry,
             frame: None,
             beside: None,
@@ -2446,11 +2472,15 @@ fn child_ui(
     }
     let mut panels = 0.0;
     if w.toolbar {
-        panels += egui::Panel::top(Id::new(("toolbar", w.id)))
+        w.room.height = egui::Panel::top(Id::new(("toolbar", w.id)))
             .show(ui, |ui| display_toolbar(ui, &mut w.view, home))
             .response
             .rect
             .height();
+        panels += w.room.height;
+    }
+    if native.is_some() {
+        follow_toolbar(ui, w);
     }
     let mut drawn = w.view.draw(ui, vcx);
     panels += drawn.status;
@@ -2483,6 +2513,11 @@ fn child_ui(
         return drawn.requests;
     };
     corner(ui, w, clock);
+    // Toggled by the chevron or the context menu, after the toolbar's place
+    // in this pass: `follow_toolbar` sees it in the next.
+    if w.toolbar != w.room.shown {
+        ui.ctx().request_repaint();
+    }
     w.geometry = geometry(ui);
     w.frame = frame(ui);
     // Sized to a new display at 100%, within the monitor, once the window
@@ -2522,6 +2557,48 @@ fn child_ui(
         }
     }
     drawn.requests
+}
+
+/// Resize the window for a toolbar just shown or hidden, however that was
+/// asked for, so that the display keeps its size: `w.room.height` is this
+/// pass's height, drawn before the display. Until the window has its new
+/// size, Fit keeps the zoom, so the display doesn't jump meanwhile (it is cut
+/// off, or has a band below it). A window that can't be resized leaves the
+/// display to give up the room.
+fn follow_toolbar(ui: &egui::Ui, w: &mut DisplayWindow) {
+    let (info, inner, now) = ui.input(|i| (i.viewport().clone(), i.content_rect().size(), i.time));
+    let room = &mut w.room;
+    if w.toolbar != room.shown {
+        room.shown = w.toolbar;
+        let by = if w.toolbar {
+            room.height
+        } else {
+            -room.grew.take().unwrap_or(room.height)
+        };
+        room.grew = w.toolbar.then_some(0.0);
+        if chrome::can_resize(&info, ui.ctx().zoom_factor()) {
+            // From the size last asked for, when toggled again before that
+            // has arrived.
+            let from = room.asked.map_or(inner, |(size, _)| size);
+            let size = chrome::resized_for_controls(from, by, info.monitor_size);
+            if w.toolbar {
+                room.grew = Some(size.y - from.y);
+            }
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+            room.asked = Some((size, now + TOOLBAR_RESIZE_WAIT));
+        }
+    }
+    // A new display sizes the window itself, and picks its own zoom.
+    if let Some((size, until)) = room.asked {
+        if w.view.new_display || (size - inner).length() < 1.0 || now >= until {
+            room.asked = None;
+        } else {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64(until - now));
+        }
+    }
+    w.view.hold_zoom = room.asked.is_some();
 }
 
 /// Small buttons in the top-right corner while the pointer is over the
@@ -3573,6 +3650,225 @@ mod tests {
         assert_eq!(*primary.lock(), ["loc://copy_t"]);
         assert!(app.main.copied.is_some());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A display window on its own: its passes, with the window resized as
+    /// asked after `delay` passes, unless it refuses.
+    struct ToolbarWindow {
+        ctx: eframe::egui::Context,
+        app: super::BobApp,
+        size: eframe::egui::Vec2,
+        monitor: eframe::egui::Vec2,
+        maximized: bool,
+        refuse: bool,
+        asked: usize,
+        delay: usize,
+        pending: Vec<(usize, eframe::egui::Vec2)>,
+        time: f64,
+    }
+
+    impl ToolbarWindow {
+        fn new() -> Self {
+            use eframe::egui::Vec2;
+            let ctx = eframe::egui::Context::default();
+            let mut app = super::BobApp::new(&ctx, None, None, crate::chrome::UiScale::Fixed(1.0));
+            let display = super::Location {
+                source: bob::Source::File(
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("../../tests/displays/index.bob"),
+                ),
+                macros: bob::Macros::default(),
+            };
+            // Wider than the display, so that Fit goes by the height.
+            let size = Vec2::new(1800.0, 400.0);
+            let geometry = crate::layout::Geometry {
+                position: None,
+                size: Some(size),
+            };
+            app.open_window(&ctx, display, geometry, false, false);
+            let mut window = Self {
+                ctx,
+                app,
+                size,
+                monitor: Vec2::new(1920.0, 1080.0),
+                maximized: false,
+                refuse: false,
+                asked: 0,
+                delay: 2,
+                pending: Vec::new(),
+                time: 0.0,
+            };
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while window.app.windows[0].view.is_loading() && std::time::Instant::now() < until {
+                window.pass(Vec::new());
+            }
+            assert!(window.app.windows[0].view.screen.is_some());
+            window.settle();
+            window
+        }
+
+        /// One pass, returning the display's zoom.
+        fn pass(&mut self, events: Vec<eframe::egui::Event>) -> f32 {
+            use eframe::egui::{self, Pos2, Rect, ViewportCommand, ViewportId};
+            self.time += 1.0 / 60.0;
+            for p in &mut self.pending {
+                p.0 = p.0.saturating_sub(1);
+            }
+            if let Some(i) = self.pending.iter().rposition(|p| p.0 == 0) {
+                self.size = self.pending[i].1;
+                self.pending.drain(..=i);
+            }
+            let screen = Rect::from_min_size(Pos2::ZERO, self.size);
+            let mut input = egui::RawInput {
+                screen_rect: Some(screen),
+                time: Some(self.time),
+                events,
+                ..Default::default()
+            };
+            let info = input.viewports.entry(ViewportId::ROOT).or_default();
+            info.native_pixels_per_point = Some(1.0);
+            info.inner_rect = Some(screen);
+            info.monitor_size = Some(self.monitor);
+            info.maximized = Some(self.maximized);
+            let app = &mut self.app;
+            let mut output = self.ctx.run_ui(input, |ui| {
+                let trends = Vec::new();
+                let vcx = super::ViewCx {
+                    window: super::WindowKey::Child(app.windows[0].id),
+                    touch: false,
+                    trends: &trends,
+                };
+                let desk = super::Desk {
+                    monitors: Vec::new(),
+                    pinned: Vec::new(),
+                };
+                let w = &mut app.windows[0];
+                w.view.poll_loading(ui.ctx());
+                let home = None;
+                super::child_ui(ui, w, &home, &vcx, Some(false), &mut app.clock, &desk);
+            });
+            output.textures_delta.clear();
+            let commands = output
+                .viewport_output
+                .get(&ViewportId::ROOT)
+                .map(|vp| vp.commands.clone())
+                .unwrap_or_default();
+            for cmd in commands {
+                if let ViewportCommand::InnerSize(size) = cmd {
+                    self.asked += 1;
+                    if !self.refuse {
+                        self.pending.push((self.delay, size));
+                    }
+                }
+            }
+            self.app.windows[0].view.zoom
+        }
+
+        /// Passes until the window has settled, with any wait over.
+        fn settle(&mut self) -> f32 {
+            let mut zoom = 0.0;
+            for _ in 0..(super::TOOLBAR_RESIZE_WAIT * 60.0) as usize + 10 {
+                zoom = self.pass(Vec::new());
+            }
+            zoom
+        }
+    }
+
+    #[test]
+    fn a_toolbar_resizes_its_window_not_its_display() {
+        use eframe::egui::{Event, Key, Modifiers};
+        let ctrl_t = || {
+            vec![Event::Key {
+                key: Key::T,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::COMMAND,
+            }]
+        };
+        let mut win = ToolbarWindow::new();
+        let (start, zoom) = (win.size, win.app.windows[0].view.zoom);
+        assert!(win.app.windows[0].view.fit);
+        // Ctrl+T, drawn at once; the chevron and the context menu just flip
+        // `toolbar` late in a pass, which the next pass sees.
+        for by_key in [true, false] {
+            for shown in [true, false] {
+                let events = if by_key {
+                    ctrl_t()
+                } else {
+                    win.app.windows[0].toolbar = shown;
+                    Vec::new()
+                };
+                // The display doesn't jump, on this pass or waiting for the
+                // window.
+                for events in [events, vec![], vec![], vec![], vec![]] {
+                    assert_eq!(win.pass(events), zoom);
+                }
+                assert_eq!(win.app.windows[0].toolbar, shown);
+                assert_eq!(win.settle(), zoom, "toolbar {shown}");
+                if shown {
+                    let height = win.app.windows[0].room.height;
+                    assert!(height > 10.0, "{height}");
+                    assert_eq!(win.size.y, start.y + height);
+                    assert_eq!(win.size.x, start.x);
+                } else {
+                    assert_eq!(win.size, start);
+                }
+            }
+        }
+        // No more resizing than asked: one for each of the four toggles.
+        assert_eq!(win.asked, 4);
+    }
+
+    #[test]
+    fn a_toolbar_toggled_twice_at_once_comes_back() {
+        let mut win = ToolbarWindow::new();
+        let (start, zoom) = (win.size, win.app.windows[0].view.zoom);
+        win.delay = 4;
+        win.app.windows[0].toolbar = true;
+        win.pass(Vec::new());
+        win.pass(Vec::new());
+        win.app.windows[0].toolbar = false;
+        win.pass(Vec::new());
+        assert_eq!(win.settle(), zoom);
+        assert_eq!(win.size, start);
+    }
+
+    #[test]
+    fn a_window_that_cant_grow_shrinks_its_display() {
+        // Maximized: no resize, and the display gives up the room at once.
+        let mut win = ToolbarWindow::new();
+        let (start, zoom) = (win.size, win.app.windows[0].view.zoom);
+        win.maximized = true;
+        win.app.windows[0].toolbar = true;
+        assert!(win.pass(Vec::new()) < zoom);
+        assert_eq!(win.asked, 0);
+        win.settle();
+        win.app.windows[0].toolbar = false;
+        win.settle();
+        assert_eq!(win.size, start);
+        assert_eq!(win.asked, 0);
+
+        // At the monitor's edge: it grows that far, and shrinks back as far.
+        let mut win = ToolbarWindow::new();
+        win.size.y = win.monitor.y - 5.0;
+        let near = win.size;
+        let zoom = win.settle();
+        win.app.windows[0].toolbar = true;
+        assert!(win.settle() < zoom, "it shrinks");
+        assert_eq!(win.size.y, win.monitor.y);
+        win.app.windows[0].toolbar = false;
+        assert_eq!(win.settle(), zoom);
+        assert_eq!(win.size, near);
+
+        // A window manager that won't resize it: the zoom gives up waiting.
+        let mut win = ToolbarWindow::new();
+        let zoom = win.app.windows[0].view.zoom;
+        win.refuse = true;
+        win.app.windows[0].toolbar = true;
+        assert_eq!(win.pass(Vec::new()), zoom);
+        assert!(win.settle() < zoom);
+        assert!(!win.app.windows[0].view.hold_zoom);
     }
 
     #[test]

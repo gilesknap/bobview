@@ -80,6 +80,12 @@ hidden), the window's pin, and a chevron that shows or hides the toolbar.
 The right-click menu on the display's background has **Show toolbar** and
 **Close**. Pinned windows have 📌 before their title.
 
+Showing the toolbar makes the window taller by the toolbar's height, and
+hiding it shrinks the window by the same amount, so the display keeps its
+size and zoom. A window that is maximised or full screen doesn't change, and
+one that reaches the monitor's height grows only that far, so there the
+display gives the toolbar the room.
+
 ## Keys
 
 | key | action |

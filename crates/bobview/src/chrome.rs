@@ -109,6 +109,15 @@ pub fn window_size(display: Vec2, chrome: f32, monitor: Option<Vec2>) -> Vec2 {
     )
 }
 
+/// Inner window size, in points, for controls `by` points taller (or shorter
+/// when negative) to leave the display the room it has: only the height
+/// changes, and growing stops at `monitor` points when known, or where the
+/// window already is when it is taller than that.
+pub fn resized_for_controls(inner: Vec2, by: f32, monitor: Option<Vec2>) -> Vec2 {
+    let tallest = monitor.map_or(f32::INFINITY, |m| m.y.max(inner.y));
+    Vec2::new(inner.x, (inner.y + by).min(tallest).max(0.0))
+}
+
 /// Whether the window should follow the display's size: not when the user
 /// or the window manager has made it full screen or maximised, nor on a
 /// screen too small for the default window (a phone), where it fills the
@@ -315,6 +324,30 @@ mod tests {
             (s.y - (500.0 * 1727.0 / 3000.0 + 61.0)).abs() <= 1.5,
             "{s:?}"
         );
+    }
+
+    #[test]
+    fn controls_resize_the_window_by_their_height() {
+        let inner = Vec2::new(400.0, 300.0);
+        let monitor = Some(Vec2::new(1920.0, 1080.0));
+        // Shown then hidden: back to where it was, the width untouched.
+        let shown = resized_for_controls(inner, 26.5, monitor);
+        assert_eq!(shown, Vec2::new(400.0, 326.5));
+        assert_eq!(resized_for_controls(shown, -26.5, monitor), inner);
+        assert_eq!(
+            resized_for_controls(inner, 26.5, None),
+            Vec2::new(400.0, 326.5)
+        );
+        // Stopped by the monitor, however little room is left.
+        let near = Vec2::new(400.0, 1070.0);
+        assert_eq!(resized_for_controls(near, 26.5, monitor).y, 1080.0);
+        // Already taller than the monitor: not cut to it, by growing or
+        // shrinking.
+        let tall = Vec2::new(400.0, 1200.0);
+        assert_eq!(resized_for_controls(tall, 26.5, monitor).y, 1200.0);
+        assert_eq!(resized_for_controls(tall, -26.5, monitor).y, 1173.5);
+        // Never a negative size.
+        assert_eq!(resized_for_controls(Vec2::splat(10.0), -26.5, None).y, 0.0);
     }
 
     #[test]
