@@ -583,12 +583,15 @@ mod tests {
         }
     }
 
+    /// What a menu's contents saw as they were drawn.
+    type Seen<T> = std::rc::Rc<std::cell::Cell<Option<T>>>;
+
     /// A menu too tall for its window: the window, where its first item is,
     /// the row last chosen and what fills it.
     fn scrolled_menu() -> (
         MenuWindow,
-        std::rc::Rc<std::cell::Cell<Option<egui::Rect>>>,
-        std::rc::Rc<std::cell::Cell<Option<usize>>>,
+        Seen<egui::Rect>,
+        Seen<usize>,
         impl FnMut(&mut egui::Ui),
     ) {
         use std::{cell::Cell, rc::Rc};
