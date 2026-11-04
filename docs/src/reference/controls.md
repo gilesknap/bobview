@@ -15,6 +15,7 @@ all other windows and the layout actions).
 - On a small high-DPI screen the toolbar and menus are scaled down so they
   take a small share of it; `--ui-scale F` (or `BOBVIEW_UI_SCALE=F`) fixes
   their size.
+- A menu too tall for its window scrolls inside it, in every window.
 
 ## Window size
 

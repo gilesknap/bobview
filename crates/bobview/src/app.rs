@@ -1103,56 +1103,61 @@ impl BobApp {
                 let menu = icons::group(ui, false, |ui| icons::button(ui, Icon::Menu, false, true))
                     .on_hover_text("More");
                 egui::Popup::menu(&menu).show(|ui| {
-                    if compact {
-                        if ui
-                            .add_enabled(!view.forward.is_empty(), egui::Button::new("Forward"))
-                            .clicked()
-                        {
-                            view.go_forward();
-                        }
-                        if ui.button("Reload").clicked() {
-                            view.reload();
-                        }
-                        if ui.button("Zoom in").clicked() {
-                            view.zoom_by(1.25);
-                        }
-                        if ui.button("Zoom out").clicked() {
-                            view.zoom_by(1.0 / 1.25);
-                        }
-                        ui.separator();
-                        if ui.checkbox(&mut self.tree.open, "Navigator").changed() {
-                            self.tree_toggled = true;
-                        }
-                        ui.checkbox(&mut self.show_open, "Open…");
-                    }
-                    let mut auto_size = self.chrome.auto_size;
-                    if ui
-                        .checkbox(&mut auto_size, "Auto-size window")
-                        .on_hover_text("Resize the window to fit each display opened")
-                        .changed()
-                    {
-                        toggle_auto_size(&mut self.chrome);
-                    }
-                    ui.separator();
-                    all_windows = window_items(ui, others);
-                    if windows {
-                        ui.separator();
+                    chrome::menu_contents(ui, |ui| {
                         if compact {
-                            ui.checkbox(&mut self.main_pinned, "Pinned")
-                                .on_hover_text(PIN_HELP);
-                            ui.menu_button("Load layout", |ui| {
-                                action =
-                                    layout_list(ui, self.layout_name.as_deref(), &mut self.layouts);
-                            });
+                            if ui
+                                .add_enabled(!view.forward.is_empty(), egui::Button::new("Forward"))
+                                .clicked()
+                            {
+                                view.go_forward();
+                            }
+                            if ui.button("Reload").clicked() {
+                                view.reload();
+                            }
+                            if ui.button("Zoom in").clicked() {
+                                view.zoom_by(1.25);
+                            }
+                            if ui.button("Zoom out").clicked() {
+                                view.zoom_by(1.0 / 1.25);
+                            }
+                            ui.separator();
+                            if ui.checkbox(&mut self.tree.open, "Navigator").changed() {
+                                self.tree_toggled = true;
+                            }
+                            ui.checkbox(&mut self.show_open, "Open…");
                         }
-                        action = layout_menu(
-                            ui,
-                            self.layout_name.as_deref(),
-                            &mut self.settings,
-                            &mut self.layouts,
-                        )
-                        .or(action.take());
-                    }
+                        let mut auto_size = self.chrome.auto_size;
+                        if ui
+                            .checkbox(&mut auto_size, "Auto-size window")
+                            .on_hover_text("Resize the window to fit each display opened")
+                            .changed()
+                        {
+                            toggle_auto_size(&mut self.chrome);
+                        }
+                        ui.separator();
+                        all_windows = window_items(ui, others);
+                        if windows {
+                            ui.separator();
+                            if compact {
+                                ui.checkbox(&mut self.main_pinned, "Pinned")
+                                    .on_hover_text(PIN_HELP);
+                                chrome::submenu(ui, "Load layout", |ui| {
+                                    action = layout_list(
+                                        ui,
+                                        self.layout_name.as_deref(),
+                                        &mut self.layouts,
+                                    );
+                                });
+                            }
+                            action = layout_menu(
+                                ui,
+                                self.layout_name.as_deref(),
+                                &mut self.settings,
+                                &mut self.layouts,
+                            )
+                            .or(action.take());
+                        }
+                    });
                 });
                 if windows && !compact {
                     icons::group(ui, false, |ui| {
@@ -1588,7 +1593,7 @@ fn layout_menu(
     if ui.button("Save as default").clicked() {
         action = Some(LayoutAction::Save(layout::DEFAULT.to_string()));
     }
-    ui.menu_button("Delete layout", |ui| {
+    chrome::submenu(ui, "Delete layout", |ui| {
         let names = layouts.get(ui.ctx());
         if names.is_empty() {
             ui.weak("No saved layouts");
@@ -2492,26 +2497,28 @@ fn child_ui(
     panels += drawn.status;
     if let Some(background) = &drawn.background {
         background.context_menu(|ui| {
-            let label = if w.toolbar {
-                "Hide toolbar"
-            } else {
-                "Show toolbar"
-            };
-            if ui.button(label).clicked() {
-                w.toolbar = !w.toolbar;
-            }
-            if ui.button("Close").clicked() {
-                w.close = true;
-            }
-            ui.separator();
-            if let Some(req) = window_items(ui, true) {
-                let origin = Origin {
-                    window: WindowKey::Child(w.id),
-                    ctrl: false,
-                    shift: false,
+            chrome::menu_contents(ui, |ui| {
+                let label = if w.toolbar {
+                    "Hide toolbar"
+                } else {
+                    "Show toolbar"
                 };
-                drawn.requests.push((origin, req));
-            }
+                if ui.button(label).clicked() {
+                    w.toolbar = !w.toolbar;
+                }
+                if ui.button("Close").clicked() {
+                    w.close = true;
+                }
+                ui.separator();
+                if let Some(req) = window_items(ui, true) {
+                    let origin = Origin {
+                        window: WindowKey::Child(w.id),
+                        ctrl: false,
+                        shift: false,
+                    };
+                    drawn.requests.push((origin, req));
+                }
+            });
         });
     }
     let Some(auto_size) = native else {

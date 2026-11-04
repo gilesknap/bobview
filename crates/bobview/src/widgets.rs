@@ -319,7 +319,11 @@ fn draw_node(ui: &mut Ui, node: &mut Node, cx: &mut Cx, id: Id) {
         // combo or action button's own menu (which uses the default id).
         egui::Popup::context_menu(&resp)
             .id(id.with("context-menu"))
-            .show(|ui| crate::pvmenu::menu(ui, node, state.as_ref(), cx.trends, cx.requests));
+            .show(|ui| {
+                crate::chrome::menu_contents(ui, |ui| {
+                    crate::pvmenu::menu(ui, node, state.as_ref(), cx.trends, cx.requests);
+                });
+            });
         middle_click_copy(ui, &resp, node, cx, id);
         let text = tooltip(node, state.as_ref());
         if !text.is_empty() {
@@ -1291,11 +1295,13 @@ fn action_button(ui: &mut Ui, node: &mut Node, rect: Rect, cx: &mut Cx, id: Id) 
         run_action(node, &actions[0], cx);
     } else if allowed && actions.len() > 1 {
         egui::Popup::menu(&resp).show(|ui| {
-            for a in &actions {
-                if ui.button(node.expand(a.label())).clicked() {
-                    run_action(node, a, cx);
+            crate::chrome::menu_contents(ui, |ui| {
+                for a in &actions {
+                    if ui.button(node.expand(a.label())).clicked() {
+                        run_action(node, a, cx);
+                    }
                 }
-            }
+            });
         });
     }
     resp
@@ -1688,17 +1694,19 @@ fn combo(
     let row_h = if cx.touch { TOUCH_TARGET } else { 0.0 };
     egui::Popup::menu(&resp).width(rect.width()).show(|ui| {
         ui.set_min_width(rect.width() - ui.spacing().menu_margin.sum().x);
-        for (i, item) in items.iter().enumerate() {
-            let label = egui::RichText::new(item).font(item_font.clone());
-            let button = egui::Button::selectable(*item == text, label)
-                .min_size(Vec2::new(ui.available_width(), row_h));
-            if ui.add(button).clicked() {
-                match &mux {
-                    Some(mux) => mux_pick(node, cx.pvs, mux, i),
-                    None => write(node, item.clone()),
+        crate::chrome::menu_contents(ui, |ui| {
+            for (i, item) in items.iter().enumerate() {
+                let label = egui::RichText::new(item).font(item_font.clone());
+                let button = egui::Button::selectable(*item == text, label)
+                    .min_size(Vec2::new(ui.available_width(), row_h));
+                if ui.add(button).clicked() {
+                    match &mux {
+                        Some(mux) => mux_pick(node, cx.pvs, mux, i),
+                        None => write(node, item.clone()),
+                    }
                 }
             }
-        }
+        });
     });
     resp
 }
