@@ -1,0 +1,101 @@
+/* The Diátaxis compass of cards on the landing page, laid out as on
+   https://diataxis.fr, coloured from the mdBook theme so they
+   follow light, rust, coal, navy and ayu alike. */
+.compass {
+    display: grid;
+    grid-template-columns: auto 1fr 1fr;
+    grid-template-rows: auto 1fr 1fr;
+    grid-template-areas:
+        ".       learn       work"
+        "doing   tutorials   how-to"
+        "knowing explanations reference";
+    gap: 1rem;
+    margin: 1.5rem 0;
+}
+
+.compass .tutorials { grid-area: tutorials; }
+.compass .how-to { grid-area: how-to; }
+.compass .explanations { grid-area: explanations; }
+.compass .reference { grid-area: reference; }
+
+.axis {
+    color: var(--sidebar-fg);
+    opacity: 0.7;
+    font-size: 0.8em;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    text-align: center;
+    align-self: end;
+}
+
+.axis-top-left { grid-area: learn; }
+.axis-top-right { grid-area: work; }
+
+.axis-left-top,
+.axis-left-bottom {
+    writing-mode: vertical-rl;
+    transform: rotate(180deg);
+    align-self: center;
+}
+
+.axis-left-top { grid-area: doing; }
+.axis-left-bottom { grid-area: knowing; }
+
+/* one column on a phone, in the order the cards are written */
+@media (max-width: 600px) {
+    .compass {
+        grid-template-columns: 1fr;
+        grid-template-rows: none;
+        grid-template-areas: none;
+    }
+    .compass .grid-card { grid-area: auto; }
+    .axis { display: none; }
+}
+
+.grid-card {
+    display: block;
+    padding: 1rem 1.25rem;
+    border: 1px solid var(--table-border-color);
+    border-radius: 8px;
+    background: var(--quote-bg);
+    color: var(--fg) !important;
+    text-decoration: none !important;
+    transition: border-color 0.15s, transform 0.15s;
+}
+
+.grid-card:hover {
+    border-color: var(--links);
+    transform: translateY(-2px);
+}
+
+.grid-card .card-title {
+    display: block;
+    margin-bottom: 0.25rem;
+    font-size: 1.3em;
+    font-weight: bold;
+    color: var(--links);
+}
+
+.grid-card .orientation {
+    display: block;
+    margin-bottom: 0.5rem;
+    font-size: 0.8em;
+    font-style: italic;
+    opacity: 0.75;
+}
+
+.grid-card p {
+    margin: 0;
+    font-size: 0.95em;
+}
+
+/* The version switcher in the top bar, added by switcher.js. */
+#version-switcher {
+    margin: auto 0.5rem;
+    padding: 0.2rem 0.4rem;
+    border: 1px solid var(--table-border-color);
+    border-radius: 4px;
+    background: var(--bg);
+    color: var(--icons);
+    font-size: 0.9em;
+}

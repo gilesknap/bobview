@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["HREF_ELEMENTS","MAX_PIXELS","MAX_SIDE","MAX_TREE_DEPTH","MAX_WORK","MAX_XML_DEPTH","NOT_INHERITED","PAINT_SERVERS","REF_LEVELS","SHAPE_VERTICES"],"fn":["gif_frame_size","is_svg","parse","parse_xml","raster_ok","size_ok","svg_cost","tree_depth","url_ids"],"struct":["Cost","CssNode"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DIAL_FROM","DIAL_TO","MAJOR","MINOR","NORMAL"],"fn":["dial","dial_label","dial_ticks","levels","limits","linear_meter","polar","prop_color","regions"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CAM_P","MOTOR_P"],"enum":["Part"],"fn":["build"],"mod":["image"],"struct":["Ioc"]};

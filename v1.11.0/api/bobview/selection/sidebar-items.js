@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["system","system_reader"],"struct":["NoPrimary","Reader","System","SystemRead"],"trait":["Primary","ReadPrimary"],"type":["MakeRead"]};
