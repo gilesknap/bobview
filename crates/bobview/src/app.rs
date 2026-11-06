@@ -3527,6 +3527,16 @@ mod tests {
 
     #[test]
     fn the_controls_scale_settles_on_a_phone() {
+        settle_on_a_phone(false);
+    }
+
+    #[test]
+    fn the_controls_scale_settles_on_a_phone_when_passes_are_discarded() {
+        // A second pass of a frame sees the same monitor size as the first.
+        settle_on_a_phone(true);
+    }
+
+    fn settle_on_a_phone(discard: bool) {
         // Landscape on a 2.75x phone, where the toolbar is cut to a share of
         // the height. As egui-winit does, the monitor is measured in points
         // at the zoom before the one just set; the window is full screen.
@@ -3547,13 +3557,19 @@ mod tests {
             info.inner_rect = Some(screen);
             info.outer_rect = Some(screen);
             info.monitor_size = Some(px / (native * zoom));
-            let mut output = ctx.run_ui(input, |ui| app.draw(ui));
+            let mut output = ctx.run_ui(input, |ui| {
+                // The zoom each pass is drawn at.
+                zooms.push(ui.ctx().zoom_factor());
+                if discard && ui.ctx().current_pass_index() == 0 {
+                    ui.ctx().request_discard("test");
+                }
+                app.draw(ui);
+            });
             output.textures_delta.clear();
-            zooms.push(ctx.zoom_factor());
         }
         let last = zooms[zooms.len() - 1];
         assert!(
-            zooms[10..].iter().all(|z| *z == last),
+            zooms[20..].iter().all(|z| *z == last),
             "the zoom goes round: {zooms:?}"
         );
         // 7% of the height for the toolbar.
