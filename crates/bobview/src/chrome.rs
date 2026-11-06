@@ -228,6 +228,8 @@ pub struct Chrome {
     hold: bool,
     /// Size the window to the display next frame, Auto-size or not.
     fit: bool,
+    /// egui's zoom factor as last seen, before any change asked then.
+    seen_zoom: Option<f32>,
 }
 
 impl Chrome {
@@ -243,6 +245,7 @@ impl Chrome {
             first: true,
             hold: false,
             fit: false,
+            seen_zoom: None,
         }
     }
 
@@ -277,7 +280,14 @@ impl Chrome {
         let native = ctx.native_pixels_per_point().unwrap_or(1.0);
         let ppp = ctx.pixels_per_point();
         let (window, monitor) = ctx.input(|i| (i.content_rect().size(), i.viewport().monitor_size));
-        let screen_px = monitor.filter(|m| m.y > 0.0).unwrap_or(window).y * ppp;
+        // The window system measures the monitor in points at the zoom
+        // before the one just set (egui rescales only the window to that):
+        // taken at this one, a change of zoom would go round in a loop.
+        let seen = self.seen_zoom.replace(ctx.zoom_factor());
+        let screen_px = match monitor.filter(|m| m.y > 0.0) {
+            Some(m) => m.y * native * seen.unwrap_or(ctx.zoom_factor()),
+            None => window.y * ppp,
+        };
         let zoom = self
             .scale
             .zoom_factor(native, screen_px, self.toolbar, self.button);

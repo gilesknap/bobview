@@ -3525,6 +3525,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_controls_scale_settles_on_a_phone() {
+        // Landscape on a 2.75x phone, where the toolbar is cut to a share of
+        // the height. As egui-winit does, the monitor is measured in points
+        // at the zoom before the one just set; the window is full screen.
+        use eframe::egui::{self, Pos2, Rect, Vec2};
+        let (native, px) = (2.75, Vec2::new(2340.0, 1080.0));
+        let ctx = egui::Context::default();
+        let mut app = super::BobApp::new(&ctx, None, None, crate::chrome::UiScale::Auto);
+        let mut zooms = Vec::new();
+        for _ in 0..40 {
+            let zoom = ctx.zoom_factor();
+            let screen = Rect::from_min_size(Pos2::ZERO, px / (native * zoom));
+            let mut input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            let info = input.viewports.entry(egui::ViewportId::ROOT).or_default();
+            info.native_pixels_per_point = Some(native);
+            info.inner_rect = Some(screen);
+            info.outer_rect = Some(screen);
+            info.monitor_size = Some(px / (native * zoom));
+            let mut output = ctx.run_ui(input, |ui| app.draw(ui));
+            output.textures_delta.clear();
+            zooms.push(ctx.zoom_factor());
+        }
+        let last = zooms[zooms.len() - 1];
+        assert!(
+            zooms[10..].iter().all(|z| *z == last),
+            "the zoom goes round: {zooms:?}"
+        );
+        // 7% of the height for the toolbar.
+        let toolbar = app.chrome.toolbar * native * last;
+        assert!((toolbar - 0.07 * px.y).abs() < 2.0, "{toolbar} px");
+    }
+
     /// Records what a copy puts on the primary selection.
     struct FakePrimary(std::sync::Arc<parking_lot::Mutex<Vec<String>>>);
 
