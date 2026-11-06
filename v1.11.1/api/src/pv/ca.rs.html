@@ -1,0 +1,451 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/pv/src/ca.rs`."><title>ca.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-0c87338a.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="pv" data-themes="" data-resource-suffix="" data-rustdoc-version="1.99.1 (58cf8f9c3 2026-10-13)" data-channel="1.99.1" data-search-js="search-cf4fc35e.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">pv/</div>ca.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Channel Access backend using the pure-Rust `epics-ca-rs` client.
+<a href=#2 id=2 data-nosnippet>2</a>
+<a href=#3 id=3 data-nosnippet>3</a></span><span class="kw">use </span>std::sync::Arc;
+<a href=#4 id=4 data-nosnippet>4</a>
+<a href=#5 id=5 data-nosnippet>5</a><span class="kw">use </span>epics_base_rs::server::snapshot::{DbrClass, Snapshot};
+<a href=#6 id=6 data-nosnippet>6</a><span class="kw">use </span>epics_base_rs::types::DbFieldType;
+<a href=#7 id=7 data-nosnippet>7</a><span class="kw">use </span>epics_ca_rs::EpicsValue;
+<a href=#8 id=8 data-nosnippet>8</a><span class="kw">use </span>epics_ca_rs::client::{CaChannel, CaClient, ConnectionEvent};
+<a href=#9 id=9 data-nosnippet>9</a><span class="kw">use </span>epics_ca_rs::protocol::{DBE_ALARM, DBE_VALUE};
+<a href=#10 id=10 data-nosnippet>10</a><span class="kw">use </span>tokio::sync::broadcast;
+<a href=#11 id=11 data-nosnippet>11</a>
+<a href=#12 id=12 data-nosnippet>12</a><span class="kw">use crate</span>::{Put, PvState, Severity, Shared, Value, Writer};
+<a href=#13 id=13 data-nosnippet>13</a>
+<a href=#14 id=14 data-nosnippet>14</a><span class="doccomment">/// The `DBR_CHAR` request type, which a long string is written as, as
+<a href=#15 id=15 data-nosnippet>15</a>/// `caput -S` does; the server converts it to the field's own type.
+<a href=#16 id=16 data-nosnippet>16</a></span><span class="kw">const </span>DBR_CHAR: u16 = <span class="number">4</span>;
+<a href=#17 id=17 data-nosnippet>17</a>
+<a href=#18 id=18 data-nosnippet>18</a><span class="doccomment">/// Whether to write `put` as a long string to a PV whose native type and
+<a href=#19 id=19 data-nosnippet>19</a>/// element count are `native` and `count`, as Phoebus's CA layer decides
+<a href=#20 id=20 data-nosnippet>20</a>/// it for text: when the PV is a char array (`DBF_CHAR`, more than one
+<a href=#21 id=21 data-nosnippet>21</a>/// element). That depends on the channel, not on the value last read, which
+<a href=#22 id=22 data-nosnippet>22</a>/// for an array holding one element can arrive as a scalar.
+<a href=#23 id=23 data-nosnippet>23</a>///
+<a href=#24 id=24 data-nosnippet>24</a>/// With a string `format` all text is written so. Otherwise text that is a
+<a href=#25 id=25 data-nosnippet>25</a>/// list of numbers is written as numbers, as Phoebus parses a text entry's
+<a href=#26 id=26 data-nosnippet>26</a>/// text for an array; its list splits on commas only, and its numbers are
+<a href=#27 id=27 data-nosnippet>27</a>/// finite, so `1 2`, `nan` or `inf` are text, as in Phoebus.
+<a href=#28 id=28 data-nosnippet>28</a></span><span class="kw">fn </span>as_long_string(put: <span class="kw-2">&amp;</span>Put, native: <span class="prelude-ty">Option</span>&lt;DbFieldType&gt;, count: <span class="prelude-ty">Option</span>&lt;usize&gt;) -&gt; bool {
+<a href=#29 id=29 data-nosnippet>29</a>    <span class="kw">let </span>char_array = <span class="macro">matches!</span>(native, <span class="prelude-val">Some</span>(DbFieldType::Char | DbFieldType::UChar))
+<a href=#30 id=30 data-nosnippet>30</a>        &amp;&amp; count.is_some_and(|n| n &gt; <span class="number">1</span>);
+<a href=#31 id=31 data-nosnippet>31</a>    char_array &amp;&amp; (put.long_string || !is_number_list(<span class="kw-2">&amp;</span>put.text))
+<a href=#32 id=32 data-nosnippet>32</a>}
+<a href=#33 id=33 data-nosnippet>33</a>
+<a href=#34 id=34 data-nosnippet>34</a><span class="doccomment">/// Whether `text` is a list of finite numbers, `[1, 2]` or `1,2`, as
+<a href=#35 id=35 data-nosnippet>35</a>/// Phoebus's `FormatOptionHandler.parse` reads one for an array.
+<a href=#36 id=36 data-nosnippet>36</a></span><span class="kw">fn </span>is_number_list(text: <span class="kw-2">&amp;</span>str) -&gt; bool {
+<a href=#37 id=37 data-nosnippet>37</a>    <span class="kw">let </span>t = text.trim();
+<a href=#38 id=38 data-nosnippet>38</a>    <span class="kw">let </span>t = t.strip_prefix(<span class="string">'['</span>).unwrap_or(t);
+<a href=#39 id=39 data-nosnippet>39</a>    <span class="kw">let </span>t = t.strip_suffix(<span class="string">']'</span>).unwrap_or(t);
+<a href=#40 id=40 data-nosnippet>40</a>    t.split(<span class="string">','</span>)
+<a href=#41 id=41 data-nosnippet>41</a>        .all(|x| x.trim().parse::&lt;f64&gt;().is_ok_and(f64::is_finite))
+<a href=#42 id=42 data-nosnippet>42</a>}
+<a href=#43 id=43 data-nosnippet>43</a>
+<a href=#44 id=44 data-nosnippet>44</a><span class="doccomment">/// How long a write to a PV that has yet to connect waits for it.
+<a href=#45 id=45 data-nosnippet>45</a></span><span class="kw">const </span>WRITE_CONNECT: std::time::Duration = std::time::Duration::from_secs(<span class="number">5</span>);
+<a href=#46 id=46 data-nosnippet>46</a>
+<a href=#47 id=47 data-nosnippet>47</a><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">async fn </span>run(client: <span class="kw-2">&amp;</span>CaClient, pv: <span class="kw-2">&amp;</span>str, shared: Arc&lt;Shared&gt;) {
+<a href=#48 id=48 data-nosnippet>48</a>    <span class="kw">let </span>channel = client.create_channel(pv);
+<a href=#49 id=49 data-nosnippet>49</a>    <span class="kw">let </span><span class="kw-2">mut </span>events = channel.connection_events();
+<a href=#50 id=50 data-nosnippet>50</a>    <span class="kw">let </span>(tx, <span class="kw-2">mut </span>writes) = <span class="kw">crate</span>::write_queue();
+<a href=#51 id=51 data-nosnippet>51</a>    shared.set_writer(Writer::Channel(tx));
+<a href=#52 id=52 data-nosnippet>52</a>
+<a href=#53 id=53 data-nosnippet>53</a>    <span class="kw">let </span><span class="kw-2">mut </span>retry = std::time::Duration::from_millis(<span class="number">500</span>);
+<a href=#54 id=54 data-nosnippet>54</a>    <span class="kw">let </span><span class="kw-2">mut </span>monitor = <span class="kw">loop </span>{
+<a href=#55 id=55 data-nosnippet>55</a>        <span class="comment">// Value and alarm changes, as Phoebus asks for: not DBE_LOG, which
+<a href=#56 id=56 data-nosnippet>56</a>        // archive deadbands (ADEL) send, and the display does not need.
+<a href=#57 id=57 data-nosnippet>57</a>        </span><span class="kw">match </span>channel
+<a href=#58 id=58 data-nosnippet>58</a>            .subscribe_with_mask(<span class="number">0.0</span>, DBE_VALUE | DBE_ALARM)
+<a href=#59 id=59 data-nosnippet>59</a>            .<span class="kw">await
+<a href=#60 id=60 data-nosnippet>60</a>        </span>{
+<a href=#61 id=61 data-nosnippet>61</a>            <span class="prelude-val">Ok</span>(m) =&gt; <span class="kw">break </span>m,
+<a href=#62 id=62 data-nosnippet>62</a>            <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#63 id=63 data-nosnippet>63</a>                <span class="macro">log::warn!</span>(<span class="string">"{pv}: cannot subscribe, retrying in {retry:?}: {e}"</span>);
+<a href=#64 id=64 data-nosnippet>64</a>                shared.update(|s| s.error = <span class="prelude-val">Some</span>(e.to_string()));
+<a href=#65 id=65 data-nosnippet>65</a>                tokio::time::sleep(retry).<span class="kw">await</span>;
+<a href=#66 id=66 data-nosnippet>66</a>                retry = (retry * <span class="number">2</span>).min(std::time::Duration::from_secs(<span class="number">30</span>));
+<a href=#67 id=67 data-nosnippet>67</a>            }
+<a href=#68 id=68 data-nosnippet>68</a>        }
+<a href=#69 id=69 data-nosnippet>69</a>    };
+<a href=#70 id=70 data-nosnippet>70</a>
+<a href=#71 id=71 data-nosnippet>71</a>    <span class="comment">// When to read the value if no monitor update has come since the channel
+<a href=#72 id=72 data-nosnippet>72</a>    // connected; see `MONITOR_GRACE`.
+<a href=#73 id=73 data-nosnippet>73</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>fallback: <span class="prelude-ty">Option</span>&lt;tokio::time::Instant&gt; = <span class="prelude-val">None</span>;
+<a href=#74 id=74 data-nosnippet>74</a>    <span class="comment">// Whether the channel is connected, though its value may not have come.
+<a href=#75 id=75 data-nosnippet>75</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>linked = <span class="bool-val">false</span>;
+<a href=#76 id=76 data-nosnippet>76</a>    <span class="comment">// A write to a PV that has yet to connect, as a `write_pv` action to a
+<a href=#77 id=77 data-nosnippet>77</a>    // PV not connected in advance makes, and when it gives up waiting. The
+<a href=#78 id=78 data-nosnippet>78</a>    // writes behind it stay queued meanwhile, so they keep their order, and
+<a href=#79 id=79 data-nosnippet>79</a>    // the PV's events are still served.
+<a href=#80 id=80 data-nosnippet>80</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>waiting: <span class="prelude-ty">Option</span>&lt;(Put, tokio::time::Instant)&gt; = <span class="prelude-val">None</span>;
+<a href=#81 id=81 data-nosnippet>81</a>    <span class="kw">loop </span>{
+<a href=#82 id=82 data-nosnippet>82</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>((put, <span class="kw">_</span>)) = waiting.take_if(|<span class="kw">_</span>| shared.connected())
+<a href=#83 id=83 data-nosnippet>83</a>            &amp;&amp; shared.can_write(<span class="kw-2">&amp;</span>put.text)
+<a href=#84 id=84 data-nosnippet>84</a>        {
+<a href=#85 id=85 data-nosnippet>85</a>            write(<span class="kw-2">&amp;</span>channel, <span class="kw-2">&amp;</span>shared, <span class="kw-2">&amp;</span>put).<span class="kw">await</span>;
+<a href=#86 id=86 data-nosnippet>86</a>        }
+<a href=#87 id=87 data-nosnippet>87</a>        <span class="macro">tokio::select!</span> {
+<a href=#88 id=88 data-nosnippet>88</a>            event = events.recv() =&gt; <span class="kw">match </span>event {
+<a href=#89 id=89 data-nosnippet>89</a>                <span class="prelude-val">Ok</span>(ConnectionEvent::Connected) =&gt; {
+<a href=#90 id=90 data-nosnippet>90</a>                    linked = <span class="bool-val">true</span>;
+<a href=#91 id=91 data-nosnippet>91</a>                    fetch_metadata(<span class="kw-2">&amp;</span>channel, <span class="kw-2">&amp;</span>shared).<span class="kw">await</span>;
+<a href=#92 id=92 data-nosnippet>92</a>                    fallback = <span class="prelude-val">Some</span>(tokio::time::Instant::now() + MONITOR_GRACE);
+<a href=#93 id=93 data-nosnippet>93</a>                }
+<a href=#94 id=94 data-nosnippet>94</a>                <span class="prelude-val">Ok</span>(ConnectionEvent::Disconnected) =&gt; {
+<a href=#95 id=95 data-nosnippet>95</a>                    linked = <span class="bool-val">false</span>;
+<a href=#96 id=96 data-nosnippet>96</a>                    fallback = <span class="prelude-val">None</span>;
+<a href=#97 id=97 data-nosnippet>97</a>                    shared.update(|s| s.connected = <span class="bool-val">false</span>);
+<a href=#98 id=98 data-nosnippet>98</a>                }
+<a href=#99 id=99 data-nosnippet>99</a>                <span class="prelude-val">Ok</span>(ConnectionEvent::AccessRightsChanged { write, .. }) =&gt; {
+<a href=#100 id=100 data-nosnippet>100</a>                    shared.update(|s| { s.writable = write; s.writable_known = <span class="bool-val">true</span>; });
+<a href=#101 id=101 data-nosnippet>101</a>                }
+<a href=#102 id=102 data-nosnippet>102</a>                <span class="prelude-val">Ok</span>(<span class="kw">_</span>) | <span class="prelude-val">Err</span>(broadcast::error::RecvError::Lagged(<span class="kw">_</span>)) =&gt; {}
+<a href=#103 id=103 data-nosnippet>103</a>                <span class="prelude-val">Err</span>(broadcast::error::RecvError::Closed) =&gt; <span class="kw">return</span>,
+<a href=#104 id=104 data-nosnippet>104</a>            },
+<a href=#105 id=105 data-nosnippet>105</a>            <span class="kw">_ </span>= tokio::time::sleep_until(fallback.unwrap_or_else(tokio::time::Instant::now)),
+<a href=#106 id=106 data-nosnippet>106</a>                <span class="kw">if </span>fallback.is_some() =&gt;
+<a href=#107 id=107 data-nosnippet>107</a>            {
+<a href=#108 id=108 data-nosnippet>108</a>                fallback = <span class="prelude-val">None</span>;
+<a href=#109 id=109 data-nosnippet>109</a>                <span class="kw">if </span>!shared.connected() {
+<a href=#110 id=110 data-nosnippet>110</a>                    read_value(<span class="kw-2">&amp;</span>channel, <span class="kw-2">&amp;</span>shared).<span class="kw">await</span>;
+<a href=#111 id=111 data-nosnippet>111</a>                }
+<a href=#112 id=112 data-nosnippet>112</a>            }
+<a href=#113 id=113 data-nosnippet>113</a>            update = monitor.recv() =&gt; <span class="kw">match </span>update {
+<a href=#114 id=114 data-nosnippet>114</a>                <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(snap)) =&gt; {
+<a href=#115 id=115 data-nosnippet>115</a>                    fallback = <span class="prelude-val">None</span>;
+<a href=#116 id=116 data-nosnippet>116</a>                    apply(<span class="kw-2">&amp;</span>shared, <span class="kw-2">&amp;</span>channel, <span class="kw-2">&amp;</span>snap, <span class="bool-val">false</span>);
+<a href=#117 id=117 data-nosnippet>117</a>                }
+<a href=#118 id=118 data-nosnippet>118</a>                <span class="prelude-val">Some</span>(<span class="prelude-val">Err</span>(e)) =&gt; {
+<a href=#119 id=119 data-nosnippet>119</a>                    <span class="macro">log::debug!</span>(<span class="string">"{pv}: {e}"</span>);
+<a href=#120 id=120 data-nosnippet>120</a>                    shared.update(|s| s.connected = <span class="bool-val">false</span>);
+<a href=#121 id=121 data-nosnippet>121</a>                }
+<a href=#122 id=122 data-nosnippet>122</a>                <span class="prelude-val">None </span>=&gt; <span class="kw">return</span>,
+<a href=#123 id=123 data-nosnippet>123</a>            },
+<a href=#124 id=124 data-nosnippet>124</a>            <span class="prelude-val">Some</span>(put) = writes.recv(), <span class="kw">if </span>waiting.is_none() =&gt; {
+<a href=#125 id=125 data-nosnippet>125</a>                <span class="comment">// Refused at once if the PV has dropped.
+<a href=#126 id=126 data-nosnippet>126</a>                </span><span class="kw">if </span>!shared.can_write(<span class="kw-2">&amp;</span>put.text) {
+<a href=#127 id=127 data-nosnippet>127</a>                    <span class="kw">continue</span>;
+<a href=#128 id=128 data-nosnippet>128</a>                }
+<a href=#129 id=129 data-nosnippet>129</a>                <span class="kw">if </span>shared.connected() {
+<a href=#130 id=130 data-nosnippet>130</a>                    write(<span class="kw-2">&amp;</span>channel, <span class="kw-2">&amp;</span>shared, <span class="kw-2">&amp;</span>put).<span class="kw">await</span>;
+<a href=#131 id=131 data-nosnippet>131</a>                } <span class="kw">else </span>{
+<a href=#132 id=132 data-nosnippet>132</a>                    waiting = <span class="prelude-val">Some</span>((put, tokio::time::Instant::now() + WRITE_CONNECT));
+<a href=#133 id=133 data-nosnippet>133</a>                }
+<a href=#134 id=134 data-nosnippet>134</a>            }
+<a href=#135 id=135 data-nosnippet>135</a>            <span class="kw">_ </span>= tokio::time::sleep_until(
+<a href=#136 id=136 data-nosnippet>136</a>                waiting.as_ref().map_or_else(tokio::time::Instant::now, |w| w.<span class="number">1</span>)
+<a href=#137 id=137 data-nosnippet>137</a>            ), <span class="kw">if </span>waiting.is_some() =&gt; {
+<a href=#138 id=138 data-nosnippet>138</a>                <span class="kw">let </span><span class="prelude-val">Some</span>((put, <span class="kw">_</span>)) = waiting.take() <span class="kw">else </span>{ <span class="kw">continue </span>};
+<a href=#139 id=139 data-nosnippet>139</a>                <span class="kw">if </span>linked {
+<a href=#140 id=140 data-nosnippet>140</a>                    <span class="comment">// Connected, but no value has come yet: send it as text.
+<a href=#141 id=141 data-nosnippet>141</a>                    </span>write(<span class="kw-2">&amp;</span>channel, <span class="kw-2">&amp;</span>shared, <span class="kw-2">&amp;</span>put).<span class="kw">await</span>;
+<a href=#142 id=142 data-nosnippet>142</a>                    <span class="kw">continue</span>;
+<a href=#143 id=143 data-nosnippet>143</a>                }
+<a href=#144 id=144 data-nosnippet>144</a>                <span class="comment">// Those queued behind it fail too, rather than each waiting
+<a href=#145 id=145 data-nosnippet>145</a>                // in turn.
+<a href=#146 id=146 data-nosnippet>146</a>                </span><span class="kw">let </span>why = <span class="macro">format!</span>(<span class="string">"not connected after {}s"</span>, WRITE_CONNECT.as_secs());
+<a href=#147 id=147 data-nosnippet>147</a>                shared.write_result(<span class="kw-2">&amp;</span>put.text, <span class="prelude-val">Some</span>(why.clone()));
+<a href=#148 id=148 data-nosnippet>148</a>                <span class="kw">while let </span><span class="prelude-val">Ok</span>(put) = writes.try_recv() {
+<a href=#149 id=149 data-nosnippet>149</a>                    shared.write_result(<span class="kw-2">&amp;</span>put.text, <span class="prelude-val">Some</span>(why.clone()));
+<a href=#150 id=150 data-nosnippet>150</a>                }
+<a href=#151 id=151 data-nosnippet>151</a>            }
+<a href=#152 id=152 data-nosnippet>152</a>        }
+<a href=#153 id=153 data-nosnippet>153</a>    }
+<a href=#154 id=154 data-nosnippet>154</a>}
+<a href=#155 id=155 data-nosnippet>155</a>
+<a href=#156 id=156 data-nosnippet>156</a><span class="doccomment">/// Send one write to a connected channel and report how it went.
+<a href=#157 id=157 data-nosnippet>157</a></span><span class="kw">async fn </span>write(channel: <span class="kw-2">&amp;</span>CaChannel, shared: <span class="kw-2">&amp;</span>Shared, put: <span class="kw-2">&amp;</span>Put) {
+<a href=#158 id=158 data-nosnippet>158</a>    <span class="kw">let </span>text = <span class="kw-2">&amp;</span>put.text;
+<a href=#159 id=159 data-nosnippet>159</a>    <span class="kw">let </span>value = shared.snapshot().value;
+<a href=#160 id=160 data-nosnippet>160</a>    <span class="kw">let </span>native = channel.native_field_type().ok();
+<a href=#161 id=161 data-nosnippet>161</a>    <span class="kw">let </span>count = channel.element_count().ok().map(|n| n <span class="kw">as </span>usize);
+<a href=#162 id=162 data-nosnippet>162</a>    <span class="comment">// Plain CA_PROTO_WRITE, as Phoebus does: a put-callback on a busy
+<a href=#163 id=163 data-nosnippet>163</a>    // record (areaDetector Acquire) completes only when it returns to 0,
+<a href=#164 id=164 data-nosnippet>164</a>    // and the IOC queues any later put-callback on that record behind it,
+<a href=#165 id=165 data-nosnippet>165</a>    // so Stop could never reach it. Sent from the PV's task, not a spawned
+<a href=#166 id=166 data-nosnippet>166</a>    // one, so writes keep their order.
+<a href=#167 id=167 data-nosnippet>167</a>    </span><span class="kw">let </span>result = <span class="kw">if </span>as_long_string(put, native, count) {
+<a href=#168 id=168 data-nosnippet>168</a>        <span class="kw">let </span>bytes = <span class="kw">crate</span>::long_string_bytes(text, count);
+<a href=#169 id=169 data-nosnippet>169</a>        channel
+<a href=#170 id=170 data-nosnippet>170</a>            .put_as_dbr_nowait(DBR_CHAR, <span class="kw-2">&amp;</span>EpicsValue::CharArray(bytes.into()))
+<a href=#171 id=171 data-nosnippet>171</a>            .<span class="kw">await
+<a href=#172 id=172 data-nosnippet>172</a>    </span>} <span class="kw">else </span>{
+<a href=#173 id=173 data-nosnippet>173</a>        <span class="comment">// Arrays are typed as they are shown, `[1, 2]` or `["a", "b"]`; the
+<a href=#174 id=174 data-nosnippet>174</a>        // server converts each string element to the field type.
+<a href=#175 id=175 data-nosnippet>175</a>        </span><span class="kw">let </span>items: <span class="prelude-ty">Option</span>&lt;Vec&lt;String&gt;&gt; = <span class="kw">match </span>value {
+<a href=#176 id=176 data-nosnippet>176</a>            Value::DoubleArray(<span class="kw">_</span>) | Value::LongArray(<span class="kw">_</span>) =&gt; <span class="prelude-val">Some</span>(
+<a href=#177 id=177 data-nosnippet>177</a>                <span class="kw">crate</span>::split_array(text)
+<a href=#178 id=178 data-nosnippet>178</a>                    .into_iter()
+<a href=#179 id=179 data-nosnippet>179</a>                    .map(String::from)
+<a href=#180 id=180 data-nosnippet>180</a>                    .collect(),
+<a href=#181 id=181 data-nosnippet>181</a>            ),
+<a href=#182 id=182 data-nosnippet>182</a>            Value::StrArray(<span class="kw">_</span>) =&gt; <span class="prelude-val">Some</span>(<span class="kw">crate</span>::split_strings(text)),
+<a href=#183 id=183 data-nosnippet>183</a>            <span class="kw">_ </span>=&gt; <span class="prelude-val">None</span>,
+<a href=#184 id=184 data-nosnippet>184</a>        };
+<a href=#185 id=185 data-nosnippet>185</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(items) = items {
+<a href=#186 id=186 data-nosnippet>186</a>            channel.put_string_array_nowait(<span class="kw-2">&amp;</span>items).<span class="kw">await
+<a href=#187 id=187 data-nosnippet>187</a>        </span>} <span class="kw">else </span>{
+<a href=#188 id=188 data-nosnippet>188</a>            channel.put_string_nowait(text).<span class="kw">await
+<a href=#189 id=189 data-nosnippet>189</a>        </span>}
+<a href=#190 id=190 data-nosnippet>190</a>    };
+<a href=#191 id=191 data-nosnippet>191</a>    <span class="comment">// No reply comes to a plain write: `Ok` only says it was sent.
+<a href=#192 id=192 data-nosnippet>192</a>    </span>shared.write_sent(text, result.err().map(|e| e.to_string()));
+<a href=#193 id=193 data-nosnippet>193</a>}
+<a href=#194 id=194 data-nosnippet>194</a>
+<a href=#195 id=195 data-nosnippet>195</a><span class="doccomment">/// How long after a channel connects its monitor has to send the first
+<a href=#196 id=196 data-nosnippet>196</a>/// update before the value is read instead. The server sends one at once,
+<a href=#197 id=197 data-nosnippet>197</a>/// but epics-ca-rs leaves a subscription uninstalled when it cannot re-send
+<a href=#198 id=198 data-nosnippet>198</a>/// it on a reconnect (as C's `nciu::resubscribe` does), and the PV would
+<a href=#199 id=199 data-nosnippet>199</a>/// then never show as connected.
+<a href=#200 id=200 data-nosnippet>200</a></span><span class="kw">const </span>MONITOR_GRACE: std::time::Duration = std::time::Duration::from_secs(<span class="number">5</span>);
+<a href=#201 id=201 data-nosnippet>201</a>
+<a href=#202 id=202 data-nosnippet>202</a><span class="doccomment">/// Read the value, alarm and time stamp, for a monitor that has sent
+<a href=#203 id=203 data-nosnippet>203</a>/// nothing since the channel connected.
+<a href=#204 id=204 data-nosnippet>204</a></span><span class="kw">async fn </span>read_value(channel: <span class="kw-2">&amp;</span>CaChannel, shared: <span class="kw-2">&amp;</span>Shared) {
+<a href=#205 id=205 data-nosnippet>205</a>    <span class="kw">match </span>channel.get_with_metadata(DbrClass::Time).<span class="kw">await </span>{
+<a href=#206 id=206 data-nosnippet>206</a>        <span class="prelude-val">Ok</span>(snap) =&gt; {
+<a href=#207 id=207 data-nosnippet>207</a>            <span class="macro">log::warn!</span>(
+<a href=#208 id=208 data-nosnippet>208</a>                <span class="string">"{}: no monitor update since connecting; showing a read value"</span>,
+<a href=#209 id=209 data-nosnippet>209</a>                shared.name
+<a href=#210 id=210 data-nosnippet>210</a>            );
+<a href=#211 id=211 data-nosnippet>211</a>            apply(shared, channel, <span class="kw-2">&amp;</span>snap, <span class="bool-val">false</span>);
+<a href=#212 id=212 data-nosnippet>212</a>        }
+<a href=#213 id=213 data-nosnippet>213</a>        <span class="prelude-val">Err</span>(e) =&gt; <span class="macro">log::debug!</span>(<span class="string">"{}: value read failed: {e}"</span>, shared.name),
+<a href=#214 id=214 data-nosnippet>214</a>    }
+<a href=#215 id=215 data-nosnippet>215</a>}
+<a href=#216 id=216 data-nosnippet>216</a>
+<a href=#217 id=217 data-nosnippet>217</a><span class="doccomment">/// Read units, precision, limits and enum labels once per connection.
+<a href=#218 id=218 data-nosnippet>218</a></span><span class="kw">async fn </span>fetch_metadata(channel: <span class="kw-2">&amp;</span>CaChannel, shared: <span class="kw-2">&amp;</span>Shared) {
+<a href=#219 id=219 data-nosnippet>219</a>    <span class="kw">match </span>channel.get_with_metadata(DbrClass::Ctrl).<span class="kw">await </span>{
+<a href=#220 id=220 data-nosnippet>220</a>        <span class="prelude-val">Ok</span>(snap) =&gt; apply(shared, channel, <span class="kw-2">&amp;</span>snap, <span class="bool-val">true</span>),
+<a href=#221 id=221 data-nosnippet>221</a>        <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#222 id=222 data-nosnippet>222</a>            <span class="macro">log::debug!</span>(<span class="string">"metadata read failed: {e}"</span>);
+<a href=#223 id=223 data-nosnippet>223</a>            shared.update(|s| s.connected = <span class="bool-val">true</span>);
+<a href=#224 id=224 data-nosnippet>224</a>        }
+<a href=#225 id=225 data-nosnippet>225</a>    }
+<a href=#226 id=226 data-nosnippet>226</a>}
+<a href=#227 id=227 data-nosnippet>227</a>
+<a href=#228 id=228 data-nosnippet>228</a><span class="kw">fn </span>apply(shared: <span class="kw-2">&amp;</span>Shared, channel: <span class="kw-2">&amp;</span>CaChannel, snap: <span class="kw-2">&amp;</span>Snapshot, metadata: bool) {
+<a href=#229 id=229 data-nosnippet>229</a>    <span class="kw">let </span>value = (!metadata).then(|| {
+<a href=#230 id=230 data-nosnippet>230</a>        <span class="kw">let </span>value = convert(<span class="kw-2">&amp;</span>snap.value);
+<a href=#231 id=231 data-nosnippet>231</a>        <span class="comment">// An array holding one element arrives as a scalar; keep it an
+<a href=#232 id=232 data-nosnippet>232</a>        // array, as Phoebus does for a channel of more than one element, so
+<a href=#233 id=233 data-nosnippet>233</a>        // that it is shown and written as one.
+<a href=#234 id=234 data-nosnippet>234</a>        </span><span class="kw">if </span>channel.element_count().is_ok_and(|n| n &gt; <span class="number">1</span>) {
+<a href=#235 id=235 data-nosnippet>235</a>            into_array(value)
+<a href=#236 id=236 data-nosnippet>236</a>        } <span class="kw">else </span>{
+<a href=#237 id=237 data-nosnippet>237</a>            value
+<a href=#238 id=238 data-nosnippet>238</a>        }
+<a href=#239 id=239 data-nosnippet>239</a>    });
+<a href=#240 id=240 data-nosnippet>240</a>    shared.update(|s| apply_to(s, snap, value, metadata));
+<a href=#241 id=241 data-nosnippet>241</a>}
+<a href=#242 id=242 data-nosnippet>242</a>
+<a href=#243 id=243 data-nosnippet>243</a><span class="doccomment">/// Apply a monitor update, or the metadata read once per connection. A
+<a href=#244 id=244 data-nosnippet>244</a>/// DBR_CTRL read carries no time stamp (it decodes as 1970), and may land
+<a href=#245 id=245 data-nosnippet>245</a>/// after the first monitor update, so it sets only the metadata: units,
+<a href=#246 id=246 data-nosnippet>246</a>/// precision, limits and labels.
+<a href=#247 id=247 data-nosnippet>247</a></span><span class="kw">fn </span>apply_to(s: <span class="kw-2">&amp;mut </span>PvState, snap: <span class="kw-2">&amp;</span>Snapshot, value: <span class="prelude-ty">Option</span>&lt;Value&gt;, metadata: bool) {
+<a href=#248 id=248 data-nosnippet>248</a>    s.error = <span class="prelude-val">None</span>;
+<a href=#249 id=249 data-nosnippet>249</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(value) = value {
+<a href=#250 id=250 data-nosnippet>250</a>        s.connected = <span class="bool-val">true</span>;
+<a href=#251 id=251 data-nosnippet>251</a>        s.value = value;
+<a href=#252 id=252 data-nosnippet>252</a>        s.severity = Severity::from_epics(snap.alarm.severity);
+<a href=#253 id=253 data-nosnippet>253</a>        s.status = snap.alarm.status;
+<a href=#254 id=254 data-nosnippet>254</a>        s.timestamp = <span class="prelude-val">Some</span>(snap.timestamp.into());
+<a href=#255 id=255 data-nosnippet>255</a>    }
+<a href=#256 id=256 data-nosnippet>256</a>    <span class="kw">if </span>!metadata {
+<a href=#257 id=257 data-nosnippet>257</a>        <span class="kw">return</span>;
+<a href=#258 id=258 data-nosnippet>258</a>    }
+<a href=#259 id=259 data-nosnippet>259</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(d) = <span class="kw-2">&amp;</span>snap.display {
+<a href=#260 id=260 data-nosnippet>260</a>        s.units = d.units.as_str_lossy().into_owned();
+<a href=#261 id=261 data-nosnippet>261</a>        s.precision = <span class="prelude-val">Some</span>(d.precision <span class="kw">as </span>i32);
+<a href=#262 id=262 data-nosnippet>262</a>        s.display_range = <span class="prelude-val">Some</span>((d.lower_disp_limit, d.upper_disp_limit));
+<a href=#263 id=263 data-nosnippet>263</a>        s.alarm_range = <span class="prelude-val">Some</span>((d.lower_alarm_limit, d.upper_alarm_limit));
+<a href=#264 id=264 data-nosnippet>264</a>        s.warning_range = <span class="prelude-val">Some</span>((d.lower_warning_limit, d.upper_warning_limit));
+<a href=#265 id=265 data-nosnippet>265</a>    }
+<a href=#266 id=266 data-nosnippet>266</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(c) = <span class="kw-2">&amp;</span>snap.control {
+<a href=#267 id=267 data-nosnippet>267</a>        s.control_range = <span class="prelude-val">Some</span>((c.lower_ctrl_limit, c.upper_ctrl_limit));
+<a href=#268 id=268 data-nosnippet>268</a>    }
+<a href=#269 id=269 data-nosnippet>269</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(e) = <span class="kw-2">&amp;</span>snap.enums {
+<a href=#270 id=270 data-nosnippet>270</a>        s.labels = e
+<a href=#271 id=271 data-nosnippet>271</a>            .strings
+<a href=#272 id=272 data-nosnippet>272</a>            .iter()
+<a href=#273 id=273 data-nosnippet>273</a>            .map(|l| l.as_str_lossy().into_owned())
+<a href=#274 id=274 data-nosnippet>274</a>            .collect();
+<a href=#275 id=275 data-nosnippet>275</a>    }
+<a href=#276 id=276 data-nosnippet>276</a>}
+<a href=#277 id=277 data-nosnippet>277</a>
+<a href=#278 id=278 data-nosnippet>278</a><span class="doccomment">/// A scalar as an array of its one element; any other value as it is.
+<a href=#279 id=279 data-nosnippet>279</a></span><span class="kw">fn </span>into_array(value: Value) -&gt; Value {
+<a href=#280 id=280 data-nosnippet>280</a>    <span class="kw">match </span>value {
+<a href=#281 id=281 data-nosnippet>281</a>        Value::Double(x) =&gt; Value::DoubleArray(Arc::from([x])),
+<a href=#282 id=282 data-nosnippet>282</a>        Value::Long(x) =&gt; Value::LongArray(Arc::from([x])),
+<a href=#283 id=283 data-nosnippet>283</a>        Value::Enum(x) =&gt; Value::LongArray(Arc::from([x <span class="kw">as </span>i64])),
+<a href=#284 id=284 data-nosnippet>284</a>        Value::Str(x) =&gt; Value::StrArray(Arc::from([x])),
+<a href=#285 id=285 data-nosnippet>285</a>        other =&gt; other,
+<a href=#286 id=286 data-nosnippet>286</a>    }
+<a href=#287 id=287 data-nosnippet>287</a>}
+<a href=#288 id=288 data-nosnippet>288</a>
+<a href=#289 id=289 data-nosnippet>289</a><span class="kw">fn </span>convert(v: <span class="kw-2">&amp;</span>EpicsValue) -&gt; Value {
+<a href=#290 id=290 data-nosnippet>290</a>    <span class="kw">use </span>EpicsValue <span class="kw">as </span>E;
+<a href=#291 id=291 data-nosnippet>291</a>    <span class="kw">fn </span>longs&lt;T: Copy + Into&lt;i64&gt;&gt;(a: <span class="kw-2">&amp;</span>[T]) -&gt; Value {
+<a href=#292 id=292 data-nosnippet>292</a>        Value::LongArray(a.iter().map(|x| (<span class="kw-2">*</span>x).into()).collect())
+<a href=#293 id=293 data-nosnippet>293</a>    }
+<a href=#294 id=294 data-nosnippet>294</a>    <span class="kw">match </span>v {
+<a href=#295 id=295 data-nosnippet>295</a>        E::String(s) =&gt; Value::Str(s.as_str_lossy().into_owned()),
+<a href=#296 id=296 data-nosnippet>296</a>        E::Short(x) =&gt; Value::Long(<span class="kw-2">*</span>x <span class="kw">as </span>i64),
+<a href=#297 id=297 data-nosnippet>297</a>        E::Float(x) =&gt; Value::Double(<span class="kw-2">*</span>x <span class="kw">as </span>f64),
+<a href=#298 id=298 data-nosnippet>298</a>        E::Enum(x) =&gt; Value::Enum(<span class="kw-2">*</span>x),
+<a href=#299 id=299 data-nosnippet>299</a>        E::EnumWithChoices { index, .. } =&gt; Value::Enum(<span class="kw-2">*</span>index),
+<a href=#300 id=300 data-nosnippet>300</a>        E::Char(x) =&gt; Value::Long(<span class="kw-2">*</span>x <span class="kw">as </span>i64),
+<a href=#301 id=301 data-nosnippet>301</a>        E::Long(x) =&gt; Value::Long(<span class="kw-2">*</span>x <span class="kw">as </span>i64),
+<a href=#302 id=302 data-nosnippet>302</a>        E::Double(x) =&gt; Value::Double(<span class="kw-2">*</span>x),
+<a href=#303 id=303 data-nosnippet>303</a>        E::Int64(x) =&gt; Value::Long(<span class="kw-2">*</span>x),
+<a href=#304 id=304 data-nosnippet>304</a>        E::UInt64(x) =&gt; Value::from_u64(<span class="kw-2">*</span>x),
+<a href=#305 id=305 data-nosnippet>305</a>        E::UShort(x) =&gt; Value::Long(<span class="kw-2">*</span>x <span class="kw">as </span>i64),
+<a href=#306 id=306 data-nosnippet>306</a>        E::ULong(x) =&gt; Value::Long(<span class="kw-2">*</span>x <span class="kw">as </span>i64),
+<a href=#307 id=307 data-nosnippet>307</a>        E::UChar(x) =&gt; Value::Long(<span class="kw-2">*</span>x <span class="kw">as </span>i64),
+<a href=#308 id=308 data-nosnippet>308</a>        E::ShortArray(a) =&gt; longs(a),
+<a href=#309 id=309 data-nosnippet>309</a>        E::FloatArray(a) =&gt; Value::DoubleArray(a.iter().map(|x| <span class="kw-2">*</span>x <span class="kw">as </span>f64).collect()),
+<a href=#310 id=310 data-nosnippet>310</a>        E::EnumArray(a) =&gt; longs(a),
+<a href=#311 id=311 data-nosnippet>311</a>        E::DoubleArray(a) =&gt; Value::DoubleArray(Arc::from(a.as_slice())),
+<a href=#312 id=312 data-nosnippet>312</a>        E::LongArray(a) =&gt; longs(a),
+<a href=#313 id=313 data-nosnippet>313</a>        E::CharArray(a) =&gt; longs(a),
+<a href=#314 id=314 data-nosnippet>314</a>        E::Int64Array(a) =&gt; longs(a),
+<a href=#315 id=315 data-nosnippet>315</a>        E::UInt64Array(a) =&gt; Value::from_u64s(a),
+<a href=#316 id=316 data-nosnippet>316</a>        E::UShortArray(a) =&gt; longs(a),
+<a href=#317 id=317 data-nosnippet>317</a>        E::ULongArray(a) =&gt; longs(a),
+<a href=#318 id=318 data-nosnippet>318</a>        E::UCharArray(a) =&gt; longs(a),
+<a href=#319 id=319 data-nosnippet>319</a>        E::StringArray(a) =&gt; {
+<a href=#320 id=320 data-nosnippet>320</a>            Value::StrArray(a.iter().map(|s| s.as_str_lossy().into_owned()).collect())
+<a href=#321 id=321 data-nosnippet>321</a>        }
+<a href=#322 id=322 data-nosnippet>322</a>    }
+<a href=#323 id=323 data-nosnippet>323</a>}
+<a href=#324 id=324 data-nosnippet>324</a>
+<a href=#325 id=325 data-nosnippet>325</a><span class="attr">#[cfg(test)]
+<a href=#326 id=326 data-nosnippet>326</a></span><span class="kw">mod </span>tests {
+<a href=#327 id=327 data-nosnippet>327</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#328 id=328 data-nosnippet>328</a>    <span class="kw">use </span>epics_base_rs::server::snapshot::DisplayInfo;
+<a href=#329 id=329 data-nosnippet>329</a>    <span class="kw">use </span>std::time::{Duration, UNIX_EPOCH};
+<a href=#330 id=330 data-nosnippet>330</a>
+<a href=#331 id=331 data-nosnippet>331</a>    <span class="attr">#[test]
+<a href=#332 id=332 data-nosnippet>332</a>    </span><span class="kw">fn </span>metadata_after_a_monitor_update_keeps_its_value_and_time() {
+<a href=#333 id=333 data-nosnippet>333</a>        <span class="kw">let </span>stamp = UNIX_EPOCH + Duration::from_secs(<span class="number">1_700_000_000</span>);
+<a href=#334 id=334 data-nosnippet>334</a>        <span class="kw">let </span>monitor = Snapshot::new(EpicsValue::Double(<span class="number">5.0</span>), <span class="number">3</span>, <span class="number">1</span>, stamp);
+<a href=#335 id=335 data-nosnippet>335</a>        <span class="comment">// DBR_CTRL has no time: it decodes as 1970. Its value and alarm may
+<a href=#336 id=336 data-nosnippet>336</a>        // be older than the monitor's on a reconnect.
+<a href=#337 id=337 data-nosnippet>337</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>ctrl = Snapshot::new(EpicsValue::Double(<span class="number">0.0</span>), <span class="number">0</span>, <span class="number">0</span>, UNIX_EPOCH);
+<a href=#338 id=338 data-nosnippet>338</a>        ctrl.display = <span class="prelude-val">Some</span>(DisplayInfo {
+<a href=#339 id=339 data-nosnippet>339</a>            units: <span class="string">"mm"</span>.into(),
+<a href=#340 id=340 data-nosnippet>340</a>            precision: <span class="number">2</span>,
+<a href=#341 id=341 data-nosnippet>341</a>            upper_disp_limit: <span class="number">10.0</span>,
+<a href=#342 id=342 data-nosnippet>342</a>            ..Default::default()
+<a href=#343 id=343 data-nosnippet>343</a>        });
+<a href=#344 id=344 data-nosnippet>344</a>
+<a href=#345 id=345 data-nosnippet>345</a>        <span class="kw">let </span><span class="kw-2">mut </span>s = PvState::default();
+<a href=#346 id=346 data-nosnippet>346</a>        apply_to(<span class="kw-2">&amp;mut </span>s, <span class="kw-2">&amp;</span>monitor, <span class="prelude-val">Some</span>(convert(<span class="kw-2">&amp;</span>monitor.value)), <span class="bool-val">false</span>);
+<a href=#347 id=347 data-nosnippet>347</a>        apply_to(<span class="kw-2">&amp;mut </span>s, <span class="kw-2">&amp;</span>ctrl, <span class="prelude-val">None</span>, <span class="bool-val">true</span>);
+<a href=#348 id=348 data-nosnippet>348</a>        <span class="macro">assert!</span>(s.connected);
+<a href=#349 id=349 data-nosnippet>349</a>        <span class="macro">assert_eq!</span>(s.value, Value::Double(<span class="number">5.0</span>));
+<a href=#350 id=350 data-nosnippet>350</a>        <span class="macro">assert_eq!</span>(s.severity, Severity::Minor);
+<a href=#351 id=351 data-nosnippet>351</a>        <span class="macro">assert_eq!</span>(s.status, <span class="number">3</span>);
+<a href=#352 id=352 data-nosnippet>352</a>        <span class="macro">assert_eq!</span>(s.timestamp, <span class="prelude-val">Some</span>(stamp));
+<a href=#353 id=353 data-nosnippet>353</a>        <span class="macro">assert_eq!</span>(s.units, <span class="string">"mm"</span>);
+<a href=#354 id=354 data-nosnippet>354</a>        <span class="macro">assert_eq!</span>(s.precision, <span class="prelude-val">Some</span>(<span class="number">2</span>));
+<a href=#355 id=355 data-nosnippet>355</a>        <span class="macro">assert_eq!</span>(s.display_range, <span class="prelude-val">Some</span>((<span class="number">0.0</span>, <span class="number">10.0</span>)));
+<a href=#356 id=356 data-nosnippet>356</a>    }
+<a href=#357 id=357 data-nosnippet>357</a>
+<a href=#358 id=358 data-nosnippet>358</a>    <span class="attr">#[test]
+<a href=#359 id=359 data-nosnippet>359</a>    </span><span class="kw">fn </span>metadata_alone_does_not_make_a_value() {
+<a href=#360 id=360 data-nosnippet>360</a>        <span class="kw">let </span>ctrl = Snapshot::new(EpicsValue::Double(<span class="number">0.0</span>), <span class="number">0</span>, <span class="number">0</span>, UNIX_EPOCH);
+<a href=#361 id=361 data-nosnippet>361</a>        <span class="kw">let </span><span class="kw-2">mut </span>s = PvState::default();
+<a href=#362 id=362 data-nosnippet>362</a>        apply_to(<span class="kw-2">&amp;mut </span>s, <span class="kw-2">&amp;</span>ctrl, <span class="prelude-val">None</span>, <span class="bool-val">true</span>);
+<a href=#363 id=363 data-nosnippet>363</a>        <span class="macro">assert!</span>(
+<a href=#364 id=364 data-nosnippet>364</a>            !s.connected,
+<a href=#365 id=365 data-nosnippet>365</a>            <span class="string">"connected comes with the first monitor update"
+<a href=#366 id=366 data-nosnippet>366</a>        </span>);
+<a href=#367 id=367 data-nosnippet>367</a>        <span class="macro">assert_eq!</span>(s.value, Value::None);
+<a href=#368 id=368 data-nosnippet>368</a>        <span class="macro">assert_eq!</span>(s.timestamp, <span class="prelude-val">None</span>);
+<a href=#369 id=369 data-nosnippet>369</a>    }
+<a href=#370 id=370 data-nosnippet>370</a>
+<a href=#371 id=371 data-nosnippet>371</a>    <span class="attr">#[test]
+<a href=#372 id=372 data-nosnippet>372</a>    </span><span class="kw">fn </span>a_value_read_connects_a_pv_its_monitor_left_waiting() {
+<a href=#373 id=373 data-nosnippet>373</a>        <span class="comment">// The metadata read alone leaves it disconnected; the DBR_TIME read
+<a href=#374 id=374 data-nosnippet>374</a>        // `read_value` makes after `MONITOR_GRACE` is applied as a monitor
+<a href=#375 id=375 data-nosnippet>375</a>        // update, so the PV connects with its value, alarm and time stamp.
+<a href=#376 id=376 data-nosnippet>376</a>        </span><span class="kw">let </span>stamp = UNIX_EPOCH + Duration::from_secs(<span class="number">1_700_000_000</span>);
+<a href=#377 id=377 data-nosnippet>377</a>        <span class="kw">let </span>ctrl = Snapshot::new(EpicsValue::Double(<span class="number">0.0</span>), <span class="number">0</span>, <span class="number">0</span>, UNIX_EPOCH);
+<a href=#378 id=378 data-nosnippet>378</a>        <span class="kw">let </span>time = Snapshot::new(EpicsValue::Double(<span class="number">7.0</span>), <span class="number">3</span>, <span class="number">2</span>, stamp);
+<a href=#379 id=379 data-nosnippet>379</a>        <span class="kw">let </span><span class="kw-2">mut </span>s = PvState::default();
+<a href=#380 id=380 data-nosnippet>380</a>        apply_to(<span class="kw-2">&amp;mut </span>s, <span class="kw-2">&amp;</span>ctrl, <span class="prelude-val">None</span>, <span class="bool-val">true</span>);
+<a href=#381 id=381 data-nosnippet>381</a>        <span class="macro">assert!</span>(!s.connected);
+<a href=#382 id=382 data-nosnippet>382</a>        apply_to(<span class="kw-2">&amp;mut </span>s, <span class="kw-2">&amp;</span>time, <span class="prelude-val">Some</span>(convert(<span class="kw-2">&amp;</span>time.value)), <span class="bool-val">false</span>);
+<a href=#383 id=383 data-nosnippet>383</a>        <span class="macro">assert!</span>(s.connected);
+<a href=#384 id=384 data-nosnippet>384</a>        <span class="macro">assert_eq!</span>(s.value, Value::Double(<span class="number">7.0</span>));
+<a href=#385 id=385 data-nosnippet>385</a>        <span class="macro">assert_eq!</span>(s.severity, Severity::Major);
+<a href=#386 id=386 data-nosnippet>386</a>        <span class="macro">assert_eq!</span>(s.timestamp, <span class="prelude-val">Some</span>(stamp));
+<a href=#387 id=387 data-nosnippet>387</a>    }
+<a href=#388 id=388 data-nosnippet>388</a>
+<a href=#389 id=389 data-nosnippet>389</a>    <span class="kw">fn </span>put(text: <span class="kw-2">&amp;</span>str, long_string: bool) -&gt; Put {
+<a href=#390 id=390 data-nosnippet>390</a>        Put {
+<a href=#391 id=391 data-nosnippet>391</a>            text: text.into(),
+<a href=#392 id=392 data-nosnippet>392</a>            long_string,
+<a href=#393 id=393 data-nosnippet>393</a>        }
+<a href=#394 id=394 data-nosnippet>394</a>    }
+<a href=#395 id=395 data-nosnippet>395</a>
+<a href=#396 id=396 data-nosnippet>396</a>    <span class="attr">#[test]
+<a href=#397 id=397 data-nosnippet>397</a>    </span><span class="kw">fn </span>chooses_long_string_writes_as_phoebus_does() {
+<a href=#398 id=398 data-nosnippet>398</a>        <span class="kw">let </span>char_wf = (<span class="prelude-val">Some</span>(DbFieldType::Char), <span class="prelude-val">Some</span>(<span class="number">256</span>));
+<a href=#399 id=399 data-nosnippet>399</a>        <span class="kw">let </span>long_string = |text, string_format, (native, count)| {
+<a href=#400 id=400 data-nosnippet>400</a>            as_long_string(<span class="kw-2">&amp;</span>put(text, string_format), native, count)
+<a href=#401 id=401 data-nosnippet>401</a>        };
+<a href=#402 id=402 data-nosnippet>402</a>        <span class="comment">// A string format writes all text into a char array, whatever
+<a href=#403 id=403 data-nosnippet>403</a>        // value was last read (one element arrives as a scalar).
+<a href=#404 id=404 data-nosnippet>404</a>        </span><span class="macro">assert!</span>(long_string(<span class="string">"/data"</span>, <span class="bool-val">true</span>, char_wf));
+<a href=#405 id=405 data-nosnippet>405</a>        <span class="macro">assert!</span>(long_string(<span class="string">"1, 2"</span>, <span class="bool-val">true</span>, char_wf));
+<a href=#406 id=406 data-nosnippet>406</a>        <span class="macro">assert!</span>(long_string(<span class="string">""</span>, <span class="bool-val">true</span>, char_wf));
+<a href=#407 id=407 data-nosnippet>407</a>        <span class="comment">// ... but not into any other PV, which is written the usual way,
+<a href=#408 id=408 data-nosnippet>408</a>        // as Phoebus writes text to it.
+<a href=#409 id=409 data-nosnippet>409</a>        </span><span class="macro">assert!</span>(!long_string(
+<a href=#410 id=410 data-nosnippet>410</a>            <span class="string">"/data"</span>,
+<a href=#411 id=411 data-nosnippet>411</a>            <span class="bool-val">true</span>,
+<a href=#412 id=412 data-nosnippet>412</a>            (<span class="prelude-val">Some</span>(DbFieldType::Long), <span class="prelude-val">Some</span>(<span class="number">256</span>))
+<a href=#413 id=413 data-nosnippet>413</a>        ));
+<a href=#414 id=414 data-nosnippet>414</a>        <span class="macro">assert!</span>(!long_string(
+<a href=#415 id=415 data-nosnippet>415</a>            <span class="string">"/data"</span>,
+<a href=#416 id=416 data-nosnippet>416</a>            <span class="bool-val">true</span>,
+<a href=#417 id=417 data-nosnippet>417</a>            (<span class="prelude-val">Some</span>(DbFieldType::String), <span class="prelude-val">Some</span>(<span class="number">1</span>))
+<a href=#418 id=418 data-nosnippet>418</a>        ));
+<a href=#419 id=419 data-nosnippet>419</a>        <span class="macro">assert!</span>(!long_string(<span class="string">"x"</span>, <span class="bool-val">true</span>, (<span class="prelude-val">Some</span>(DbFieldType::Char), <span class="prelude-val">Some</span>(<span class="number">1</span>))));
+<a href=#420 id=420 data-nosnippet>420</a>        <span class="macro">assert!</span>(!long_string(<span class="string">"x"</span>, <span class="bool-val">true</span>, (<span class="prelude-val">None</span>, <span class="prelude-val">None</span>)));
+<a href=#421 id=421 data-nosnippet>421</a>        <span class="comment">// Otherwise text that is not a list of numbers, to a char array.
+<a href=#422 id=422 data-nosnippet>422</a>        </span><span class="macro">assert!</span>(long_string(<span class="string">"/data"</span>, <span class="bool-val">false</span>, char_wf));
+<a href=#423 id=423 data-nosnippet>423</a>        <span class="macro">assert!</span>(long_string(<span class="string">""</span>, <span class="bool-val">false</span>, char_wf));
+<a href=#424 id=424 data-nosnippet>424</a>        <span class="macro">assert!</span>(!long_string(<span class="string">"[1, 2]"</span>, <span class="bool-val">false</span>, char_wf));
+<a href=#425 id=425 data-nosnippet>425</a>        <span class="macro">assert!</span>(!long_string(<span class="string">"5"</span>, <span class="bool-val">false</span>, char_wf));
+<a href=#426 id=426 data-nosnippet>426</a>        <span class="comment">// Phoebus splits on commas only, and its numbers are finite.
+<a href=#427 id=427 data-nosnippet>427</a>        </span><span class="macro">assert!</span>(long_string(<span class="string">"1 2"</span>, <span class="bool-val">false</span>, char_wf));
+<a href=#428 id=428 data-nosnippet>428</a>        <span class="macro">assert!</span>(long_string(<span class="string">"nan"</span>, <span class="bool-val">false</span>, char_wf));
+<a href=#429 id=429 data-nosnippet>429</a>        <span class="macro">assert!</span>(long_string(<span class="string">"inf"</span>, <span class="bool-val">false</span>, char_wf));
+<a href=#430 id=430 data-nosnippet>430</a>        <span class="macro">assert!</span>(!long_string(
+<a href=#431 id=431 data-nosnippet>431</a>            <span class="string">"/data"</span>,
+<a href=#432 id=432 data-nosnippet>432</a>            <span class="bool-val">false</span>,
+<a href=#433 id=433 data-nosnippet>433</a>            (<span class="prelude-val">Some</span>(DbFieldType::Long), <span class="prelude-val">Some</span>(<span class="number">256</span>))
+<a href=#434 id=434 data-nosnippet>434</a>        ));
+<a href=#435 id=435 data-nosnippet>435</a>        <span class="macro">assert!</span>(!long_string(<span class="string">"x"</span>, <span class="bool-val">false</span>, (<span class="prelude-val">Some</span>(DbFieldType::Char), <span class="prelude-val">Some</span>(<span class="number">1</span>))));
+<a href=#436 id=436 data-nosnippet>436</a>    }
+<a href=#437 id=437 data-nosnippet>437</a>
+<a href=#438 id=438 data-nosnippet>438</a>    <span class="attr">#[test]
+<a href=#439 id=439 data-nosnippet>439</a>    </span><span class="kw">fn </span>unsigned_64_bit_values_never_wrap_negative() {
+<a href=#440 id=440 data-nosnippet>440</a>        <span class="macro">assert_eq!</span>(convert(<span class="kw-2">&amp;</span>EpicsValue::UInt64(<span class="number">7</span>)), Value::Long(<span class="number">7</span>));
+<a href=#441 id=441 data-nosnippet>441</a>        <span class="macro">assert_eq!</span>(
+<a href=#442 id=442 data-nosnippet>442</a>            convert(<span class="kw-2">&amp;</span>EpicsValue::UInt64(u64::MAX)),
+<a href=#443 id=443 data-nosnippet>443</a>            Value::Double(u64::MAX <span class="kw">as </span>f64)
+<a href=#444 id=444 data-nosnippet>444</a>        );
+<a href=#445 id=445 data-nosnippet>445</a>        <span class="macro">assert_eq!</span>(
+<a href=#446 id=446 data-nosnippet>446</a>            convert(<span class="kw-2">&amp;</span>EpicsValue::UInt64Array(<span class="macro">vec!</span>[<span class="number">1</span>, u64::MAX].into())),
+<a href=#447 id=447 data-nosnippet>447</a>            Value::DoubleArray(Arc::from([<span class="number">1.0</span>, u64::MAX <span class="kw">as </span>f64]))
+<a href=#448 id=448 data-nosnippet>448</a>        );
+<a href=#449 id=449 data-nosnippet>449</a>    }
+<a href=#450 id=450 data-nosnippet>450</a>}
+</code></pre></div></section></main></body></html>

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT","MAX_RECENT_ARCHIVERS","VERSION"],"enum":["Zoom","ZoomText"],"fn":["config_dir","delete","exists","file","is_false","label","layouts_dir","list","load","named","on_screen","project_of","save","startup","valid_name","write_atomic"],"struct":["Geometry","Layout","Settings","TrendLayout","WindowLayout"]};
